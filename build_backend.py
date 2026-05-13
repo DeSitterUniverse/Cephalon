@@ -19,7 +19,7 @@ def build():
         "pypdf"
     ]
     
-    onnx_cross = os.path.expanduser("~/cephalon-data/models/cross-encoder")
+    onnx_cross = os.path.expanduser("~/cephalon-data/models/reranker")
     onnx_embed = os.path.expanduser("~/cephalon-data/models/embedder")
     
     if not os.path.exists(onnx_cross) or not os.path.exists(onnx_embed):
@@ -34,7 +34,7 @@ def build():
         "--name", "engine",
         "--collect-all=llama_cpp",
         "--add-data", "AI_SYSTEM_AWARENESS.md;.",
-        "--add-data", f"{onnx_cross};onnx_models/cross-encoder",
+        "--add-data", f"{onnx_cross};onnx_models/reranker",
         "--add-data", f"{onnx_embed};onnx_models/embedder",
         "python/main.py"
     ]

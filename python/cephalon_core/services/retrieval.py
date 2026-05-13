@@ -1,0 +1,368 @@
+import hashlib
+import os
+import re
+import time
+import uuid
+from typing import Any
+
+import numpy as np
+
+from .. import storage
+from ..config import EMBEDDING_DIMENSION
+from ..schemas import RagSettings, SourceChunk
+from . import metrics
+
+RRF_K = 60
+
+
+def vector_table_name(app_state=None) -> str:
+    return storage.active_vector_table_name(app_state)
+
+
+def ensure_retrieval_index(app_state) -> dict[str, Any]:
+    table_name = vector_table_name(app_state)
+    try:
+        storage.ensure_chunks_fts(app_state.sqlite)
+        lexical_available = True
+        lexical_error = None
+    except Exception as exc:
+        lexical_available = False
+        lexical_error = str(exc)
+
+    dense_available = table_name in app_state.lance.table_names()
+    app_state.retrieval_index = {
+        "mode": "sqlite_fts5_rrf",
+        "dense_available": dense_available,
+        "lexical_available": lexical_available,
+        "table": table_name,
+        "error": lexical_error,
+    }
+    return app_state.retrieval_index
+
+
+def ensure_vector_table(app_state, rows: list[dict[str, Any]]):
+    table_name = vector_table_name(app_state)
+    if table_name in app_state.lance.table_names():
+        table = app_state.lance.open_table(table_name)
+        if rows:
+            table.add(rows)
+    else:
+        table = app_state.lance.create_table(table_name, data=rows, schema=storage.vector_schema(getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)))
+    ensure_retrieval_index(app_state)
+    return table
+
+
+async def get_embedding(app_state, text: str) -> list[float]:
+    if getattr(app_state, "embedder", None) is None:
+        raise RuntimeError("Embedding engine is not ready.")
+
+    fixed_length = getattr(app_state, "embedding_fixed_sequence_length", None)
+    tokenizer_kwargs = {"truncation": True, "return_tensors": "np"}
+    if fixed_length:
+        tokenizer_kwargs.update({"padding": "max_length", "max_length": int(fixed_length)})
+    else:
+        tokenizer_kwargs["padding"] = True
+    inputs = app_state.embed_tokenizer(text, **tokenizer_kwargs)
+    ort_inputs = {
+        "input_ids": inputs["input_ids"].astype(np.int64),
+        "attention_mask": inputs["attention_mask"].astype(np.int64),
+    }
+    if "token_type_ids" in inputs:
+        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
+
+    outs = app_state.embedder.run(None, ort_inputs)
+    output = np.asarray(outs[0])
+    if output.ndim == 2:
+        vec = output[0]
+    elif output.ndim == 3:
+        pooling = getattr(app_state, "embedding_pooling", "cls")
+        hidden = output[0]
+        if pooling == "last_token":
+            seq_len = int(ort_inputs["attention_mask"][0].sum()) - 1
+            vec = hidden[max(seq_len, 0)]
+        else:
+            vec = hidden[0]
+        norm = np.linalg.norm(vec)
+        vec = vec / norm if norm else vec
+    else:
+        raise RuntimeError(f"Unsupported embedding output rank: {output.ndim}")
+    expected_dim = getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)
+    if len(vec) != expected_dim:
+        raise RuntimeError(f"Embedding dimension mismatch: got {len(vec)}, expected {expected_dim}. Re-export ONNX models and rebuild the index.")
+    return vec.tolist()
+
+
+async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]) -> None:
+    memory_id = f"mem_{uuid.uuid4()}"
+    memory_text = f"[Past Conversation Context]: The user previously stated/asked: '{user_prompt}'"
+    lance_data = [{
+        "vector": vector,
+        "id": memory_id,
+        "doc_id": "core_memory",
+        "text": memory_text,
+        "chunk_index": -1,
+        **storage.active_embedding_metadata(app_state),
+        "chunk_length": len(memory_text),
+    }]
+    try:
+        ensure_vector_table(app_state, lance_data)
+    except Exception:
+        pass
+
+
+def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
+    if not results:
+        return []
+    pairs = [[prompt, res["text"]] for res in results]
+    inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
+    ort_inputs = {
+        "input_ids": inputs["input_ids"].astype(np.int64),
+        "attention_mask": inputs["attention_mask"].astype(np.int64),
+    }
+    if "token_type_ids" in inputs:
+        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
+    raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
+    scores = _reranker_scores(app_state, raw_scores)
+    for idx, res in enumerate(results):
+        res["rerank_score"] = float(scores[idx])
+        res["score"] = float(scores[idx])
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+def _reranker_scores(app_state, raw_scores: np.ndarray) -> np.ndarray:
+    mode = getattr(app_state, "reranker_score_mode", "auto")
+    if raw_scores.ndim == 2 and raw_scores.shape[1] == 2:
+        if mode == "logit_margin_0_minus_1":
+            return raw_scores[:, 0] - raw_scores[:, 1]
+        if mode == "logit_margin_1_minus_0":
+            return raw_scores[:, 1] - raw_scores[:, 0]
+        if mode == "class_0":
+            return raw_scores[:, 0]
+        if mode == "class_1":
+            return raw_scores[:, 1]
+        return raw_scores[:, 0] - raw_scores[:, 1]
+    if raw_scores.ndim == 2 and raw_scores.shape[1] > 1:
+        return raw_scores[:, -1]
+    return raw_scores.reshape(-1)
+
+
+def plan_subqueries(prompt: str) -> list[dict[str, str]]:
+    clean = " ".join(prompt.strip().split())
+    parts = [p.strip(" ,;") for p in re.split(r"\b(?:and|also|versus|vs\.?|compare)\b|[?;]", clean, flags=re.I) if p.strip(" ,;")]
+    if len(parts) <= 1:
+        return [{"id": "q1", "text": clean}]
+    return [{"id": f"q{idx}", "text": part} for idx, part in enumerate(parts[:5], start=1)]
+
+
+def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = None) -> list[SourceChunk]:
+    if not results:
+        return []
+    doc_ids = list({res["doc_id"] for res in results if res["doc_id"] != "core_memory"})
+    path_map = {}
+    if doc_ids:
+        placeholders = ",".join("?" * len(doc_ids))
+        rows = storage.fetchall(app_state.sqlite, f"SELECT id, path, display_name FROM documents WHERE id IN ({placeholders})", tuple(doc_ids))
+        path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
+
+    sources: list[SourceChunk] = []
+    for rank, res in enumerate(results, start=1):
+        doc_id = res["doc_id"]
+        doc_name = "Core Memory" if doc_id == "core_memory" else path_map.get(doc_id, "Unknown")
+        text = res["text"].strip()
+        sources.append(SourceChunk(
+            rank=rank,
+            doc_id=doc_id,
+            doc_name=doc_name,
+            chunk_id=res["id"],
+            score=float(res.get("score", 0)),
+            vector_score=float(res["_distance"]) if "_distance" in res and res["_distance"] is not None else None,
+            rerank_score=float(res.get("rerank_score", res.get("score", 0))),
+            lexical_score=float(res["lexical_score"]) if res.get("lexical_score") is not None else None,
+            fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
+            snippet=text[:500],
+            subquery_id=subquery_id,
+        ))
+    return sources
+
+
+async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str]:
+    table_name = vector_table_name(app_state)
+    index = ensure_retrieval_index(app_state)
+    dense_results = _dense_search(app_state, table_name, query_vector, settings.top_k)
+    lexical_results = _lexical_search(app_state, prompt, settings.top_k)
+    fused = _fuse_rrf(dense_results, lexical_results, settings.top_k)
+    modes = []
+    if dense_results:
+        modes.append("dense")
+    if lexical_results:
+        modes.append("sqlite_fts5")
+    if not index.get("lexical_available"):
+        modes.append("lexical_unavailable")
+    return fused, "+".join(modes) if modes else "empty"
+
+
+def _dense_search(app_state, table_name: str, query_vector: list[float], limit: int) -> list[dict]:
+    if table_name not in app_state.lance.table_names():
+        return []
+    table = app_state.lance.open_table(table_name)
+    try:
+        rows = table.search(query_vector, vector_column_name="vector").limit(limit).to_list()
+    except TypeError:
+        rows = table.search(query_vector).limit(limit).to_list()
+    results = []
+    for rank, row in enumerate(rows, start=1):
+        item = dict(row)
+        item["dense_rank"] = rank
+        item["vector_score"] = _distance_to_score(item.get("_distance"))
+        results.append(item)
+    return results
+
+
+def _lexical_search(app_state, prompt: str, limit: int) -> list[dict]:
+    storage.ensure_chunks_fts(app_state.sqlite)
+    rows = storage.fetchall(
+        app_state.sqlite,
+        """
+        SELECT
+            chunks.id,
+            chunks.doc_id,
+            chunks.chunk_index,
+            chunks.text,
+            chunks.chunk_length,
+            chunks.embedding_model_id,
+            chunks.embedding_dim,
+            bm25(chunks_fts) AS bm25_score
+        FROM chunks_fts
+        JOIN chunks ON chunks.id = chunks_fts.chunk_id
+        WHERE chunks_fts MATCH ?
+        ORDER BY bm25_score
+        LIMIT ?
+        """,
+        (_fts_query(prompt), limit),
+    )
+    results = []
+    for rank, row in enumerate(rows, start=1):
+        item = {key: row[key] for key in row.keys()}
+        item["lexical_rank"] = rank
+        item["lexical_score"] = float(item["bm25_score"])
+        item["score"] = -float(item["bm25_score"])
+        results.append(item)
+    return results
+
+
+def _fts_query(prompt: str) -> str:
+    terms = re.findall(r"[\w]+", prompt, flags=re.UNICODE)
+    if not terms:
+        return '""'
+    return " OR ".join(f'"{term}"' for term in terms[:24])
+
+
+def _fuse_rrf(dense_results: list[dict], lexical_results: list[dict], limit: int) -> list[dict]:
+    fused: dict[str, dict] = {}
+    for result in dense_results:
+        chunk_id = result["id"]
+        entry = fused.setdefault(chunk_id, dict(result))
+        entry["dense_rank"] = result["dense_rank"]
+        entry["vector_score"] = result.get("vector_score")
+        entry["fusion_score"] = entry.get("fusion_score", 0.0) + 1.0 / (RRF_K + result["dense_rank"])
+    for result in lexical_results:
+        chunk_id = result["id"]
+        entry = fused.setdefault(chunk_id, dict(result))
+        entry["lexical_rank"] = result["lexical_rank"]
+        entry["lexical_score"] = result.get("lexical_score")
+        entry["fusion_score"] = entry.get("fusion_score", 0.0) + 1.0 / (RRF_K + result["lexical_rank"])
+    for entry in fused.values():
+        entry["score"] = float(entry.get("fusion_score", 0.0))
+    return sorted(fused.values(), key=lambda item: item["score"], reverse=True)[:limit]
+
+
+def _distance_to_score(distance: Any) -> float | None:
+    if distance is None:
+        return None
+    try:
+        return 1.0 / (1.0 + float(distance))
+    except Exception:
+        return None
+
+
+def confidence_from_sources(sources: list[SourceChunk]) -> dict[str, Any]:
+    if not sources:
+        return {"confidence": 0.0, "uncertainty": "high", "no_answer": True, "reason": "No retrieved sources."}
+    scores = [source.rerank_score if source.rerank_score is not None else source.score for source in sources]
+    top = max(scores)
+    second = sorted(scores, reverse=True)[1] if len(scores) > 1 else top
+    spread = abs(top - second)
+    confidence = max(0.0, min(1.0, 0.45 + min(top, 1.0) * 0.35 + min(spread, 1.0) * 0.2))
+    no_answer = len(sources) < 1 or confidence < 0.35
+    return {
+        "confidence": round(confidence, 4),
+        "uncertainty": "high" if confidence < 0.45 else "medium" if confidence < 0.7 else "low",
+        "no_answer": no_answer,
+        "reason": "Closest matches are weak." if no_answer else "Retrieved sources are usable.",
+    }
+
+
+async def retrieve_context(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[str, list[SourceChunk], dict[str, Any]]:
+    started = time.perf_counter()
+    context_chunks: list[str] = []
+    all_sources: list[SourceChunk] = []
+    search_modes: list[str] = []
+    subqueries = plan_subqueries(prompt)
+
+    for subquery in subqueries:
+        vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
+        results, mode = await _search_once(app_state, subquery["text"], vector, settings)
+        search_modes.append(mode)
+        reranked = rerank(app_state, subquery["text"], results)[:settings.rerank_top_n]
+        sources = hydrate_sources(app_state, reranked, subquery["id"])
+        all_sources.extend(sources)
+        source_by_chunk = {source.chunk_id: source for source in sources}
+
+        for res in reranked:
+            source = source_by_chunk.get(res["id"])
+            if res["doc_id"] == "core_memory":
+                context_chunks.append(res["text"])
+            else:
+                label = source.doc_name if source else "Unknown"
+                context_chunks.append(f"[{subquery['id']} Source: {label} | Chunk: {res['id']}]\n{res['text']}")
+
+    _mark_sources_retrieved(app_state, all_sources)
+    confidence = confidence_from_sources(all_sources)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    try:
+        metrics_path = metrics.append_retrieval_event(app_state, {
+            "query_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "query_length": len(prompt),
+            "subquery_count": len(subqueries),
+            "retrieval_latency_ms": elapsed_ms,
+            "search_modes": search_modes,
+            "source_count": len(all_sources),
+            "scores": [source.score for source in all_sources],
+            "vector_scores": [source.vector_score for source in all_sources if source.vector_score is not None],
+            "lexical_scores": [source.lexical_score for source in all_sources if source.lexical_score is not None],
+            "fusion_scores": [source.fusion_score for source in all_sources if source.fusion_score is not None],
+            "rerank_scores": [source.rerank_score for source in all_sources if source.rerank_score is not None],
+            "confidence": confidence["confidence"],
+            "no_answer": confidence["no_answer"],
+        })
+    except OSError as error:
+        metrics_path = None
+        app_state.last_metrics_error = str(error)
+    meta = {
+        **confidence,
+        "subqueries": subqueries,
+        "retrieval_latency_ms": elapsed_ms,
+        "search_modes": search_modes,
+        "metrics_path": metrics_path,
+    }
+    return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
+
+
+def _mark_sources_retrieved(app_state, sources: list[SourceChunk]) -> None:
+    doc_ids = {source.doc_id for source in sources if source.doc_id != "core_memory"}
+    for doc_id in doc_ids:
+        storage.execute(
+            app_state.sqlite,
+            "UPDATE documents SET last_retrieved_at = ?, retrieval_count = COALESCE(retrieval_count, 0) + 1 WHERE id = ?",
+            (int(time.time()), doc_id),
+        )
