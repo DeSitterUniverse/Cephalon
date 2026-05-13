@@ -14,11 +14,11 @@ Cephalon is a local-first desktop document search and answer app. It runs a Taur
 
 - Chat models are `.gguf` LLM files in the model directory. Embedding and reranker GGUF files are not chat models and should not appear in the chat model picker.
 - Embedder: `jinaai/jina-embeddings-v5-text-small` ONNX, 1024 dimensions, retrieval adapter, normalized pooled output.
-- Reranker: `jinaai/jina-reranker-v3` ONNX with validated score metadata.
+- Reranker: `jinaai/jina-reranker-v3` ONNX with validated score metadata and corrected tokenizer regex loading.
 
 ## Retrieval Behavior
 
-Ingestion extracts text, imports text-like unsupported files when safe, chunks content, embeds chunks, writes SQLite metadata and FTS rows, and writes LanceDB dense vectors with embedding model id, dimension, content hash, chunk length, indexed timestamp, stale state, and extraction mode.
+Ingestion extracts text, imports unknown file types as text when binary guards allow it, chunks content, embeds chunks, writes SQLite metadata and FTS rows, and writes LanceDB dense vectors with embedding model id, dimension, content hash, chunk length, indexed timestamp, stale state, and extraction mode.
 
 Query flow: plan subqueries for compound questions, run LanceDB dense retrieval and SQLite FTS5 BM25 retrieval independently, fuse candidates with reciprocal rank fusion, rerank, stream typed events, generate grounded answer text, calculate confidence, and write numeric metrics. Structured stream events are `subquery`, `source`, `answer_meta`, `token`, `error`, and `done`.
 

@@ -59,7 +59,7 @@ python -m venv .venv-export
 .venv\Scripts\python.exe scripts\validate_onnx_models.py --mark
 ```
 
-The Jina v5 embedder uses a custom PEFT/Qwen architecture, so `export_onnx.py` exports it through Cephalon's direct Torch ONNX wrapper instead of Optimum's generic feature-extraction exporter. The exported embedder records a fixed ONNX sequence length in `cephalon_onnx_meta.json`; the backend pads to that length automatically. The Jina v3 reranker export records the validated scoring mode in the same metadata file and must pass `scripts\validate_onnx_models.py --mark` before startup.
+The Jina v5 embedder uses a custom PEFT/Qwen architecture, so `export_onnx.py` exports it through Cephalon's direct Torch ONNX wrapper instead of Optimum's generic feature-extraction exporter. The exported embedder records a fixed ONNX sequence length in `cephalon_onnx_meta.json`; the backend pads to that length automatically. The Jina v3 reranker export records the validated scoring mode in the same metadata file and must pass `scripts\validate_onnx_models.py --mark` before startup. Runtime tokenizer loading passes `fix_mistral_regex=True` so the Jina reranker tokenizer uses the corrected regex behavior.
 
 ## Run
 
@@ -131,7 +131,7 @@ $env:CEPHALON_TEST_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
 
 - `GET /health` returns startup diagnostics, Vulkan status, active embedding table, and retrieval index health.
 - `GET /settings` and `PUT /settings` manage RAG defaults, including context token cap and full-context mode.
-- `POST /ingest` queues a durable job and returns `job_id`; pass `force_text: true` to import text-like unsupported extensions.
+- `POST /ingest` queues a durable job and returns `job_id`; known document types use native extractors, and unknown file types are imported as text when binary guards allow it. Binary unknown files fail with a clear reason instead of being silently accepted.
 - `GET /jobs` lists recent jobs.
 - `GET /events` streams SSE job/document/settings updates.
 - `POST /query` streams typed SSE events: `subquery`, `source`, `answer_meta`, `token`, `error`, and `done`.
@@ -143,4 +143,4 @@ $env:CEPHALON_TEST_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
 - Runtime dependencies are pinned in `requirements.txt`; export-only dependencies are isolated in `requirements-export.txt`.
 - Retrieval uses SQLite FTS5 plus LanceDB dense vectors with reciprocal rank fusion. Tantivy is not part of the runtime path.
 - Jina embedding/reranker models are CC BY-NC 4.0. Keep license notices with packaged artifacts.
-- The release pipeline validates ONNX models before packaging. Unvalidated reranker exports stop startup with a clear error instead of falling back to a different model.
+- The release pipeline validates ONNX models before packaging. Unvalidated or mismatched embedder/reranker exports stop startup with a clear error instead of falling back to a different model.

@@ -51,29 +51,33 @@ def load_onnx_engines(app_state) -> str | None:
         else:
             return "Native ONNX models were not found. Run export_onnx.py once to generate them."
 
+    embed_meta = _read_model_meta(embed_path)
+    reranker_meta = _read_model_meta(onnx_path)
+    embed_error = _validate_embedder_meta(embed_meta)
+    if embed_error:
+        return embed_error
+
+    reranker_error = _validate_reranker_meta(reranker_meta)
+    if reranker_error:
+        return reranker_error
+
     if not _reranker_export_validated(onnx_path):
         return "Jina reranker ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
 
     try:
         opts = ort.SessionOptions()
         app_state.reranker = ort.InferenceSession(model_file, sess_options=opts)
-        app_state.tokenizer = AutoTokenizer.from_pretrained(onnx_path)
+        app_state.tokenizer = AutoTokenizer.from_pretrained(onnx_path, fix_mistral_regex=True)
         app_state.embedder = ort.InferenceSession(embed_file, sess_options=opts)
-        app_state.embed_tokenizer = AutoTokenizer.from_pretrained(embed_path)
+        app_state.embed_tokenizer = AutoTokenizer.from_pretrained(embed_path, fix_mistral_regex=True)
         output_shape = app_state.embedder.get_outputs()[0].shape
         output_dim = output_shape[-1] if output_shape and isinstance(output_shape[-1], int) else EMBEDDING_DIMENSION
         if output_dim != EMBEDDING_DIMENSION:
             return f"Embedding dimension mismatch: got {output_dim}, expected {EMBEDDING_DIMENSION}. Re-export Jina v5 small and rebuild indexes."
         app_state.embedding_dim = output_dim
-        meta_file = os.path.join(embed_path, "cephalon_onnx_meta.json")
-        embed_meta = {}
-        if os.path.exists(meta_file):
-            with open(meta_file, "r", encoding="utf-8") as f:
-                embed_meta = json.load(f)
         app_state.embedding_model_id = embed_meta.get("model_id") or EMBEDDING_MODEL_ID
         app_state.embedding_pooling = embed_meta.get("pooling", "embedding" if len(output_shape) == 2 else "cls")
         app_state.embedding_fixed_sequence_length = embed_meta.get("fixed_sequence_length")
-        reranker_meta = _read_model_meta(onnx_path)
         app_state.reranker_model_id = reranker_meta.get("model_id") or RERANKER_MODEL_ID
         app_state.reranker_score_mode = reranker_meta.get("score_mode", "auto")
         return None
@@ -98,9 +102,30 @@ def _read_model_meta(model_dir: str) -> dict:
         return {}
     try:
         with open(meta_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            meta = json.load(f)
+            return meta if isinstance(meta, dict) else {}
     except Exception:
         return {}
+
+
+def _validate_embedder_meta(meta: dict) -> str | None:
+    if meta.get("model_id") != EMBEDDING_MODEL_ID:
+        return f"Embedder model mismatch: expected {EMBEDDING_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
+    if int(meta.get("dimension") or 0) != EMBEDDING_DIMENSION:
+        return f"Embedder dimension mismatch: expected {EMBEDDING_DIMENSION}, got {meta.get('dimension') or 'unknown'}."
+    if meta.get("validated") is not True:
+        return "Jina embedder ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
+    return None
+
+
+def _validate_reranker_meta(meta: dict) -> str | None:
+    if meta.get("model_id") != RERANKER_MODEL_ID:
+        return f"Reranker model mismatch: expected {RERANKER_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
+    if meta.get("validated") is not True:
+        return "Jina reranker ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
+    if not meta.get("score_mode"):
+        return "Jina reranker validation metadata is missing score_mode. Run scripts\\validate_onnx_models.py --mark."
+    return None
 
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:

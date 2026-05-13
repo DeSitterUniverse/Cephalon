@@ -1,13 +1,11 @@
 import json
-import os
-
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from . import storage
 from .schemas import DocumentUpdateRequest, IngestRequest, QueryRequest, RagSettings, TagRequest
 from .services import generation, ingestion, metrics, models, retrieval
-from .validators import is_supported_file, normalize_existing_path, validate_document_id, validate_tag
+from .validators import normalize_existing_path, validate_document_id, validate_tag
 
 
 router = APIRouter()
@@ -148,8 +146,6 @@ async def delete_document(request: Request, doc_id: str):
 @router.post("/ingest")
 async def ingest_endpoint(request: Request, req: IngestRequest):
     target_path = normalize_existing_path(req.path)
-    if os.path.isfile(target_path) and not is_supported_file(target_path) and not req.force_text:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {os.path.splitext(target_path)[1] or 'none'}")
     job = await state(request).job_manager.enqueue_ingest(target_path, force_text=req.force_text)
     return {"job_id": job["id"], "status": job["status"], "message": "Ingestion queued."}
 

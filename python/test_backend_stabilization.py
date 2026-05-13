@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
 from cephalon_core.schemas import RagSettings
+from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
+from cephalon_core.app_factory import _read_model_meta
 from cephalon_core.services import metrics, retrieval
 from cephalon_core.services.ingestion import delete_document_rows, delete_document_vectors, process_single_file
 from cephalon_core.services.jobs import JobManager
@@ -172,6 +174,59 @@ def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
     assert result["status"] == "ready"
     assert row["extraction_mode"] == "text"
     assert row["embedding_dim"] == storage.active_embedding_metadata()["embedding_dim"]
+
+
+def test_unknown_text_file_imports_without_force_text(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "numbers.dataset"
+    file_path.write_text("quarter,revenue\nQ1,120\nQ2,143\n", encoding="utf-8")
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    row = storage.fetchone(state.sqlite, "SELECT status, extraction_mode FROM documents WHERE id = ?", (result["doc_id"],))
+
+    assert result["status"] == "ready"
+    assert row["status"] == "ready"
+    assert row["extraction_mode"] == "text"
+
+
+def test_unknown_binary_file_fails_with_clear_reason(tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "image.unknown"
+    file_path.write_bytes(b"\x00\x01\x02\x03\x00\xff")
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+
+    assert result["status"] == "failed"
+    assert "binary" in result["error"].lower()
+
+
+def test_jina_model_metadata_is_strict():
+    assert _validate_embedder_meta({
+        "model_id": "jinaai/jina-embeddings-v5-text-small",
+        "dimension": 1024,
+        "validated": True,
+    }) is None
+    assert _validate_reranker_meta({
+        "model_id": "jinaai/jina-reranker-v3",
+        "validated": True,
+        "score_mode": "logit_margin_0_minus_1",
+    }) is None
+
+    assert "Embedder model mismatch" in _validate_embedder_meta({"model_id": "other", "dimension": 1024, "validated": True})
+    assert "score_mode" in _validate_reranker_meta({"model_id": "jinaai/jina-reranker-v3", "validated": True})
+
+
+def test_model_metadata_reader_rejects_non_object_json(tmp_path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "cephalon_onnx_meta.json").write_text("null", encoding="utf-8")
+
+    assert _read_model_meta(str(model_dir)) == {}
 
 
 def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):

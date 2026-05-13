@@ -94,18 +94,20 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
                 text_runs.append("\t".join(row))
         return "\n".join(text_runs), "native"
 
+    if not looks_like_text(path):
+        raise ValueError("Unknown file type appears to be binary and cannot be safely imported as text.")
     return read_text_fallback(path), "text"
 
 
 def collect_supported_files(path: str, force_text: bool = False) -> list[str]:
     if os.path.isfile(path):
-        return [path] if is_supported_file(path) or (force_text and looks_like_text(path)) else []
+        return [path]
 
     files: list[str] = []
     for root, _, names in os.walk(path):
         for name in names:
             full_path = os.path.join(root, name)
-            if is_supported_file(full_path) or (force_text and looks_like_text(full_path)):
+            if is_supported_file(full_path) or looks_like_text(full_path) or force_text:
                 files.append(full_path)
     return sorted(files)
 

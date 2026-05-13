@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 def validate_embedder(model_dir: Path) -> dict:
     meta_path = model_dir / "cephalon_onnx_meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, fix_mistral_regex=True)
     session = ort.InferenceSession(str(model_dir / "model.onnx"))
     fixed_length = meta.get("fixed_sequence_length")
     tokenizer_kwargs = {"truncation": True, "return_tensors": "np"}
@@ -32,7 +32,7 @@ def validate_embedder(model_dir: Path) -> dict:
 
 
 def validate_reranker(model_dir: Path) -> dict:
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, fix_mistral_regex=True)
     session = ort.InferenceSession(str(model_dir / "model.onnx"))
     pairs = [
         ["breathing exercise", "The 4-7-8 breathing method is a breathing exercise."],
@@ -98,7 +98,12 @@ def main() -> None:
     }
     print(json.dumps(results, indent=2))
     if args.mark and results["embedder"]:
-        mark_validated(root / "embedder", "shape_norm", results["embedder"]["dimension"] in {768, 1024})
+        mark_validated(
+            root / "embedder",
+            "shape_norm",
+            results["embedder"]["dimension"] == 1024 and 0.99 <= results["embedder"]["norm"] <= 1.01,
+            {"dimension": results["embedder"]["dimension"]},
+        )
     if args.mark and results["reranker"]:
         mark_validated(
             root / "reranker",
