@@ -1,0 +1,7 @@
+optimum[onnxruntime]==2.1.0
+transformers==4.57.3
+torch==2.10.0
+onnxruntime==1.26.0
+onnxscript==0.5.7
+numpy==2.4.4
+peft==0.18.1
