@@ -20,6 +20,25 @@ def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
         raise HTTPException(status_code=409, detail="Load the selected GGUF model before querying.")
 
 
+def _settings_for_reasoning_mode(settings: RagSettings, mode: str) -> RagSettings:
+    clean = (mode or "balanced").lower()
+    if clean == "fast":
+        return settings.model_copy(update={
+            "top_k": min(settings.top_k, 12),
+            "rerank_top_n": min(settings.rerank_top_n, 3),
+            "max_tokens": min(settings.max_tokens, 512),
+            "temperature": min(settings.temperature, 0.35),
+        })
+    if clean == "deep":
+        return settings.model_copy(update={
+            "top_k": max(settings.top_k, 28),
+            "rerank_top_n": max(settings.rerank_top_n, 6),
+            "max_tokens": max(settings.max_tokens, 1024),
+            "temperature": max(settings.temperature, 0.55),
+        })
+    return settings
+
+
 @router.get("/health")
 def health(request: Request):
     app_state = state(request)
@@ -48,8 +67,10 @@ def health(request: Request):
 @router.get("/models")
 def get_models(request: Request):
     app_state = state(request)
+    inventory = models.model_inventory(app_state.settings)
     return {
-        "models": models.list_models(app_state.settings),
+        "models": inventory["chat_models"],
+        "auxiliary_gguf": inventory["auxiliary_gguf"],
         "model_dir": app_state.settings.model_dir,
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
@@ -178,6 +199,40 @@ def list_jobs(request: Request):
     return {"jobs": state(request).job_manager.list_jobs()}
 
 
+@router.get("/conversations")
+def list_conversations(request: Request):
+    return {"conversations": storage.list_conversations(state(request).sqlite)}
+
+
+@router.post("/conversations")
+def create_conversation(request: Request):
+    return storage.create_conversation(state(request).sqlite)
+
+
+@router.get("/conversations/{conversation_id}")
+def get_conversation(request: Request, conversation_id: str):
+    payload = storage.get_conversation(state(request).sqlite, conversation_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return payload
+
+
+@router.patch("/conversations/{conversation_id}")
+async def rename_conversation(request: Request, conversation_id: str, body: dict):
+    payload = storage.rename_conversation(state(request).sqlite, conversation_id, str(body.get("title", "")))
+    if not payload:
+        raise HTTPException(status_code=400, detail="Conversation title is required.")
+    await state(request).event_bus.publish("conversation", {"id": conversation_id, "status": "renamed"})
+    return payload
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(request: Request, conversation_id: str):
+    storage.archive_conversation(state(request).sqlite, conversation_id)
+    await state(request).event_bus.publish("conversation", {"id": conversation_id, "status": "deleted"})
+    return {"status": "success"}
+
+
 @router.get("/events")
 async def events(request: Request):
     return StreamingResponse(state(request).event_bus.stream(), media_type="text/event-stream")
@@ -203,21 +258,61 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     if not req.model.strip():
         raise HTTPException(status_code=400, detail="Select a local GGUF model before querying.")
 
-    rag_settings = req.settings or storage.get_rag_settings(app_state.sqlite)
+    rag_settings = _settings_for_reasoning_mode(req.settings or storage.get_rag_settings(app_state.sqlite), req.reasoning_mode)
     _ensure_query_model_loaded(app_state, req.model)
 
     query_vector = await retrieval.get_embedding(app_state, req.prompt)
     context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
+    query_meta["reasoning_mode"] = req.reasoning_mode
+    conversation_id = req.conversation_id
+    if not conversation_id:
+        title = req.prompt.strip().replace("\n", " ")[:80]
+        conversation_id = storage.create_conversation(app_state.sqlite, title)["id"]
+    user_message = storage.append_message(
+        app_state.sqlite,
+        conversation_id,
+        "user",
+        req.prompt,
+        model=req.model,
+        settings={**rag_settings.model_dump(), "reasoning_mode": req.reasoning_mode},
+    )
 
     def response_stream():
+        answer_parts: list[str] = []
         for subquery in query_meta["subqueries"]:
             yield _sse("subquery", subquery)
+        yield _sse("conversation", {"conversation_id": conversation_id, "user_message_id": user_message["id"]})
         for source in sources:
             yield _sse("source", source.model_dump())
         yield _sse("answer_meta", {key: value for key, value in query_meta.items() if key != "subqueries"})
         try:
             for token in generation.stream_llama(app_state, req.prompt, context, req.history, rag_settings, query_meta):
+                answer_parts.append(token)
                 yield _sse("token", {"text": token})
+            answer_text = "".join(answer_parts)
+            quality = metrics.estimate_answer_quality(req.prompt, answer_text, context)
+            query_meta.update(quality)
+            try:
+                metrics.append_retrieval_event(app_state, {
+                    "event_type": "answer_quality",
+                    "conversation_id": conversation_id,
+                    "model": req.model,
+                    **quality,
+                })
+            except OSError as error:
+                app_state.last_metrics_error = str(error)
+            yield _sse("answer_meta", quality)
+            assistant_message = storage.append_message(
+                app_state.sqlite,
+                conversation_id,
+                "assistant",
+                answer_text,
+                model=req.model,
+                settings={**rag_settings.model_dump(), "reasoning_mode": req.reasoning_mode},
+                meta=query_meta,
+            )
+            storage.save_message_sources(app_state.sqlite, assistant_message["id"], [source.model_dump() for source in sources])
+            yield _sse("message", {"conversation_id": conversation_id, "assistant_message_id": assistant_message["id"]})
             yield _sse("done", {"ok": True})
         except Exception as exc:
             yield _sse("error", {"message": str(exc)})

@@ -4,9 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   addDocumentTag,
+  createConversation,
+  deleteConversation,
   deleteDocument,
   deleteDocumentTag,
   exportMetrics,
+  getConversation,
+  getConversations,
   getDocument,
   getDocuments,
   getJobs,
@@ -23,6 +27,7 @@ import {
   type RagSettings,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
+import { ChatHistoryPanel } from "./components/chat/ChatHistoryPanel";
 import { JobsPanel } from "./components/jobs/JobsPanel";
 import { LibraryPanel } from "./components/library/LibraryPanel";
 import { DocumentDetails } from "./components/library/DocumentDetails";
@@ -51,6 +56,8 @@ export default function App() {
   const selectedModel = useUiStore(state => state.selectedModel);
   const setSelectedModel = useUiStore(state => state.setSelectedModel);
   const selectedDocumentId = useUiStore(state => state.selectedDocumentId);
+  const selectedConversationId = useUiStore(state => state.selectedConversationId);
+  const setSelectedConversationId = useUiStore(state => state.setSelectedConversationId);
   const selectedSources = useUiStore(state => state.selectedSources);
   const rightPanel = useUiStore(state => state.rightPanel);
 
@@ -59,11 +66,17 @@ export default function App() {
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady });
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: getJobs, enabled: bootReady });
+  const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
   const documentQuery = useQuery({
     queryKey: ["document", selectedDocumentId],
     queryFn: () => getDocument(selectedDocumentId as string),
     enabled: Boolean(selectedDocumentId),
+  });
+  const conversationQuery = useQuery({
+    queryKey: ["conversation", selectedConversationId],
+    queryFn: () => getConversation(selectedConversationId as string),
+    enabled: Boolean(selectedConversationId),
   });
 
   const ingestMutation = useMutation({
@@ -110,6 +123,22 @@ export default function App() {
     mutationFn: exportMetrics,
     onSuccess: data => setToast(data.status === "success" && data.path ? `Metrics exported: ${data.path}` : `Metrics export failed: ${data.error || "metrics directory is unavailable"}`),
     onError: error => setToast(error instanceof Error ? error.message : "Failed to export metrics."),
+  });
+
+  const newConversationMutation = useMutation({
+    mutationFn: createConversation,
+    onSuccess: data => {
+      setSelectedConversationId(data.id);
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    },
+  });
+
+  const deleteConversationMutation = useMutation({
+    mutationFn: deleteConversation,
+    onSuccess: (_data, id) => {
+      if (selectedConversationId === id) setSelectedConversationId(null);
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    },
   });
 
   useEffect(() => {
@@ -194,6 +223,16 @@ export default function App() {
     ? <SettingsPanel models={modelsQuery.data?.models || []} selectedModel={selectedModel} setSelectedModel={setSelectedModel} settings={settingsQuery.data} updateSettings={(value: RagSettings) => settingsMutation.mutate(value)} onExportMetrics={() => metricsMutation.mutate()} />
     : rightPanel === "sources"
       ? <SourcesPanel sources={selectedSources} />
+      : rightPanel === "history"
+        ? (
+          <ChatHistoryPanel
+            conversations={conversationsQuery.data?.conversations || []}
+            selectedId={selectedConversationId}
+            onSelect={setSelectedConversationId}
+            onNew={() => newConversationMutation.mutate()}
+            onDelete={(id) => deleteConversationMutation.mutate(id)}
+          />
+        )
       : rightPanel === "document"
         ? (
           <DocumentDetails
@@ -252,13 +291,25 @@ export default function App() {
             onReindex={(doc) => reindexMutation.mutate(doc)}
           />
         }
-        center={<ChatPanel selectedModel={selectedModel} modelReady={modelReady} settings={settingsQuery.data} />}
+        center={(
+          <ChatPanel
+            selectedModel={selectedModel}
+            modelReady={modelReady}
+            settings={settingsQuery.data}
+            conversation={conversationQuery.data}
+            selectedConversationId={selectedConversationId}
+            onConversationSelected={(id) => {
+              setSelectedConversationId(id);
+              queryClient.invalidateQueries({ queryKey: ["conversations"] });
+            }}
+          />
+        )}
         modelControl={(
           <div className={modelReady ? "top-model-picker ready" : "top-model-picker"} title="Local GGUF model">
             <label>
               <span>Model</span>
               <select value={selectedModel} onChange={event => setSelectedModel(event.target.value)} disabled={modelsQuery.isLoading || loadModelMutation.isPending}>
-                <option value="">No GGUF model found</option>
+                <option value="">{modelsQuery.isLoading ? "Scanning models..." : (modelsQuery.data?.models?.length ? "Select model" : "No chat GGUF models found")}</option>
                 {(modelsQuery.data?.models || []).map(model => <option key={model} value={model}>{model}</option>)}
               </select>
             </label>

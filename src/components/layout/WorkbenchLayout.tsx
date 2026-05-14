@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { Circle, FileText, ListChecks, Settings } from "lucide-react";
+import { Circle, FileText, ListChecks, MessageSquareText, SlidersHorizontal } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
 
@@ -22,10 +23,19 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
       : "Connecting to live updates; cached data refreshes periodically while reconnecting.";
 
   return (
-    <div className="workbench">
-      <aside className="panel panel-left">{left}</aside>
-      <main className="workspace">
-        <header className="topbar">
+    <div className="app-frame">
+      <div className="app-titlebar" data-tauri-drag-region>
+        <div className="window-title" data-tauri-drag-region>Cephalon</div>
+        <div className="window-controls">
+          <button type="button" onClick={() => getCurrentWindow().minimize()} title="Minimize">_</button>
+          <button type="button" onClick={() => getCurrentWindow().toggleMaximize()} title="Maximize">□</button>
+          <button type="button" onClick={() => getCurrentWindow().close()} title="Close">×</button>
+        </div>
+      </div>
+      <div className="workbench">
+        <aside className="panel panel-left">{left}</aside>
+        <main className="workspace">
+          <header className="topbar">
           <div className="brand-block">
             <img src={logoUrl} alt="" />
             <div>
@@ -38,21 +48,25 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
             <button className={rightPanel === "jobs" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("jobs")} title="Jobs">
               <ListChecks size={16} />
             </button>
+            <button className={rightPanel === "history" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("history")} title="Chat history">
+              <MessageSquareText size={16} />
+            </button>
             <button className={rightPanel === "document" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("document")} title="Document details">
               <FileText size={16} />
             </button>
             <button className={rightPanel === "settings" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("settings")} title="Search and model controls">
-              <Settings size={16} />
+              <SlidersHorizontal size={16} />
             </button>
             <span className={eventStatus === "connected" ? "status-pill ok" : eventStatus === "offline" ? "status-pill danger" : "status-pill warn"} title={liveTitle}>
               <Circle size={9} fill="currentColor" />
               {liveLabel}
             </span>
           </div>
-        </header>
-        {center}
-      </main>
-      <aside className="panel panel-right">{right}</aside>
+          </header>
+          {center}
+        </main>
+        <aside className="panel panel-right">{right}</aside>
+      </div>
     </div>
   );
 }

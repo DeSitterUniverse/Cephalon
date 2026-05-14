@@ -8,11 +8,26 @@ from fastapi import HTTPException
 
 
 def _configure_llama_dll_search() -> None:
-    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR")
+    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR") or _discover_packaged_llama_dll_dir()
     if dll_dir and os.path.isdir(dll_dir):
         os.environ.setdefault("LLAMA_CPP_LIB_PATH", dll_dir)
+        os.environ.setdefault("CEPHALON_LLAMA_DLL_DIR", dll_dir)
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(dll_dir)
+
+
+def _discover_packaged_llama_dll_dir() -> str | None:
+    module_path = Path(__file__).resolve()
+    repo_root = module_path.parents[3]
+    candidates = [
+        repo_root / "src-tauri" / "backend" / "engine" / "_internal" / "llama_cpp" / "lib",
+        repo_root / "src-tauri" / "target" / "debug" / "backend" / "engine" / "_internal" / "llama_cpp" / "lib",
+        repo_root / "src-tauri" / "target" / "release" / "backend" / "engine" / "_internal" / "llama_cpp" / "lib",
+    ]
+    for candidate in candidates:
+        if (candidate / "ggml-vulkan.dll").exists():
+            return str(candidate)
+    return None
 
 
 _configure_llama_dll_search()
@@ -54,11 +69,21 @@ def llama_backend_info() -> dict:
 
 
 def list_models(settings: Settings) -> list[str]:
+    return model_inventory(settings)["chat_models"]
+
+
+def model_inventory(settings: Settings) -> dict[str, list[str]]:
     os.makedirs(settings.model_dir, exist_ok=True)
-    return sorted(
-        entry.name for entry in os.scandir(settings.model_dir)
-        if entry.is_file() and entry.name.lower().endswith(".gguf") and _looks_like_chat_model(entry.name)
-    )
+    chat_models: list[str] = []
+    auxiliary_gguf: list[str] = []
+    for entry in os.scandir(settings.model_dir):
+        if not entry.is_file() or not entry.name.lower().endswith(".gguf"):
+            continue
+        if _looks_like_chat_model(entry.name):
+            chat_models.append(entry.name)
+        else:
+            auxiliary_gguf.append(entry.name)
+    return {"chat_models": sorted(chat_models), "auxiliary_gguf": sorted(auxiliary_gguf)}
 
 
 def _looks_like_chat_model(filename: str) -> bool:

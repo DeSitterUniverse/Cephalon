@@ -3,11 +3,11 @@
   color: #ededed;
   background: #000;
   --bg: #000;
-  --panel: #050505;
-  --panel-2: #080808;
-  --panel-3: #111;
-  --line: #1d1d1d;
-  --line-strong: #333;
+  --panel: #020202;
+  --panel-2: #050505;
+  --panel-3: #0b0b0b;
+  --line: #171717;
+  --line-strong: #292929;
   --text: #ededed;
   --muted: #9b9b9b;
   --faint: #666;
@@ -60,8 +60,46 @@ select, option { background: #050505; color: var(--text); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.workbench {
+.app-frame {
   height: 100dvh;
+  display: grid;
+  grid-template-rows: 30px minmax(0, 1fr);
+  background: #000;
+  overflow: hidden;
+}
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: #050505;
+  color: var(--muted);
+  user-select: none;
+}
+.window-title {
+  padding-left: 10px;
+  font-size: 0.78rem;
+}
+.window-controls {
+  display: flex;
+  height: 100%;
+}
+.window-controls button {
+  width: 42px;
+  height: 100%;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.window-controls button:hover {
+  background: #151515;
+  color: var(--text);
+}
+
+.workbench {
+  min-height: 0;
   display: grid;
   grid-template-columns: 330px minmax(430px, 1fr) 350px;
   background: var(--bg);
@@ -360,9 +398,23 @@ select, option { background: #050505; color: var(--text); }
   border-left: 2px solid var(--accent-2);
   padding-left: 10px;
 }
+.source-link-row {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #050505;
+  color: var(--muted);
+  padding: 4px 7px;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.source-link-row:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px;
+  grid-template-columns: 108px minmax(0, 1fr) 92px;
   gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
@@ -374,6 +426,15 @@ select, option { background: #050505; color: var(--text); }
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
+}
+.reasoning-select {
+  height: 38px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
 }
 .composer button, .action-row button {
   display: inline-flex;
