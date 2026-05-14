@@ -17,7 +17,7 @@ export function SourcesPanel({ sources }: Props) {
         {sources.map(source => (
           <article key={source.chunk_id} className="source-card">
             <div className="source-head">
-              <strong>#{source.rank} {source.doc_name}</strong>
+              <strong>{source.source_id || `#${source.rank}`} {source.doc_name}</strong>
               <span>{source.score.toFixed(3)}</span>
             </div>
             <div className="source-metrics">

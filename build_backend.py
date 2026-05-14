@@ -8,7 +8,6 @@ def build():
     
     hidden_imports = [
         "lancedb",
-        "tantivy",
         "onnxruntime",
         "transformers",
         "numpy",
@@ -34,6 +33,7 @@ def build():
         "--name", "engine",
         "--collect-all=llama_cpp",
         "--add-data", "AI_SYSTEM_AWARENESS.md;.",
+        "--add-data", "CEPHALON_ARCHITECTURE_DEEP_DIVE.html;.",
         "--add-data", f"{onnx_cross};onnx_models/reranker",
         "--add-data", f"{onnx_embed};onnx_models/embedder",
         "python/main.py"

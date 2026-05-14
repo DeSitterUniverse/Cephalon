@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cephalon Architecture Deep Dive</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#000; color:#ededed; }
+    body { margin:0; background:#000; }
+    main { max-width:1120px; margin:0 auto; padding:32px 22px 56px; }
+    h1 { font-size:32px; margin:0 0 8px; }
+    h2 { font-size:18px; margin:28px 0 10px; border-bottom:1px solid #222; padding-bottom:8px; }
+    h3 { font-size:15px; margin:18px 0 8px; color:#fff; }
+    p, li { color:#b8b8b8; line-height:1.55; }
+    code { background:#080808; border:1px solid #202020; padding:1px 5px; border-radius:4px; color:#f0f0f0; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
+    .card { border:1px solid #202020; background:#050505; border-radius:6px; padding:12px; }
+    .flow { display:grid; gap:8px; }
+    .step { border:1px solid #1d1d1d; background:#040404; border-radius:6px; padding:10px 12px; }
+    .muted { color:#8d8d8d; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { border:1px solid #202020; padding:8px; text-align:left; vertical-align:top; }
+    th { background:#080808; color:#fff; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Cephalon Architecture Deep Dive</h1>
+  <p class="muted">Current architecture for the local-first desktop RAG workbench.</p>
+
+  <h2>System Shape</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Desktop Shell</h3>
+      <p><code>src-tauri</code> owns the native window, sidecar launch, file dialog permissions, packaging resources, and release-time configuration. The app uses a custom titlebar so the desktop frame and workbench feel like one surface.</p>
+    </section>
+    <section class="card">
+      <h3>Frontend</h3>
+      <p><code>src</code> is a React/Vite app. TanStack Query handles server state, Zustand stores local UI state, and the typed API client centralizes backend calls and query streaming.</p>
+    </section>
+    <section class="card">
+      <h3>Backend</h3>
+      <p><code>python/cephalon_core</code> is the FastAPI backend package. The package is split by responsibility: routes, storage, ingestion, retrieval, generation, models, jobs, documents, events, metrics, schemas, and config.</p>
+    </section>
+  </div>
+
+  <h2>Storage Responsibilities</h2>
+  <table>
+    <thead><tr><th>Store</th><th>Responsibilities</th></tr></thead>
+    <tbody>
+      <tr><td>SQLite</td><td>Metadata source of truth: documents, tags, jobs, job events, settings, conversations, messages, message sources, parent chunks, summary nodes, child chunks, retrieval counters, and FTS5 lexical rows.</td></tr>
+      <tr><td>SQLite FTS5</td><td>Lexical BM25 retrieval over child chunks. This replaces LanceDB Tantivy hybrid search and keeps lexical indexing transactional with metadata.</td></tr>
+      <tr><td>LanceDB</td><td>Dense vector storage for child chunks and summary nodes. LanceDB does not own metadata or lexical search decisions.</td></tr>
+      <tr><td>Documents Metrics Directory</td><td>Numeric JSONL/CSV metrics for retrieval latency, source scores, quality estimates, corpus size, chunk stats, and index health.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Ingestion Pipeline</h2>
+  <div class="flow">
+    <div class="step"><strong>1. Resolve input.</strong> A queued job receives a file or folder path. Supported file types use native extraction. Unknown text-like files are imported as text after binary guards.</div>
+    <div class="step"><strong>2. Register document.</strong> SQLite records path, content hash, extraction mode, indexing state, display name, size, timestamps, and embedding metadata.</div>
+    <div class="step"><strong>3. Build hierarchy.</strong> Text is split into semantic units, grouped into parent chunks, summarized into summary nodes, and broken into smaller child chunks for precise retrieval.</div>
+    <div class="step"><strong>4. Index.</strong> Child chunks go to SQLite, SQLite FTS5, and LanceDB. Summary nodes go to SQLite and LanceDB. Reindexing clears generated rows and vectors for the document before writing fresh state.</div>
+  </div>
+
+  <h2>Retrieval Pipeline</h2>
+  <div class="flow">
+    <div class="step"><strong>1. Query planning.</strong> Compound prompts are split into bounded subqueries. Exact numeric max/min/sort questions can use a deterministic indexed-row scan before generation.</div>
+    <div class="step"><strong>2. Summary steering.</strong> Summary vectors identify likely parent regions and provide a parent-level boost.</div>
+    <div class="step"><strong>3. Hybrid search.</strong> Dense child search runs in LanceDB. Lexical BM25 search runs in SQLite FTS5. Results are merged with reciprocal rank fusion.</div>
+    <div class="step"><strong>4. Reranking.</strong> Jina reranker ONNX scores fused candidates. Retrieval priors keep strong lexical matches from being displaced by unrelated dense matches.</div>
+    <div class="step"><strong>5. Context reconstruction.</strong> Child hits point back to parent chunks. The prompt receives compressed parent context with stable source tags such as <code>[[src:S1]]</code>.</div>
+    <div class="step"><strong>6. Streaming.</strong> The backend streams typed SSE events for subqueries, conversation ids, source metadata, answer metadata, tokens, saved message ids, errors, and completion.</div>
+  </div>
+
+  <h2>Model Runtime</h2>
+  <p>Embedding and reranking use ONNX Runtime to avoid a PyTorch runtime requirement in the normal app path. The embedder is <code>jinaai/jina-embeddings-v5-text-small</code> and the reranker is <code>jinaai/jina-reranker-v3</code>. llama.cpp loads the selected GGUF chat model only after the user presses <strong>Load</strong>. The backend reports Vulkan availability, llama.cpp library paths, active context size, and model metadata through health/model APIs.</p>
+
+  <h2>Chat History And Memory</h2>
+  <p>Chats are stored in SQLite as conversations, messages, and per-message source metadata. This gives the app durable history and allows later retrieval over summarized conversation memory. This is retrieval memory, not training: model weights do not change.</p>
+
+  <h2>Frontend Data Flow</h2>
+  <p>The frontend uses TanStack Query for health, models, documents, jobs, settings, conversations, and document details. Zustand stores selected model, selected document, selected conversation, selected sources, right panel, and live event state. Query streaming is consumed as typed events so sources can arrive before generation tokens.</p>
+
+  <h2>Failure Handling</h2>
+  <ul>
+    <li>Missing or invalid ONNX artifacts create a structured startup error instead of silent fallback.</li>
+    <li>Querying without a loaded GGUF returns a conflict response and the UI keeps the Run button disabled.</li>
+    <li>Unsupported/binary ingestion failures are stored as failed document or job state with a clear reason.</li>
+    <li>Metrics write failures are non-fatal and surfaced through health.</li>
+    <li>SQLite FTS5 search is explicit and testable, avoiding LanceDB Tantivy Python-package drift.</li>
+  </ul>
+</main>
+</body>
+</html>

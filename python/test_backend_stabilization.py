@@ -13,6 +13,7 @@ from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranke
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
 from cephalon_core.services import metrics, retrieval
+from cephalon_core.services import models
 from cephalon_core.services.ingestion import delete_document_rows, delete_document_vectors, process_single_file
 from cephalon_core.services.jobs import JobManager
 from cephalon_core.services.retrieval import vector_table_name
@@ -128,10 +129,87 @@ def test_migrations_create_workbench_tables():
 
     tables = {row["name"] for row in storage.fetchall(state.sqlite, "SELECT name FROM sqlite_master WHERE type = 'table'")}
 
-    assert {"documents", "chunks", "schema_migrations", "jobs", "job_events", "document_tags", "app_settings"} <= tables
+    assert {
+        "documents",
+        "chunks",
+        "schema_migrations",
+        "jobs",
+        "job_events",
+        "document_tags",
+        "app_settings",
+        "parent_chunks",
+        "summary_nodes",
+        "conversations",
+        "messages",
+        "message_sources",
+    } <= tables
     assert storage.fetchone(state.sqlite, "SELECT id FROM documents WHERE id = 'core_memory'")
     assert storage.get_rag_settings(state.sqlite).top_k == 20
     assert storage.get_rag_settings(state.sqlite).context_tokens == 32768
+
+
+def test_model_inventory_separates_chat_and_auxiliary_ggufs(tmp_path):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    for filename in [
+        "granite-4.1-8b-Q4_K_S.gguf",
+        "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
+        "jina-reranker-v3-Q8_0.gguf",
+        "v5-small-retrieval-Q8_0.gguf",
+    ]:
+        (model_dir / filename).write_text("model", encoding="utf-8")
+    settings = Settings()
+    settings.model_dir = str(model_dir)
+
+    inventory = models.model_inventory(settings)
+
+    assert inventory["chat_models"] == [
+        "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
+        "granite-4.1-8b-Q4_K_S.gguf",
+    ]
+    assert inventory["auxiliary_gguf"] == [
+        "jina-reranker-v3-Q8_0.gguf",
+        "v5-small-retrieval-Q8_0.gguf",
+    ]
+
+
+def test_packaged_vulkan_dll_discovery_uses_sidecar_path_when_present():
+    discovered = models._discover_packaged_llama_dll_dir()
+
+    if discovered is not None:
+        assert discovered.endswith("llama_cpp\\lib") or discovered.endswith("llama_cpp/lib")
+        assert os.path.exists(os.path.join(discovered, "ggml-vulkan.dll"))
+
+
+def test_conversation_persistence_roundtrip():
+    state = build_memory_state()
+    conversation = storage.create_conversation(state.sqlite, "Stress supplements")
+    storage.append_message(
+        state.sqlite,
+        conversation["id"],
+        "user",
+        "What helps stress?",
+        model="granite.gguf",
+        settings={"reasoning_mode": "balanced"},
+    )
+    assistant = storage.append_message(
+        state.sqlite,
+        conversation["id"],
+        "assistant",
+        "Use the cited source. [[src:S1]]",
+        model="granite.gguf",
+        meta={"confidence": 0.8},
+    )
+    storage.save_message_sources(state.sqlite, assistant["id"], [
+        {"source_id": "S1", "doc_name": "stress.docx", "chunk_id": "chunk-1", "score": 0.9}
+    ])
+
+    listed = storage.list_conversations(state.sqlite)
+    loaded = storage.get_conversation(state.sqlite, conversation["id"])
+
+    assert listed[0]["title"] == "Stress supplements"
+    assert [message["role"] for message in loaded["messages"]] == ["user", "assistant"]
+    assert loaded["messages"][1]["sources"][0]["source_id"] == "S1"
 
 
 def test_process_single_file_skips_duplicate_hash(monkeypatch, tmp_path):
@@ -156,7 +234,8 @@ def test_process_single_file_skips_duplicate_hash(monkeypatch, tmp_path):
     fts_rows = storage.fetchall(state.sqlite, "SELECT chunk_id FROM chunks_fts")
     assert len(fts_rows) == 1
     assert state.lance.table is not None
-    assert len(state.lance.table.rows) == 1
+    assert len(state.lance.table.rows) == 2
+    assert {row["source_kind"] for row in state.lance.table.rows} == {"summary", "child"}
 
 
 def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
@@ -175,6 +254,34 @@ def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
     assert result["status"] == "ready"
     assert row["extraction_mode"] == "text"
     assert row["embedding_dim"] == storage.active_embedding_metadata()["embedding_dim"]
+
+
+def test_process_single_file_creates_parent_child_summary_metadata(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "semantic.md"
+    file_path.write_text(
+        "Stress support includes ashwagandha and rhodiola. Magnesium can help sleep.\n\n"
+        "Deployment pipelines should run tests before packaging. Release artifacts need names.\n\n"
+        "Traffic records are date and number rows that should keep each row intact.",
+        encoding="utf-8",
+    )
+
+    async def fake_embedding(_app_state, text: str):
+        base = float(len(text) % 7) / 10.0
+        return [base] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    parents = storage.fetchall(state.sqlite, "SELECT id, summary FROM parent_chunks WHERE doc_id = ?", (result["doc_id"],))
+    summaries = storage.fetchall(state.sqlite, "SELECT id, parent_id, summary FROM summary_nodes WHERE doc_id = ?", (result["doc_id"],))
+    chunks = storage.fetchall(state.sqlite, "SELECT parent_id, semantic_role FROM chunks WHERE doc_id = ?", (result["doc_id"],))
+
+    assert result["status"] == "ready"
+    assert parents
+    assert summaries
+    assert all(row["parent_id"] for row in chunks)
+    assert {row["semantic_role"] for row in chunks} == {"child"}
 
 
 def test_unknown_text_file_imports_without_force_text(monkeypatch, tmp_path):
@@ -269,6 +376,31 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert sources[0].fusion_score is not None
     assert "sqlite_fts5" in meta["search_modes"][0]
     assert "Cephalon retrieval fixture" in context
+
+
+def test_context_compressor_keeps_relevant_cited_sentences():
+    sources = [
+        retrieval.CompressionSource(
+            source_id="S1",
+            text="Ashwagandha lowers stress. Distributed systems use quorum writes. Rhodiola can reduce fatigue.",
+            rank=1,
+            score=0.9,
+        )
+    ]
+
+    compressed, stats = retrieval.compress_context("stress supplements", sources, max_sentences=2)
+
+    assert "[[src:S1]]" in compressed
+    assert "Ashwagandha" in compressed
+    assert stats["kept_sentences"] == 2
+    assert 0 < stats["context_relevance"] <= 1
+
+
+def test_source_tags_are_stable_and_separate_from_user_filenames():
+    source = retrieval.format_source_context("S3", "Stress advice.docx", "chunk-1", "Ashwagandha helps stress.")
+
+    assert source.startswith("[[src:S3]] Source: Stress advice.docx | Chunk: chunk-1")
+    assert "[[src:Stress advice.docx]]" not in source
 
 
 def test_fts_query_ignores_question_stopwords():
@@ -483,6 +615,25 @@ def test_metrics_export_writes_numeric_snapshot(tmp_path):
         row = f.readline()
     assert "document_count" in header
     assert row
+
+
+def test_quality_metrics_are_numeric_and_bounded():
+    values = metrics.quality_metrics(
+        query="what supplements help stress",
+        answer="Ashwagandha helps stress. Space elevators are unrelated.",
+        context="Ashwagandha helps stress. Rhodiola helps fatigue.",
+        relevant_sentence_count=1,
+        total_sentence_count=2,
+        supported_statement_count=1,
+        total_statement_count=2,
+        answer_query_similarity=0.42,
+    )
+
+    assert values == {
+        "context_relevance": 0.5,
+        "groundedness": 0.5,
+        "answer_relevance": 0.42,
+    }
 
 
 def test_retrieval_metrics_write_failure_is_nonfatal(monkeypatch):

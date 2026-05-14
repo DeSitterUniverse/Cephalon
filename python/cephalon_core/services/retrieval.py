@@ -3,6 +3,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,14 @@ QUERY_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "best", "for", "from", "how", "i", "in", "is", "it",
     "amount", "day", "me", "my", "of", "on", "or", "show", "the", "to", "what", "when", "which", "with",
 }
+
+
+@dataclass
+class CompressionSource:
+    source_id: str
+    text: str
+    rank: int
+    score: float
 
 
 def vector_table_name(app_state=None) -> str:
@@ -106,6 +115,8 @@ async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]
         "doc_id": "core_memory",
         "text": memory_text,
         "chunk_index": -1,
+        "parent_id": None,
+        "source_kind": "memory",
         **storage.active_embedding_metadata(app_state),
         "chunk_length": len(memory_text),
     }]
@@ -224,11 +235,14 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         doc_id = res["doc_id"]
         doc_name = "Core Memory" if doc_id == "core_memory" else path_map.get(doc_id, "Unknown")
         text = res["text"].strip()
+        source_id = f"S{rank}"
         sources.append(SourceChunk(
             rank=rank,
+            source_id=source_id,
             doc_id=doc_id,
             doc_name=doc_name,
             chunk_id=res["id"],
+            parent_id=res.get("parent_id"),
             score=float(res.get("score", 0)),
             vector_score=float(res["_distance"]) if "_distance" in res and res["_distance"] is not None else None,
             rerank_score=float(res.get("rerank_score", res.get("score", 0))),
@@ -243,10 +257,20 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
 async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str]:
     table_name = vector_table_name(app_state)
     index = ensure_retrieval_index(app_state)
+    summary_results = _summary_dense_search(app_state, table_name, query_vector, max(4, settings.top_k // 3))
+    summary_parent_rank = {
+        result["parent_id"]: rank
+        for rank, result in enumerate(summary_results, start=1)
+        if result.get("parent_id")
+    }
     dense_results = _dense_search(app_state, table_name, query_vector, settings.top_k)
     lexical_results = _lexical_search(app_state, prompt, settings.top_k)
+    _apply_summary_parent_boost(dense_results, summary_parent_rank)
+    _apply_summary_parent_boost(lexical_results, summary_parent_rank)
     fused = _fuse_rrf(dense_results, lexical_results, settings.top_k)
     modes = []
+    if summary_results:
+        modes.append("summary_dense")
     if dense_results:
         modes.append("dense")
     if lexical_results:
@@ -254,6 +278,31 @@ async def _search_once(app_state, prompt: str, query_vector: list[float], settin
     if not index.get("lexical_available"):
         modes.append("lexical_unavailable")
     return fused, "+".join(modes) if modes else "empty"
+
+
+def _summary_dense_search(app_state, table_name: str, query_vector: list[float], limit: int) -> list[dict]:
+    if table_name not in app_state.lance.table_names():
+        return []
+    table = app_state.lance.open_table(table_name)
+    try:
+        query = table.search(query_vector, vector_column_name="vector")
+    except TypeError:
+        query = table.search(query_vector)
+    rows = query.limit(max(limit * 4, limit + 20)).to_list()
+    summaries = [
+        dict(row) for row in rows
+        if row.get("doc_id") != CORE_MEMORY_DOC_ID and row.get("source_kind") == "summary" and row.get("parent_id")
+    ]
+    for rank, row in enumerate(summaries[:limit], start=1):
+        row["summary_rank"] = rank
+    return summaries[:limit]
+
+
+def _apply_summary_parent_boost(results: list[dict], summary_parent_rank: dict[str, int]) -> None:
+    for result in results:
+        parent_id = result.get("parent_id")
+        if parent_id in summary_parent_rank:
+            result["summary_rank"] = summary_parent_rank[parent_id]
 
 
 def _dense_search(app_state, table_name: str, query_vector: list[float], limit: int) -> list[dict]:
@@ -266,13 +315,18 @@ def _dense_search(app_state, table_name: str, query_vector: list[float], limit: 
     except TypeError:
         query = table.search(query_vector)
     try:
-        rows = query.where(f"doc_id != '{CORE_MEMORY_DOC_ID}'").limit(limit).to_list()
+        rows = query.where(f"doc_id != '{CORE_MEMORY_DOC_ID}'").limit(search_limit).to_list()
     except Exception:
         rows = query.limit(search_limit).to_list()
-        rows = [row for row in rows if row.get("doc_id") != CORE_MEMORY_DOC_ID][:limit]
+    rows = [
+        row for row in rows
+        if row.get("doc_id") != CORE_MEMORY_DOC_ID and row.get("source_kind", "child") != "summary"
+    ][:limit]
     results = []
     for rank, row in enumerate(rows, start=1):
         item = dict(row)
+        item.setdefault("parent_id", row.get("parent_id") if hasattr(row, "get") else None)
+        item.setdefault("source_kind", row.get("source_kind") if hasattr(row, "get") else "child")
         item["dense_rank"] = rank
         item["vector_score"] = _distance_to_score(item.get("_distance"))
         results.append(item)
@@ -289,6 +343,7 @@ def _lexical_search(app_state, prompt: str, limit: int) -> list[dict]:
             chunks.doc_id,
             chunks.chunk_index,
             chunks.text,
+            chunks.parent_id,
             chunks.chunk_length,
             chunks.embedding_model_id,
             chunks.embedding_dim,
@@ -341,6 +396,8 @@ def _fuse_rrf(dense_results: list[dict], lexical_results: list[dict], limit: int
         entry["lexical_score"] = result.get("lexical_score")
         entry["fusion_score"] = entry.get("fusion_score", 0.0) + 1.0 / (RRF_K + result["lexical_rank"])
     for entry in fused.values():
+        if entry.get("summary_rank") is not None:
+            entry["fusion_score"] = entry.get("fusion_score", 0.0) + 1.0 / (RRF_K + int(entry["summary_rank"]))
         entry["score"] = float(entry.get("fusion_score", 0.0))
     return sorted(fused.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
@@ -352,6 +409,75 @@ def _distance_to_score(distance: Any) -> float | None:
         return 1.0 / (1.0 + float(distance))
     except Exception:
         return None
+
+
+def split_sentences(text: str) -> list[str]:
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if sentence.strip()
+    ]
+
+
+def format_source_context(source_id: str, doc_name: str, chunk_id: str, text: str) -> str:
+    return f"[[src:{source_id}]] Source: {doc_name} | Chunk: {chunk_id}\n{text.strip()}"
+
+
+def _term_set(text: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
+        if len(term) >= 3 and term not in QUERY_STOPWORDS
+    }
+
+
+def _sentence_relevance(query_terms: set[str], sentence: str) -> float:
+    sentence_terms = _term_set(sentence)
+    if not query_terms or not sentence_terms:
+        return 0.0
+    return len(query_terms & sentence_terms) / len(query_terms | sentence_terms)
+
+
+def compress_context(query: str, sources: list[CompressionSource], max_sentences: int = 10) -> tuple[str, dict[str, Any]]:
+    query_terms = _term_set(query)
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        for sentence in split_sentences(source.text):
+            relevance = _sentence_relevance(query_terms, sentence)
+            candidates.append({
+                "source_id": source.source_id,
+                "sentence": sentence,
+                "rank": source.rank,
+                "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04),
+                "relevant": relevance > 0,
+            })
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+
+    kept: list[dict[str, Any]] = []
+    seen_terms: set[str] = set()
+    for candidate in candidates:
+        terms = _term_set(candidate["sentence"])
+        overlap = len(terms & seen_terms) / max(len(terms), 1)
+        if overlap > 0.75 and len(kept) >= 1:
+            continue
+        kept.append(candidate)
+        seen_terms.update(terms)
+        if len(kept) >= max_sentences:
+            break
+
+    if not kept and candidates:
+        kept = candidates[:max_sentences]
+
+    total_sentences = len(candidates)
+    relevant_total = sum(1 for item in candidates if item["relevant"])
+    compressed = "\n".join(f"[[src:{item['source_id']}]] {item['sentence']}" for item in kept)
+    stats = {
+        "input_sentences": total_sentences,
+        "kept_sentences": len(kept),
+        "relevant_sentence_count": relevant_total,
+        "context_relevance": round(relevant_total / total_sentences, 6) if total_sentences else 0.0,
+    }
+    return compressed, stats
 
 
 def confidence_from_sources(sources: list[SourceChunk]) -> dict[str, Any]:
@@ -375,12 +501,17 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     started = time.perf_counter()
     context_chunks: list[str] = []
     all_sources: list[SourceChunk] = []
+    compression_inputs: list[CompressionSource] = []
     search_modes: list[str] = []
     subqueries = plan_subqueries(prompt)
     numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
     if numeric_context:
         context_chunks.extend(numeric_context)
         all_sources.extend(numeric_sources)
+        compression_inputs.extend([
+            CompressionSource(source_id=source.source_id or f"S{source.rank}", text=numeric_context[0], rank=source.rank, score=source.score)
+            for source in numeric_sources
+        ])
         search_modes.append("numeric_scan")
     else:
         for subquery in subqueries:
@@ -398,7 +529,17 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                     context_chunks.append(res["text"])
                 else:
                     label = source.doc_name if source else "Unknown"
-                    context_chunks.append(f"[{subquery['id']} Source: {label} | Chunk: {res['id']}]\n{res['text']}")
+                    source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
+                    context_text = _parent_context(app_state, res) or res["text"]
+                    context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
+                    compression_inputs.append(CompressionSource(source_id=source_id, text=context_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
+
+    if compression_inputs:
+        compressed_context, compression_stats = compress_context(prompt, compression_inputs, max_sentences=max(6, settings.rerank_top_n * 3))
+        if compressed_context:
+            context_chunks = [compressed_context]
+    else:
+        compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 
     _mark_sources_retrieved(app_state, all_sources)
     confidence = confidence_from_sources(all_sources)
@@ -418,6 +559,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             "rerank_scores": [source.rerank_score for source in all_sources if source.rerank_score is not None],
             "confidence": confidence["confidence"],
             "no_answer": confidence["no_answer"],
+            "context_relevance": compression_stats.get("context_relevance", 0.0),
         })
     except OSError as error:
         metrics_path = None
@@ -428,8 +570,17 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "retrieval_latency_ms": elapsed_ms,
         "search_modes": search_modes,
         "metrics_path": metrics_path,
+        "compression": compression_stats,
     }
     return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
+
+
+def _parent_context(app_state, result: dict) -> str | None:
+    parent_id = result.get("parent_id")
+    if not parent_id:
+        return None
+    row = storage.fetchone(app_state.sqlite, "SELECT text FROM parent_chunks WHERE id = ?", (parent_id,))
+    return row["text"] if row else None
 
 
 def _structured_numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list[SourceChunk]]:
@@ -480,6 +631,7 @@ def _structured_numeric_analysis_for_query(app_state, prompt: str) -> tuple[list
     )
     source = SourceChunk(
         rank=1,
+        source_id="S1",
         doc_id=best["doc_id"],
         doc_name=best["doc_name"],
         chunk_id=best["chunk_id"],

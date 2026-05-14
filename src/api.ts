@@ -38,9 +38,11 @@ export type RagSettings = {
 };
 export type SourceChunk = {
   rank: number;
+  source_id?: string | null;
   doc_id: string;
   doc_name: string;
   chunk_id: string;
+  parent_id?: string | null;
   score: number;
   snippet: string;
   vector_score?: number | null;
@@ -48,6 +50,21 @@ export type SourceChunk = {
   fusion_score?: number | null;
   rerank_score?: number | null;
   subquery_id?: string | null;
+};
+export type StoredMessage = Message & {
+  id: string;
+  model?: string | null;
+  settings?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  created_at: number;
+  sources?: SourceChunk[];
+};
+export type Conversation = {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  messages?: StoredMessage[];
 };
 export type HealthResponse = {
   status: string;
@@ -78,6 +95,8 @@ export type HealthResponse = {
 
 export type ModelsResponse = {
   models: string[];
+  auxiliary_gguf?: string[];
+  model_dir?: string;
   active_model?: string | null;
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
@@ -92,6 +111,7 @@ export type LoadModelResponse = {
 };
 type DocumentsResponse = { documents: Document[] };
 type JobsResponse = { jobs: Job[] };
+type ConversationsResponse = { conversations: Conversation[] };
 type IngestResponse = { job_id: string; status: string; message?: string };
 
 const API_BASE_URL = window.localStorage.getItem("cephalon.apiBaseUrl") || import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
@@ -206,6 +226,29 @@ export function getJobs(): Promise<JobsResponse> {
   return requestJson<JobsResponse>("/jobs");
 }
 
+export function getConversations(): Promise<ConversationsResponse> {
+  return requestJson<ConversationsResponse>("/conversations");
+}
+
+export function createConversation(): Promise<Conversation> {
+  return requestJson<Conversation>("/conversations", { method: "POST" });
+}
+
+export function getConversation(id: string): Promise<Conversation> {
+  return requestJson<Conversation>(`/conversations/${encodeURIComponent(id)}`);
+}
+
+export function renameConversation(id: string, title: string): Promise<Conversation> {
+  return requestJson<Conversation>(`/conversations/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteConversation(id: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export function getSettings(): Promise<RagSettings> {
   return requestJson<RagSettings>("/settings");
 }
@@ -225,11 +268,18 @@ export function eventsUrl(): string {
   return `${API_BASE_URL}/events`;
 }
 
-export async function queryModel(prompt: string, model: string, history: Message[], settings?: RagSettings): Promise<ReadableStream<Uint8Array>> {
+export async function queryModel(
+  prompt: string,
+  model: string,
+  history: Message[],
+  settings?: RagSettings,
+  conversation_id?: string | null,
+  reasoning_mode = "balanced",
+): Promise<ReadableStream<Uint8Array>> {
   const res = await fetch(`${API_BASE_URL}/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model, history, settings }),
+    body: JSON.stringify({ prompt, model, history, settings, conversation_id, reasoning_mode }),
   });
 
   if (!res.ok) {

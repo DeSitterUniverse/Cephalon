@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import time
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,69 @@ def append_retrieval_event(app_state, event: dict[str, Any]) -> str:
     with target.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return str(target)
+
+
+def quality_metrics(
+    *,
+    query: str,
+    answer: str,
+    context: str,
+    relevant_sentence_count: int,
+    total_sentence_count: int,
+    supported_statement_count: int,
+    total_statement_count: int,
+    answer_query_similarity: float,
+) -> dict[str, float]:
+    """Return bounded numeric QA metrics so later analysis jobs can compare runs."""
+    return {
+        "context_relevance": _ratio(relevant_sentence_count, total_sentence_count),
+        "groundedness": _ratio(supported_statement_count, total_statement_count),
+        "answer_relevance": _bounded(answer_query_similarity),
+    }
+
+
+def estimate_answer_quality(query: str, answer: str, context: str) -> dict[str, float]:
+    context_sentences = _sentences(context)
+    answer_statements = _sentences(answer)
+    query_terms = _terms(query)
+    relevant_sentences = sum(1 for sentence in context_sentences if _overlap(_terms(sentence), query_terms) > 0)
+    context_terms = _terms(context)
+    supported_statements = sum(1 for statement in answer_statements if _overlap(_terms(statement), context_terms) >= 0.35)
+    answer_similarity = _overlap(_terms(answer), query_terms)
+    return quality_metrics(
+        query=query,
+        answer=answer,
+        context=context,
+        relevant_sentence_count=relevant_sentences,
+        total_sentence_count=len(context_sentences),
+        supported_statement_count=supported_statements,
+        total_statement_count=len(answer_statements),
+        answer_query_similarity=answer_similarity,
+    )
+
+
+def _sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
+
+
+def _terms(text: str) -> set[str]:
+    return {term for term in re.findall(r"[\w]+", text.lower(), flags=re.UNICODE) if len(term) >= 3}
+
+
+def _overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return _bounded(numerator / denominator)
+
+
+def _bounded(value: float) -> float:
+    return round(max(0.0, min(1.0, float(value))), 6)
 
 
 def export_corpus_snapshot(app_state) -> str:

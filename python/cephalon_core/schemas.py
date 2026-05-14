@@ -74,6 +74,8 @@ class IngestRequest(BaseModel):
 class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
+    conversation_id: str | None = None
+    reasoning_mode: str = "balanced"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None
 
@@ -92,9 +94,11 @@ class TagRequest(BaseModel):
 
 class SourceChunk(BaseModel):
     rank: int
+    source_id: str | None = None
     doc_id: str
     doc_name: str
     chunk_id: str
+    parent_id: str | None = None
     score: float
     snippet: str
     vector_score: float | None = None

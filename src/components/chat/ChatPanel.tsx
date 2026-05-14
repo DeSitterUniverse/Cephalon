@@ -2,7 +2,7 @@ import { Send } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message, RagSettings, SourceChunk } from "../../api";
+import type { Conversation, Message, RagSettings, SourceChunk } from "../../api";
 import { queryModel } from "../../api";
 import { useUiStore } from "../../store";
 
@@ -28,12 +28,21 @@ type Props = {
   selectedModel: string;
   modelReady: boolean;
   settings?: RagSettings;
+  conversation?: Conversation;
+  selectedConversationId?: string | null;
+  onConversationSelected?: (id: string) => void;
 };
 
-export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+type ChatMessage = Message & {
+  id?: string;
+  sources?: SourceChunk[];
+};
+
+export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected }: Props) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [reasoningMode, setReasoningMode] = useState("balanced");
   const setSelectedSources = useUiStore(state => state.setSelectedSources);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -41,18 +50,28 @@ export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!conversation?.messages) return;
+    setMessages(conversation.messages.map(message => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      sources: message.sources || [],
+    })) as ChatMessage[]);
+  }, [conversation?.id, conversation?.messages]);
+
   async function handleSend(event: FormEvent) {
     event.preventDefault();
     if (!input.trim() || isTyping || !selectedModel || !modelReady || !settings) return;
 
     const userMsg = input.trim();
-    const historyPayload = messages.slice(-6);
+    const historyPayload = messages.slice(-6).map(message => ({ role: message.role, content: message.content }));
     setInput("");
     setIsTyping(true);
     setMessages(prev => [...prev, { role: "user", content: userMsg }, { role: "assistant", content: "" }]);
 
     try {
-      const body = await queryModel(userMsg, selectedModel, historyPayload, settings);
+      const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, reasoningMode);
       await consumeQueryStream(body, setSelectedSources, chunk => {
         setMessages(prev => {
           const next = [...prev];
@@ -60,6 +79,15 @@ export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
           next[last] = { ...next[last], content: next[last].content + chunk };
           return next;
         });
+      }, sources => {
+        setMessages(prev => {
+          const next = [...prev] as ChatMessage[];
+          const last = next.length - 1;
+          next[last] = { ...next[last], sources };
+          return next;
+        });
+      }, conversationId => {
+        if (conversationId) onConversationSelected?.(conversationId);
       }, meta => {
         if (meta?.no_answer) {
           setMessages(prev => {
@@ -103,7 +131,12 @@ export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
               <div className="message-role">{message.role === "assistant" ? "response" : "query"}</div>
               <div className="message-body">
                 {parsed.thinking && <details className="thinking"><summary>Internal trace</summary><ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.thinking}</ReactMarkdown></details>}
-                {response ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{response}</ReactMarkdown> : <span className="subtle">Working...</span>}
+                {response ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderSourceTags(response)}</ReactMarkdown> : <span className="subtle">Working...</span>}
+                {message.role === "assistant" && (message as ChatMessage).sources?.length ? (
+                  <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
+                    {(message as ChatMessage).sources?.length} cited sources
+                  </button>
+                ) : null}
               </div>
             </article>
           );
@@ -111,6 +144,17 @@ export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
         <div ref={endRef} />
       </div>
       <form className="composer" onSubmit={handleSend}>
+        <select
+          className="reasoning-select"
+          value={reasoningMode}
+          onChange={event => setReasoningMode(event.target.value)}
+          disabled={isTyping}
+          title="Reasoning depth"
+        >
+          <option value="fast">Fast</option>
+          <option value="balanced">Balanced</option>
+          <option value="deep">Deep</option>
+        </select>
         <input
           value={input}
           onChange={event => setInput(event.target.value)}
@@ -127,6 +171,8 @@ async function consumeQueryStream(
   body: ReadableStream<Uint8Array>,
   onSources: (sources: SourceChunk[]) => void,
   onChunk: (chunk: string) => void,
+  onMessageSources: (sources: SourceChunk[]) => void,
+  onConversation: (conversationId: string | null) => void,
   onMeta: (meta: Record<string, unknown>) => void,
 ) {
   const reader = body.getReader();
@@ -142,7 +188,7 @@ async function consumeQueryStream(
     while (boundary !== -1) {
       const packet = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
-      handleSsePacket(packet, sources, onSources, onChunk, onMeta);
+      handleSsePacket(packet, sources, onSources, onChunk, onMessageSources, onConversation, onMeta);
       boundary = buffer.indexOf("\n\n");
     }
   }
@@ -153,6 +199,8 @@ function handleSsePacket(
   sources: SourceChunk[],
   onSources: (sources: SourceChunk[]) => void,
   onChunk: (chunk: string) => void,
+  onMessageSources: (sources: SourceChunk[]) => void,
+  onConversation: (conversationId: string | null) => void,
   onMeta: (meta: Record<string, unknown>) => void,
 ) {
   const eventType = packet.split("\n").find(line => line.startsWith("event: "))?.slice(7).trim() || "message";
@@ -168,11 +216,18 @@ function handleSsePacket(
   if (eventType === "source") {
     sources.push(payload as SourceChunk);
     onSources([...sources]);
+    onMessageSources([...sources]);
   } else if (eventType === "token") {
     onChunk(typeof payload.text === "string" ? payload.text : "");
+  } else if (eventType === "conversation") {
+    onConversation(typeof payload.conversation_id === "string" ? payload.conversation_id : null);
   } else if (eventType === "answer_meta") {
     onMeta(payload);
   } else if (eventType === "error") {
     throw new Error(typeof payload.message === "string" ? payload.message : "Query stream failed.");
   }
+}
+
+function renderSourceTags(content: string) {
+  return content.replace(/\[\[src:(S\d+)\]\]/g, "`$1`");
 }
