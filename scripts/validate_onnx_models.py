@@ -19,10 +19,10 @@ def validate_embedder(model_dir: Path) -> dict:
     else:
         tokenizer_kwargs["padding"] = True
     inputs = tokenizer(["Document: validation text"], **tokenizer_kwargs)
-    ort_inputs = {
-        "input_ids": inputs["input_ids"].astype(np.int64),
-        "attention_mask": inputs["attention_mask"].astype(np.int64),
-    }
+    input_names = {inp.name for inp in session.get_inputs()}
+    ort_inputs = {"input_ids": inputs["input_ids"].astype(np.int64)}
+    if "attention_mask" in input_names:
+        ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
     if "token_type_ids" in inputs:
         ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
     output = np.asarray(session.run(None, ort_inputs)[0])

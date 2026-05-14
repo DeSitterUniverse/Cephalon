@@ -110,7 +110,7 @@ def export_reranker(model_dir: Path, force: bool) -> None:
 
     print(f"Exporting reranker: {RERANKER_ID}")
     reranker_model = ORTModelForSequenceClassification.from_pretrained(RERANKER_ID, export=True, trust_remote_code=True)
-    reranker_tokenizer = AutoTokenizer.from_pretrained(RERANKER_ID, trust_remote_code=True)
+    reranker_tokenizer = AutoTokenizer.from_pretrained(RERANKER_ID, trust_remote_code=True, fix_mistral_regex=True)
     reranker_model.save_pretrained(temp_dir)
     reranker_tokenizer.save_pretrained(temp_dir)
     temp_dir.joinpath("cephalon_onnx_meta.json").write_text(

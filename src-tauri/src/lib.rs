@@ -10,7 +10,9 @@ use tauri::Manager;
 pub struct BackendProcess(pub Mutex<Option<Child>>);
 
 fn backend_addr() -> SocketAddr {
-    "127.0.0.1:8765".parse().expect("valid backend address")
+    let host = env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string());
+    format!("{host}:{port}").parse().expect("valid backend address")
 }
 
 fn backend_is_listening() -> bool {
@@ -58,6 +60,8 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
 
     command.env("CEPHALON_DATA_DIR", data_dir);
     command.env("CEPHALON_MODEL_DIR", model_dir);
+    command.env("CEPHALON_HOST", env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()));
+    command.env("CEPHALON_PORT", env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()));
     command.env("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,https://tauri.localhost");
     command.env("CEPHALON_REQUIRE_VULKAN", "1");
     command.env("CEPHALON_LLAMA_VERBOSE", "0");
@@ -148,8 +152,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let child = if backend_is_listening() {
-                println!("Cephalon backend already listening on 127.0.0.1:8765; reusing it.");
+            let child = if env::var("CEPHALON_EXTERNAL_BACKEND").ok().as_deref() == Some("1") {
+                println!("Cephalon external backend mode enabled; skipping local backend launch.");
+                None
+            } else if backend_is_listening() {
+                println!("Cephalon backend already listening at {}; reusing it.", backend_addr());
                 None
             } else if cfg!(debug_assertions) {
                 spawn_dev_backend()

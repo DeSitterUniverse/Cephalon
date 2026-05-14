@@ -10,14 +10,16 @@ import {
   getDocument,
   getDocuments,
   getJobs,
+  getHealth,
   getModels,
   getSettings,
-  healthCheck,
   ingestPath,
+  loadModel,
   reindexDocument,
   updateDocument,
   updateSettings,
   type Document,
+  type HealthResponse,
   type RagSettings,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
@@ -41,6 +43,8 @@ function isTauriRuntime() {
 export default function App() {
   const queryClient = useQueryClient();
   const [bootReady, setBootReady] = useState(false);
+  const [bootStatus, setBootStatus] = useState("Starting local service...");
+  const [bootHealth, setBootHealth] = useState<HealthResponse | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [toast, setToast] = useState<string | null>(null);
@@ -92,6 +96,16 @@ export default function App() {
     onSuccess: data => queryClient.setQueryData(["settings"], data),
   });
 
+  const loadModelMutation = useMutation({
+    mutationFn: (model: string) => loadModel(model),
+    onMutate: () => setToast("Loading model into llama.cpp..."),
+    onSuccess: data => {
+      setToast(data.active_model ? `Loaded ${data.active_model}` : "Model loaded.");
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: error => setToast(error instanceof Error ? error.message : "Failed to load model."),
+  });
+
   const metricsMutation = useMutation({
     mutationFn: exportMetrics,
     onSuccess: data => setToast(data.status === "success" && data.path ? `Metrics exported: ${data.path}` : `Metrics export failed: ${data.error || "metrics directory is unavailable"}`),
@@ -101,10 +115,17 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const poll = async () => {
+      let attempts = 0;
       while (active) {
-        if (await healthCheck()) {
+        attempts += 1;
+        try {
+          const health = await getHealth();
+          setBootHealth(health);
+          setBootStatus(health.startup_error ? "Backend is reachable with startup warnings." : "Backend is ready.");
           setBootReady(true);
           return;
+        } catch {
+          setBootStatus(`Waiting for local backend (${attempts})...`);
         }
         await new Promise(resolve => setTimeout(resolve, 750));
       }
@@ -199,13 +220,17 @@ export default function App() {
     return (
       <div className="boot-screen">
         <div className="boot-card">
+          <div className="boot-mark" aria-hidden="true" />
           <strong>Cephalon</strong>
-          <span>Opening local service...</span>
+          <span>{bootStatus}</span>
+          {bootHealth?.startup_error && <small>{bootHealth.startup_error}</small>}
         </div>
       </div>
     );
   }
 
+  const activeModel = modelsQuery.data?.active_model || "";
+  const modelReady = Boolean(selectedModel && activeModel === selectedModel);
   const backendLabel = modelsQuery.data?.llama_backend?.vulkan_available ? "Vulkan" : "CPU";
   const contextLabel = modelsQuery.data?.active_context_tokens
     ? `${Math.round(modelsQuery.data.active_context_tokens / 1024)}k ctx`
@@ -227,16 +252,26 @@ export default function App() {
             onReindex={(doc) => reindexMutation.mutate(doc)}
           />
         }
-        center={<ChatPanel selectedModel={selectedModel} settings={settingsQuery.data} />}
+        center={<ChatPanel selectedModel={selectedModel} modelReady={modelReady} settings={settingsQuery.data} />}
         modelControl={(
-          <label className="top-model-picker" title="Local GGUF model">
-            <span>Model</span>
-            <select value={selectedModel} onChange={event => setSelectedModel(event.target.value)} disabled={modelsQuery.isLoading}>
-              <option value="">No GGUF model found</option>
-              {(modelsQuery.data?.models || []).map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
-            <small>{contextLabel}</small>
-          </label>
+          <div className={modelReady ? "top-model-picker ready" : "top-model-picker"} title="Local GGUF model">
+            <label>
+              <span>Model</span>
+              <select value={selectedModel} onChange={event => setSelectedModel(event.target.value)} disabled={modelsQuery.isLoading || loadModelMutation.isPending}>
+                <option value="">No GGUF model found</option>
+                {(modelsQuery.data?.models || []).map(model => <option key={model} value={model}>{model}</option>)}
+              </select>
+            </label>
+            <small>{modelReady ? `Loaded / ${contextLabel}` : backendLabel}</small>
+            <button
+              type="button"
+              onClick={() => selectedModel && loadModelMutation.mutate(selectedModel)}
+              disabled={!selectedModel || modelReady || loadModelMutation.isPending}
+              title={modelReady ? "Selected model is loaded." : "Load selected GGUF model into memory."}
+            >
+              {loadModelMutation.isPending ? "Loading" : modelReady ? "Loaded" : "Load"}
+            </button>
+          </div>
         )}
         right={right}
       />

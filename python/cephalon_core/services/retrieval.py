@@ -13,6 +13,11 @@ from ..schemas import RagSettings, SourceChunk
 from . import metrics
 
 RRF_K = 60
+CORE_MEMORY_DOC_ID = "core_memory"
+QUERY_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "best", "for", "from", "how", "i", "in", "is", "it",
+    "amount", "day", "me", "my", "of", "on", "or", "show", "the", "to", "what", "when", "which", "with",
+}
 
 
 def vector_table_name(app_state=None) -> str:
@@ -125,7 +130,8 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
     scores = _reranker_scores(app_state, raw_scores)
     for idx, res in enumerate(results):
         res["rerank_score"] = float(scores[idx])
-        res["score"] = float(scores[idx])
+        res["retrieval_prior_score"] = _retrieval_prior_score(prompt, res)
+        res["score"] = _final_retrieval_score(prompt, res, float(scores[idx]))
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
@@ -144,6 +150,55 @@ def _reranker_scores(app_state, raw_scores: np.ndarray) -> np.ndarray:
     if raw_scores.ndim == 2 and raw_scores.shape[1] > 1:
         return raw_scores[:, -1]
     return raw_scores.reshape(-1)
+
+
+def _bounded_rerank_score(raw_score: float) -> float:
+    return float(np.tanh(raw_score / 2.0))
+
+
+def _final_retrieval_score(prompt: str, result: dict, raw_rerank_score: float) -> float:
+    return round(_retrieval_prior_score(prompt, result) + _bounded_rerank_score(raw_rerank_score), 6)
+
+
+def _select_relevant_results(ranked: list[dict], limit: int) -> list[dict]:
+    if not ranked:
+        return []
+    window = ranked[:limit]
+    trusted_doc_ids = {result["doc_id"] for result in window if result.get("lexical_rank") is not None}
+    if not trusted_doc_ids:
+        return window
+
+    threshold = max(0.75, float(window[0].get("score", 0.0)) * 0.2)
+    selected: list[dict] = []
+    for result in ranked:
+        if len(selected) >= limit:
+            break
+        score = float(result.get("score", 0.0))
+        if (
+            result.get("lexical_rank") is not None
+            or result.get("doc_id") in trusted_doc_ids
+            or score >= threshold
+        ):
+            selected.append(result)
+    return selected
+
+
+def _retrieval_prior_score(prompt: str, result: dict) -> float:
+    prior = 0.0
+    if result.get("lexical_rank") is not None:
+        prior += max(0.5, 3.0 - 0.12 * (int(result["lexical_rank"]) - 1))
+    if result.get("dense_rank") is not None:
+        prior += max(0.05, 0.8 - 0.03 * (int(result["dense_rank"]) - 1))
+
+    important_terms = [
+        term for term in re.findall(r"[\w]+", prompt.lower(), flags=re.UNICODE)
+        if len(term) >= 3 and term not in QUERY_STOPWORDS
+    ]
+    if important_terms:
+        text = result.get("text", "").lower()
+        overlap = sum(1 for term in set(important_terms) if term in text)
+        prior += min(1.0, overlap * 0.25)
+    return round(prior, 6)
 
 
 def plan_subqueries(prompt: str) -> list[dict[str, str]]:
@@ -205,10 +260,16 @@ def _dense_search(app_state, table_name: str, query_vector: list[float], limit: 
     if table_name not in app_state.lance.table_names():
         return []
     table = app_state.lance.open_table(table_name)
+    search_limit = max(limit + 50, limit * 5)
     try:
-        rows = table.search(query_vector, vector_column_name="vector").limit(limit).to_list()
+        query = table.search(query_vector, vector_column_name="vector")
     except TypeError:
-        rows = table.search(query_vector).limit(limit).to_list()
+        query = table.search(query_vector)
+    try:
+        rows = query.where(f"doc_id != '{CORE_MEMORY_DOC_ID}'").limit(limit).to_list()
+    except Exception:
+        rows = query.limit(search_limit).to_list()
+        rows = [row for row in rows if row.get("doc_id") != CORE_MEMORY_DOC_ID][:limit]
     results = []
     for rank, row in enumerate(rows, start=1):
         item = dict(row)
@@ -251,10 +312,18 @@ def _lexical_search(app_state, prompt: str, limit: int) -> list[dict]:
 
 
 def _fts_query(prompt: str) -> str:
-    terms = re.findall(r"[\w]+", prompt, flags=re.UNICODE)
+    raw_terms = [term.lower() for term in re.findall(r"[\w]+", prompt, flags=re.UNICODE)]
+    terms: list[str] = []
+    for term in raw_terms:
+        if len(term) < 3 or term in QUERY_STOPWORDS:
+            continue
+        terms.append(term)
+        if term.endswith("s") and len(term) > 4:
+            terms.append(term[:-1])
     if not terms:
         return '""'
-    return " OR ".join(f'"{term}"' for term in terms[:24])
+    unique_terms = list(dict.fromkeys(terms))
+    return " OR ".join(f"{term}*" for term in unique_terms[:24])
 
 
 def _fuse_rrf(dense_results: list[dict], lexical_results: list[dict], limit: int) -> list[dict]:
@@ -308,23 +377,28 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     all_sources: list[SourceChunk] = []
     search_modes: list[str] = []
     subqueries = plan_subqueries(prompt)
+    numeric_context, numeric_sources = _numeric_analysis_for_query(app_state, prompt)
+    if numeric_context:
+        context_chunks.extend(numeric_context)
+        all_sources.extend(numeric_sources)
+        search_modes.append("numeric_scan")
+    else:
+        for subquery in subqueries:
+            vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
+            results, mode = await _search_once(app_state, subquery["text"], vector, settings)
+            search_modes.append(mode)
+            reranked = _select_relevant_results(rerank(app_state, subquery["text"], results), settings.rerank_top_n)
+            sources = hydrate_sources(app_state, reranked, subquery["id"])
+            all_sources.extend(sources)
+            source_by_chunk = {source.chunk_id: source for source in sources}
 
-    for subquery in subqueries:
-        vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
-        results, mode = await _search_once(app_state, subquery["text"], vector, settings)
-        search_modes.append(mode)
-        reranked = rerank(app_state, subquery["text"], results)[:settings.rerank_top_n]
-        sources = hydrate_sources(app_state, reranked, subquery["id"])
-        all_sources.extend(sources)
-        source_by_chunk = {source.chunk_id: source for source in sources}
-
-        for res in reranked:
-            source = source_by_chunk.get(res["id"])
-            if res["doc_id"] == "core_memory":
-                context_chunks.append(res["text"])
-            else:
-                label = source.doc_name if source else "Unknown"
-                context_chunks.append(f"[{subquery['id']} Source: {label} | Chunk: {res['id']}]\n{res['text']}")
+            for res in reranked:
+                source = source_by_chunk.get(res["id"])
+                if res["doc_id"] == CORE_MEMORY_DOC_ID:
+                    context_chunks.append(res["text"])
+                else:
+                    label = source.doc_name if source else "Unknown"
+                    context_chunks.append(f"[{subquery['id']} Source: {label} | Chunk: {res['id']}]\n{res['text']}")
 
     _mark_sources_retrieved(app_state, all_sources)
     confidence = confidence_from_sources(all_sources)
@@ -356,6 +430,82 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "metrics_path": metrics_path,
     }
     return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
+
+
+def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list[SourceChunk]]:
+    lowered = prompt.lower()
+    if not any(term in lowered for term in ("traffic", "download", "downloaded", "upload", "uploaded")):
+        return [], []
+    if not any(term in lowered for term in ("heaviest", "highest", "max", "maximum", "most", "largest")):
+        return [], []
+
+    rows = storage.fetchall(
+        app_state.sqlite,
+        """
+        SELECT documents.id AS doc_id, documents.path, documents.display_name, chunks.id AS chunk_id, chunks.text
+        FROM documents
+        JOIN chunks ON chunks.doc_id = documents.id
+        WHERE documents.type = 'file'
+        ORDER BY documents.ingested_at DESC, chunks.chunk_index
+        """,
+    )
+    best: dict[str, Any] | None = None
+    metric = _traffic_ranking_metric(lowered)
+    for row in rows:
+        doc_label = f"{row['display_name'] or ''} {row['path'] or ''}".lower()
+        if "traffic" not in doc_label and "traffic" not in row["text"].lower():
+            continue
+        for match in re.finditer(r"(\d{4}/\d{2}/\d{2})\s+(\d+)/(\d+)", row["text"]):
+            uploaded = int(match.group(2))
+            downloaded = int(match.group(3))
+            value = downloaded if metric == "downloaded" else uploaded if metric == "uploaded" else uploaded + downloaded
+            if best is None or value > best["value"]:
+                best = {
+                    "date": match.group(1),
+                    "uploaded": uploaded,
+                    "downloaded": downloaded,
+                    "value": value,
+                    "metric": metric,
+                    "doc_id": row["doc_id"],
+                    "doc_name": row["display_name"] or os.path.basename(row["path"]),
+                    "chunk_id": row["chunk_id"],
+                }
+    if best is None:
+        return [], []
+
+    text = (
+        f"[Computed Source: {best['doc_name']} | Chunk: {best['chunk_id']}]\n"
+        f"Traffic numeric analysis over all indexed rows: heaviest {best['metric']} traffic day is {best['date']} "
+        f"with total={best['uploaded'] + best['downloaded']}, uploaded={best['uploaded']}, "
+        f"and downloaded={best['downloaded']}."
+    )
+    source = SourceChunk(
+        rank=1,
+        doc_id=best["doc_id"],
+        doc_name=best["doc_name"],
+        chunk_id=best["chunk_id"],
+        score=1.0,
+        snippet=(
+            f"Heaviest {best['metric']}: {best['date']} total={best['uploaded'] + best['downloaded']} "
+            f"uploaded={best['uploaded']} downloaded={best['downloaded']}"
+        ),
+        rerank_score=1.0,
+        fusion_score=1.0,
+        subquery_id="computed",
+    )
+    return [text], [source]
+
+
+def _traffic_ranking_metric(lowered_prompt: str) -> str:
+    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}download(?:ed|s)?\b", lowered_prompt):
+        return "downloaded"
+    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}upload(?:ed|s)?\b", lowered_prompt):
+        return "uploaded"
+    if re.search(r"\bheaviest\s+(?:downloaded|downloads?)\b", lowered_prompt):
+        return "downloaded"
+    if re.search(r"\bheaviest\s+(?:uploaded|uploads?)\b", lowered_prompt):
+        return "uploaded"
+    return "total"
 
 
 def _mark_sources_retrieved(app_state, sources: list[SourceChunk]) -> None:

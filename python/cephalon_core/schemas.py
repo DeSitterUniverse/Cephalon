@@ -78,6 +78,10 @@ class QueryRequest(BaseModel):
     settings: RagSettings | None = None
 
 
+class LoadModelRequest(BaseModel):
+    model: str
+
+
 class DocumentUpdateRequest(BaseModel):
     display_name: str | None = None
 

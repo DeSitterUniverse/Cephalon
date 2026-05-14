@@ -1,46 +1,54 @@
 # Cephalon
 
-Cephalon is a local-first desktop RAG workbench built with Tauri, React, FastAPI, LanceDB, SQLite, ONNX Runtime, and llama.cpp. It ingests local files, embeds and reranks them locally, then answers with source metadata exposed in the UI.
+Cephalon is a local-first desktop RAG workbench for searching, analyzing, and citing files on your machine. It uses a Tauri shell, a React workbench, a FastAPI backend, SQLite FTS5, LanceDB vectors, ONNX Runtime for embedding/reranking, and llama.cpp for local GGUF chat models.
+
+## Current Features
+
+- Dense dark desktop workbench with document library, chat, sources, jobs, settings, and document details.
+- Explicit GGUF model loading from the UI before querying, with Vulkan/context diagnostics.
+- Local ingestion for common document types plus text-safe unknown file extensions.
+- Durable ingestion jobs with document/job state and SSE live updates.
+- SQLite metadata, FTS5 lexical search, LanceDB dense vectors, RRF fusion, ONNX reranking, confidence metadata, and structured query streams.
+- Source inspection with document id, file name, chunk id, vector score, lexical score, fusion score, rerank score, snippet, and subquery id.
+- Deterministic numeric scan for traffic-style maximum questions where exact row math is better than generative inference.
+- Numeric metrics export to the user Documents metrics directory for later analysis.
 
 ## Architecture
 
-- **Desktop shell:** Tauri v2 starts the React frontend. In dev it launches the current source backend from `.venv`; in packaged builds it launches the PyInstaller backend sidecar.
-- **Frontend:** React + Vite dense workbench UI with TanStack Query for server state, Zustand for UI state, and SSE for live job/document updates.
-- **Backend:** FastAPI package under `python/cephalon_core` with config, migrations, storage, routes, ingestion jobs, retrieval, generation, and model services.
-- **Storage:** SQLite tracks metadata, jobs, tags, settings, migrations, and FTS5 lexical chunks. LanceDB stores dense vectors only.
-- **Inference:** ONNX Runtime handles only embeddings/reranking. `.gguf` chat models in `~/cephalon-data/models` are loaded through `llama-cpp-python`; Tauri dev requires the Vulkan llama.cpp backend and reuses the bundled Vulkan DLLs when `src-tauri/backend/engine/_internal` is present.
+- `src-tauri`: native shell, backend launch, window config, file dialogs, release resources, and environment setup.
+- `src`: React/Vite frontend with TanStack Query server state, Zustand UI state, typed API calls, SSE hook, and compact panels.
+- `python/main.py`: uvicorn entrypoint.
+- `python/cephalon_core`: backend package for config, app factory, routes, schemas, storage, ingestion, retrieval, generation, jobs, metrics, and model loading.
+- SQLite is the metadata source of truth and provides FTS5 BM25 lexical search.
+- LanceDB stores dense vectors only.
+- ONNX Runtime handles `jinaai/jina-embeddings-v5-text-small` and `jinaai/jina-reranker-v3`.
+- llama.cpp loads selectable local `.gguf` chat models with GPU offload enabled when the installed backend supports Vulkan.
 
-## Local Data
+See [CEPHALON_ARCHITECTURE_DEEP_DIVE.md](CEPHALON_ARCHITECTURE_DEEP_DIVE.md) for a deeper system walkthrough.
 
-Default local data path:
+## Local Data And Models
+
+Default paths:
 
 ```powershell
 ~/cephalon-data
+~/cephalon-data/models
+~/Documents/Cephalon Metrics
 ```
 
 Expected model layout:
 
 ```text
 ~/cephalon-data/models/
-  reranker/model.onnx
   embedder/model.onnx
-  *.gguf
+  embedder/tokenizer files...
+  reranker/model.onnx
+  reranker/tokenizer files...
+  granite-4.1-8b-Q4_K_S.gguf
+  NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf
 ```
 
-Useful overrides:
-
-```powershell
-$env:CEPHALON_DATA_DIR="C:\path\to\data"
-$env:CEPHALON_MODEL_DIR="C:\path\to\models"
-$env:CEPHALON_MAX_TOKENS="512"
-$env:CEPHALON_TOP_K="20"
-$env:CEPHALON_RERANK_TOP_N="3"
-$env:CEPHALON_CONTEXT_TOKENS="32768"
-$env:CEPHALON_FULL_CONTEXT="0"
-$env:CEPHALON_METRICS_DIR="$HOME\Documents\Cephalon Metrics"
-$env:CEPHALON_REQUIRE_VULKAN="1"
-$env:CEPHALON_LLAMA_VERBOSE="0"
-```
+Only chat-capable `.gguf` files appear in the model picker. Embedder, retrieval, reranker, and cross-encoder GGUF files are intentionally hidden from chat selection.
 
 ## Install
 
@@ -50,7 +58,7 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-If ONNX models are missing:
+Export ONNX models only when missing or intentionally replacing them:
 
 ```powershell
 python -m venv .venv-export
@@ -59,11 +67,11 @@ python -m venv .venv-export
 .venv\Scripts\python.exe scripts\validate_onnx_models.py --mark
 ```
 
-The Jina v5 embedder uses a custom PEFT/Qwen architecture, so `export_onnx.py` exports it through Cephalon's direct Torch ONNX wrapper instead of Optimum's generic feature-extraction exporter. The exported embedder records a fixed ONNX sequence length in `cephalon_onnx_meta.json`; the backend pads to that length automatically. The Jina v3 reranker export records the validated scoring mode in the same metadata file and must pass `scripts\validate_onnx_models.py --mark` before startup. Runtime tokenizer loading passes `fix_mistral_regex=True` so the Jina reranker tokenizer uses the corrected regex behavior.
+The reranker tokenizer is loaded with `fix_mistral_regex=True`. The backend refuses unvalidated or mismatched ONNX artifacts instead of silently falling back to another model.
 
 ## Run
 
-Backend:
+Backend only:
 
 ```powershell
 .venv\Scripts\python.exe python\main.py
@@ -75,15 +83,15 @@ Desktop development app:
 npm run tauri dev
 ```
 
-`npm run tauri dev` now starts the FastAPI backend automatically. It uses `.venv\Scripts\python.exe`, points the backend at `~/cephalon-data`, discovers GGUF files from `~/cephalon-data/models`, and requires the Vulkan llama.cpp backend for model loading. If a stale backend is already using port `8765`, stop it first so Tauri can launch the current source backend.
-
-Frontend-only development:
+Frontend only:
 
 ```powershell
 npm run dev
 ```
 
-## Build
+The desktop app starts the backend automatically in dev and packaged builds unless `CEPHALON_EXTERNAL_BACKEND=1` is set. In the UI, choose a GGUF model and press **Load** before running a query.
+
+## Build And Release
 
 Frontend:
 
@@ -103,17 +111,21 @@ Full Windows release pipeline:
 .\scripts\build_release.ps1
 ```
 
-Tauri app:
+Tauri package:
 
 ```powershell
 npm run tauri build
 ```
+
+Generated folders such as `.venv`, `.venv-export`, `dist`, `build`, `src-tauri/target`, `src-tauri/backend`, and local data directories should not be committed.
 
 ## Test
 
 ```powershell
 .venv\Scripts\python.exe -m py_compile python\main.py python\test_backend_stabilization.py python\test_ingest_query.py python\test_query_only.py
 .venv\Scripts\python.exe -m pytest -q --basetemp .pytest-tmp
+.venv\Scripts\python.exe scripts\validate_onnx_models.py
+npx.cmd tsc --noEmit
 npm.cmd run test:frontend
 npm.cmd run build
 cd src-tauri
@@ -127,20 +139,46 @@ $env:CEPHALON_TEST_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
 .venv\Scripts\python.exe python\test_ingest_query.py
 ```
 
-## API Notes
+## Configuration
 
-- `GET /health` returns startup diagnostics, Vulkan status, active embedding table, and retrieval index health.
-- `GET /settings` and `PUT /settings` manage RAG defaults, including context token cap and full-context mode.
-- `POST /ingest` queues a durable job and returns `job_id`; known document types use native extractors, and unknown file types are imported as text when binary guards allow it. Binary unknown files fail with a clear reason instead of being silently accepted.
-- `GET /jobs` lists recent jobs.
-- `GET /events` streams SSE job/document/settings updates.
-- `POST /query` streams typed SSE events: `subquery`, `source`, `answer_meta`, `token`, `error`, and `done`.
-- `POST /metrics/export` writes a numeric corpus snapshot CSV under the configured metrics directory. If the directory is unavailable, the endpoint returns `status: "failed"` and `/health` exposes `last_metrics_error`; chat/query still works.
-- Document APIs support detail, rename, delete, reindex, and tag management.
+Common runtime variables:
 
-## Reproducibility Notes
+```powershell
+$env:CEPHALON_DATA_DIR="C:\path\to\data"
+$env:CEPHALON_MODEL_DIR="C:\path\to\models"
+$env:CEPHALON_METRICS_DIR="$HOME\Documents\Cephalon Metrics"
+$env:CEPHALON_HOST="127.0.0.1"
+$env:CEPHALON_PORT="8765"
+$env:CEPHALON_REQUIRE_VULKAN="1"
+$env:CEPHALON_LLAMA_VERBOSE="0"
+$env:CEPHALON_CONTEXT_TOKENS="32768"
+$env:CEPHALON_FULL_CONTEXT="0"
+```
 
-- Runtime dependencies are pinned in `requirements.txt`; export-only dependencies are isolated in `requirements-export.txt`.
-- Retrieval uses SQLite FTS5 plus LanceDB dense vectors with reciprocal rank fusion. Tantivy is not part of the runtime path.
-- Jina embedding/reranker models are CC BY-NC 4.0. Keep license notices with packaged artifacts.
-- The release pipeline validates ONNX models before packaging. Unvalidated or mismatched embedder/reranker exports stop startup with a clear error instead of falling back to a different model.
+Future remote/offloaded backend mode:
+
+```powershell
+$env:CEPHALON_EXTERNAL_BACKEND="1"
+$env:CEPHALON_HOST="192.168.1.20"
+$env:CEPHALON_PORT="8765"
+```
+
+For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time or put `cephalon.apiBaseUrl` in browser local storage. This path is present for future multi-PC/offloaded deployments, but release smoke testing currently targets the local backend.
+
+## API Overview
+
+- `GET /health`: startup status, paths, model diagnostics, Vulkan status, retrieval index state, and embedding metadata.
+- `GET /models`: available chat GGUF models and current loaded model.
+- `POST /models/load`: explicitly load the selected GGUF into llama.cpp.
+- `GET/PUT /settings`: RAG and generation defaults.
+- `POST /ingest`: queue file/folder ingestion.
+- `GET /jobs`: recent ingestion jobs.
+- `GET /events`: SSE job/document/settings stream.
+- `GET/PATCH/DELETE /documents/{id}`: document details, rename, and delete.
+- `POST /documents/{id}/reindex`: reindex a document while preserving display name and tags.
+- `POST /query`: typed SSE query stream. The selected model must already be loaded.
+- `POST /metrics/export`: write a numeric corpus snapshot CSV.
+
+## Licensing Notes
+
+Jina embedding and reranking model artifacts are CC BY-NC 4.0. Keep model notices with packaged artifacts and verify downstream usage is compatible with that license.

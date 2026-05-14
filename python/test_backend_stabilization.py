@@ -11,6 +11,7 @@ from cephalon_core.events import EventBus
 from cephalon_core.schemas import RagSettings
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
 from cephalon_core.app_factory import _read_model_meta
+from cephalon_core import routes
 from cephalon_core.services import metrics, retrieval
 from cephalon_core.services.ingestion import delete_document_rows, delete_document_vectors, process_single_file
 from cephalon_core.services.jobs import JobManager
@@ -221,6 +222,21 @@ def test_jina_model_metadata_is_strict():
     assert "score_mode" in _validate_reranker_meta({"model_id": "jinaai/jina-reranker-v3", "validated": True})
 
 
+def test_query_requires_explicit_loaded_model():
+    app_state = SimpleNamespace(startup_error=None, active_model_name="loaded.gguf")
+    with pytest.raises(HTTPException) as exc:
+        routes._ensure_query_model_loaded(app_state, "other.gguf")
+
+    assert exc.value.status_code == 409
+    assert "Load the selected GGUF model" in exc.value.detail
+
+
+def test_query_accepts_loaded_model():
+    app_state = SimpleNamespace(startup_error=None, active_model_name="loaded.gguf")
+
+    routes._ensure_query_model_loaded(app_state, "loaded.gguf")
+
+
 def test_model_metadata_reader_rejects_non_object_json(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -253,6 +269,123 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert sources[0].fusion_score is not None
     assert "sqlite_fts5" in meta["search_modes"][0]
     assert "Cephalon retrieval fixture" in context
+
+
+def test_fts_query_ignores_question_stopwords():
+    query = retrieval._fts_query("what are the best supplements for stress advice")
+
+    assert "what" not in query
+    assert "supplement*" in query
+    assert "stress*" in query
+    assert "advice*" in query
+
+
+def test_retrieval_prior_keeps_exact_lexical_matches_above_bad_raw_rerank():
+    lexical = {"text": "stress supplements ashwagandha rhodiola omega", "lexical_rank": 1}
+    unrelated = {"text": "distributed systems cap theorem consistency availability", "dense_rank": 1}
+
+    lexical_score = retrieval._final_retrieval_score("best stress supplements", lexical, -0.6)
+    unrelated_score = retrieval._final_retrieval_score("best stress supplements", unrelated, 1.9)
+
+    assert lexical_score > unrelated_score
+
+
+def test_relevant_selection_keeps_same_document_and_drops_weak_dense_strays():
+    ranked = [
+        {"id": "stress_0", "doc_id": "stress", "score": 3.7, "lexical_rank": 1},
+        {"id": "stress_1", "doc_id": "stress", "score": 0.84, "dense_rank": 2},
+        {"id": "traffic_0", "doc_id": "traffic", "score": 0.64, "dense_rank": 3},
+    ]
+
+    selected = retrieval._select_relevant_results(ranked, 3)
+
+    assert [result["id"] for result in selected] == ["stress_0", "stress_1"]
+
+
+def test_dense_search_excludes_core_memory_rows():
+    state = build_memory_state()
+    state.lance.table = FakeTable()
+    state.lance.table.rows = [
+        {"id": "mem_1", "doc_id": "core_memory", "text": "Repeated user prompt", "_distance": 0.0},
+        {"id": "doc_1_0", "doc_id": "11111111-1111-4111-8111-111111111111", "text": "Document chunk", "_distance": 0.5},
+    ]
+
+    results = retrieval._dense_search(state, vector_table_name(state), [0.0], 1)
+
+    assert [row["id"] for row in results] == ["doc_1_0"]
+
+
+def test_numeric_traffic_analysis_scans_all_chunks(tmp_path):
+    state = build_memory_state()
+    doc_id = "11111111-1111-4111-8111-111111111111"
+    path = str(tmp_path / "history_traffic.dat")
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (doc_id, path, "history_traffic.dat", "hash", 2, "ready", "file"),
+    )
+    chunks = [
+        ("11111111-1111-4111-8111-111111111111_0", "2026/04/12 24403931/1000\n"),
+        ("11111111-1111-4111-8111-111111111111_1", "2025/08/14 19747776/177090636\n"),
+    ]
+    for index, (chunk_id, text) in enumerate(chunks):
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO chunks (id, doc_id, chunk_index, text, chunk_length) VALUES (?, ?, ?, ?, ?)",
+            (chunk_id, doc_id, index, text, len(text)),
+        )
+        storage.upsert_chunk_fts(state.sqlite, chunk_id, doc_id, text)
+
+    context, sources = retrieval._numeric_analysis_for_query(
+        state,
+        "what is my heaviest traffic day, show amount of data downloaded",
+    )
+
+    assert "heaviest total traffic day is 2025/08/14" in context[0]
+    assert "downloaded=177090636" in context[0]
+    assert sources[0].chunk_id.endswith("_1")
+
+
+def test_numeric_traffic_analysis_can_rank_by_download_when_explicit(tmp_path):
+    assert retrieval._traffic_ranking_metric("highest downloaded traffic day") == "downloaded"
+    assert retrieval._traffic_ranking_metric("heaviest traffic day show amount downloaded") == "total"
+
+
+def test_numeric_traffic_query_uses_computed_context_only(monkeypatch, tmp_path):
+    state = build_memory_state()
+    doc_id = "11111111-1111-4111-8111-111111111111"
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (doc_id, str(tmp_path / "history_traffic.dat"), "history_traffic.dat", "hash", 1, "ready", "file"),
+    )
+    storage.execute(
+        state.sqlite,
+        "INSERT INTO chunks (id, doc_id, chunk_index, text, chunk_length) VALUES (?, ?, ?, ?, ?)",
+        (f"{doc_id}_0", doc_id, 0, "2025/08/14 19747776/177090636", 31),
+    )
+
+    async def fail_search(*_args, **_kwargs):
+        raise AssertionError("numeric traffic max queries should not run generic retrieval")
+
+    monkeypatch.setattr(retrieval, "_search_once", fail_search)
+
+    context, sources, meta = asyncio.run(retrieval.retrieve_context(
+        state,
+        "what is my heaviest traffic day, show amount of data downloaded",
+        [0.0],
+        RagSettings(),
+    ))
+
+    assert "2025/08/14" in context
+    assert sources[0].subquery_id == "computed"
+    assert meta["search_modes"] == ["numeric_scan"]
 
 
 def test_delete_vectors_uses_active_table_and_safe_filter(tmp_path):

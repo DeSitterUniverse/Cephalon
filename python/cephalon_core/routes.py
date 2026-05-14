@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from . import storage
-from .schemas import DocumentUpdateRequest, IngestRequest, QueryRequest, RagSettings, TagRequest
+from .schemas import DocumentUpdateRequest, IngestRequest, LoadModelRequest, QueryRequest, RagSettings, TagRequest
 from .services import generation, ingestion, metrics, models, retrieval
 from .validators import normalize_existing_path, validate_document_id, validate_tag
 
@@ -13,6 +13,11 @@ router = APIRouter()
 
 def state(request: Request):
     return request.app.state
+
+
+def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
+    if getattr(app_state, "active_model_name", None) != requested_model:
+        raise HTTPException(status_code=409, detail="Load the selected GGUF model before querying.")
 
 
 @router.get("/health")
@@ -46,6 +51,24 @@ def get_models(request: Request):
     return {
         "models": models.list_models(app_state.settings),
         "model_dir": app_state.settings.model_dir,
+        "active_model": getattr(app_state, "active_model_name", None),
+        "active_context_tokens": getattr(app_state, "active_context_tokens", None),
+        "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
+        "llama_backend": models.llama_backend_info(),
+    }
+
+
+@router.post("/models/load")
+def load_model(request: Request, req: LoadModelRequest):
+    app_state = state(request)
+    if app_state.startup_error:
+        raise HTTPException(status_code=503, detail=app_state.startup_error)
+    if not req.model.strip():
+        raise HTTPException(status_code=400, detail="Select a local GGUF model before loading.")
+
+    models.load_llm(app_state, req.model)
+    return {
+        "status": "loaded",
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
@@ -181,13 +204,10 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         raise HTTPException(status_code=400, detail="Select a local GGUF model before querying.")
 
     rag_settings = req.settings or storage.get_rag_settings(app_state.sqlite)
-    models.load_llm(app_state, req.model) if getattr(app_state, "active_model_name", None) != req.model else None
+    _ensure_query_model_loaded(app_state, req.model)
 
     query_vector = await retrieval.get_embedding(app_state, req.prompt)
     context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
-
-    async def after_response():
-        await retrieval.save_permanent_memory(app_state, req.prompt, query_vector)
 
     def response_stream():
         for subquery in query_meta["subqueries"]:
@@ -202,8 +222,6 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         except Exception as exc:
             yield _sse("error", {"message": str(exc)})
 
-    # Save memory before returning; FastAPI BackgroundTasks cannot be attached to this manual stream cleanly here.
-    await after_response()
     return StreamingResponse(response_stream(), media_type="text/event-stream")
 
 

@@ -26,10 +26,11 @@ function parseThinking(content: string): { thinking: string; response: string } 
 
 type Props = {
   selectedModel: string;
+  modelReady: boolean;
   settings?: RagSettings;
 };
 
-export function ChatPanel({ selectedModel, settings }: Props) {
+export function ChatPanel({ selectedModel, modelReady, settings }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -42,7 +43,7 @@ export function ChatPanel({ selectedModel, settings }: Props) {
 
   async function handleSend(event: FormEvent) {
     event.preventDefault();
-    if (!input.trim() || isTyping || !selectedModel || !settings) return;
+    if (!input.trim() || isTyping || !selectedModel || !modelReady || !settings) return;
 
     const userMsg = input.trim();
     const historyPayload = messages.slice(-6);
@@ -91,7 +92,7 @@ export function ChatPanel({ selectedModel, settings }: Props) {
         {messages.length === 0 && (
           <div className="chat-empty">
             <h2>Search your documents</h2>
-            <p>Select a model, import files, and review the cited sources for each response.</p>
+            <p>Import files, load a local model, and review the cited sources for each response.</p>
           </div>
         )}
         {messages.map((message, index) => {
@@ -110,8 +111,13 @@ export function ChatPanel({ selectedModel, settings }: Props) {
         <div ref={endRef} />
       </div>
       <form className="composer" onSubmit={handleSend}>
-        <input value={input} onChange={event => setInput(event.target.value)} disabled={isTyping || !selectedModel} placeholder={selectedModel ? "Search, compare, summarize..." : "Select a local model to start."} />
-        <button disabled={isTyping || !input.trim() || !selectedModel || !settings}><Send size={16} />Run</button>
+        <input
+          value={input}
+          onChange={event => setInput(event.target.value)}
+          disabled={isTyping || !selectedModel || !modelReady}
+          placeholder={!selectedModel ? "Select a local model." : !modelReady ? "Load the selected model first." : "Search, compare, summarize..."}
+        />
+        <button disabled={isTyping || !input.trim() || !selectedModel || !modelReady || !settings}><Send size={16} />Run</button>
       </form>
     </section>
   );

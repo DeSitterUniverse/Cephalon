@@ -34,6 +34,7 @@ __pycache__/
 *.pyc
 build/
 *.spec
+.pytest-tmp*/
 
 # Bundled Backend Sidecar
 src-tauri/backend/
@@ -45,6 +46,3 @@ data/lancedb/
 # Environment Variables
 .env
 .env.*
-
-# Internal Docs
-CEPHALON_ARCHITECTURE_DEEP_DIVE.md

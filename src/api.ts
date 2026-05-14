@@ -76,8 +76,16 @@ export type HealthResponse = {
   embedding?: { model_id: string; dimension: number; table: string };
 };
 
-type ModelsResponse = {
+export type ModelsResponse = {
   models: string[];
+  active_model?: string | null;
+  active_context_tokens?: number | null;
+  active_model_context_tokens?: number | null;
+  llama_backend?: HealthResponse["llama_backend"];
+};
+export type LoadModelResponse = {
+  status: "loaded";
+  active_model: string | null;
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
   llama_backend?: HealthResponse["llama_backend"];
@@ -86,7 +94,7 @@ type DocumentsResponse = { documents: Document[] };
 type JobsResponse = { jobs: Job[] };
 type IngestResponse = { job_id: string; status: string; message?: string };
 
-const API_BASE_URL = import.meta.env.VITE_CEPHALON_API_URL ?? "http://127.0.0.1:8765";
+const API_BASE_URL = window.localStorage.getItem("cephalon.apiBaseUrl") || import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
 
 export class ApiError extends Error {
   status: number;
@@ -132,8 +140,19 @@ export async function healthCheck(): Promise<boolean> {
   }
 }
 
+export function getHealth(): Promise<HealthResponse> {
+  return requestJson<HealthResponse>("/health");
+}
+
 export function getModels(): Promise<ModelsResponse> {
   return requestJson<ModelsResponse>("/models");
+}
+
+export function loadModel(model: string): Promise<LoadModelResponse> {
+  return requestJson<LoadModelResponse>("/models/load", {
+    method: "POST",
+    body: JSON.stringify({ model }),
+  });
 }
 
 export function getDocuments(): Promise<DocumentsResponse> {
