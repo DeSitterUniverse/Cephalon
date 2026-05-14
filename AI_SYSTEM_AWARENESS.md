@@ -21,7 +21,7 @@ Ingestion extracts or text-imports files, chunks content, stores metadata in SQL
 
 Query flow:
 
-1. Use deterministic numeric scan for traffic maximum questions when applicable.
+1. Use deterministic numeric record analysis for exact max-style questions when indexed rows make that possible.
 2. Otherwise plan subqueries for compound questions.
 3. Search LanceDB dense vectors and SQLite FTS5 BM25 independently.
 4. Fuse with reciprocal rank fusion.

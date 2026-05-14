@@ -1,16 +1,16 @@
 # Cephalon
 
-Cephalon is a local-first desktop RAG workbench for searching, analyzing, and citing files on your machine. It uses a Tauri shell, a React workbench, a FastAPI backend, SQLite FTS5, LanceDB vectors, ONNX Runtime for embedding/reranking, and llama.cpp for local GGUF chat models.
+Cephalon is a local-first desktop RAG workbench for searching, analyzing, and citing files on your machine. It uses a Tauri shell, React, FastAPI, SQLite FTS5, LanceDB, ONNX Runtime, and llama.cpp.
 
 ## Current Features
 
-- Dense dark desktop workbench with document library, chat, sources, jobs, settings, and document details.
+- Compact desktop workbench with document library, chat, sources, jobs, settings, and document details.
 - Explicit GGUF model loading from the UI before querying, with Vulkan/context diagnostics.
 - Local ingestion for common document types plus text-safe unknown file extensions.
 - Durable ingestion jobs with document/job state and SSE live updates.
 - SQLite metadata, FTS5 lexical search, LanceDB dense vectors, RRF fusion, ONNX reranking, confidence metadata, and structured query streams.
 - Source inspection with document id, file name, chunk id, vector score, lexical score, fusion score, rerank score, snippet, and subquery id.
-- Deterministic numeric scan for traffic-style maximum questions where exact row math is better than generative inference.
+- Deterministic numeric record analysis for exact max-style questions over structured rows.
 - Numeric metrics export to the user Documents metrics directory for later analysis.
 
 ## Architecture
@@ -44,8 +44,7 @@ Expected model layout:
   embedder/tokenizer files...
   reranker/model.onnx
   reranker/tokenizer files...
-  granite-4.1-8b-Q4_K_S.gguf
-  NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf
+  chat-model.gguf
 ```
 
 Only chat-capable `.gguf` files appear in the model picker. Embedder, retrieval, reranker, and cross-encoder GGUF files are intentionally hidden from chat selection.
@@ -122,21 +121,11 @@ Generated folders such as `.venv`, `.venv-export`, `dist`, `build`, `src-tauri/t
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe -m py_compile python\main.py python\test_backend_stabilization.py python\test_ingest_query.py python\test_query_only.py
 .venv\Scripts\python.exe -m pytest -q --basetemp .pytest-tmp
-.venv\Scripts\python.exe scripts\validate_onnx_models.py
 npx.cmd tsc --noEmit
-npm.cmd run test:frontend
 npm.cmd run build
 cd src-tauri
 cargo check
-```
-
-Manual backend smoke test with a running backend:
-
-```powershell
-$env:CEPHALON_TEST_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
-.venv\Scripts\python.exe python\test_ingest_query.py
 ```
 
 ## Configuration

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, Circle, Database, SlidersHorizontal } from "lucide-react";
+import { Circle, FileText, ListChecks, Settings } from "lucide-react";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
 
@@ -36,13 +36,13 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
           <div className="topbar-actions">
             {modelControl}
             <button className={rightPanel === "jobs" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("jobs")} title="Jobs">
-              <Activity size={16} />
+              <ListChecks size={16} />
             </button>
             <button className={rightPanel === "document" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("document")} title="Document details">
-              <Database size={16} />
+              <FileText size={16} />
             </button>
             <button className={rightPanel === "settings" ? "icon-button active" : "icon-button"} onClick={() => setRightPanel("settings")} title="Search and model controls">
-              <SlidersHorizontal size={16} />
+              <Settings size={16} />
             </button>
             <span className={eventStatus === "connected" ? "status-pill ok" : eventStatus === "offline" ? "status-pill danger" : "status-pill warn"} title={liveTitle}>
               <Circle size={9} fill="currentColor" />

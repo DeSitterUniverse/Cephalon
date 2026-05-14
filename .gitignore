@@ -35,6 +35,7 @@ __pycache__/
 build/
 *.spec
 .pytest-tmp*/
+.codex-working-context.md
 
 # Bundled Backend Sidecar
 src-tauri/backend/

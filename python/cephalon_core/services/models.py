@@ -124,7 +124,7 @@ def load_llm(app_state, model_filename: str) -> None:
         )
 
     if getattr(app_state, "llm", None) is not None:
-        print("Deallocating previous VRAM model...")
+        print("Deallocating active VRAM model...")
         del app_state.llm
         gc.collect()
 

@@ -1,6 +1,6 @@
 # Cephalon Architecture Deep Dive
 
-Cephalon is a local-first RAG desktop app. The architecture keeps the UI lightweight, keeps local metadata durable, and isolates model-heavy work in the backend process so the app can evolve toward packaged releases and future off-machine model serving with minimal changes.
+Cephalon is a local-first RAG desktop app. The architecture keeps local metadata durable, keeps model-heavy work in the backend process, and gives the frontend a small typed API surface.
 
 ## Runtime Topology
 
@@ -48,7 +48,7 @@ LanceDB stores dense vectors in the active embedding table. It does not own docu
 
 ## Retrieval Architecture
 
-Cephalon does not rely on LanceDB/Tantivy hybrid search. Hybrid retrieval is explicit and testable:
+Hybrid retrieval is explicit and testable:
 
 ```text
 query
@@ -63,11 +63,11 @@ query
   -> citation-aware generation
 ```
 
-This avoids Tantivy Python package fragility and keeps lexical state transactional with document metadata.
+Lexical state stays transactional with document metadata, while dense vectors stay isolated in LanceDB.
 
 The reranker score is bounded before combining it with retrieval evidence. Exact lexical matches and strong fused candidates cannot be discarded solely because an ONNX logit is poorly calibrated. Core-memory prompt echoes are excluded from document dense retrieval so repeated failed questions do not reinforce themselves.
 
-Traffic-style maximum questions use a deterministic scan over indexed rows when the prompt asks for heaviest/highest/max traffic, upload, or download. This keeps exact numeric answers out of the generative path.
+Exact max-style questions over indexed numeric rows use deterministic analysis before generation. This keeps row arithmetic and simple comparisons out of the generative path.
 
 ## Query Stream
 
@@ -121,7 +121,7 @@ The root uses `100dvh`, fixed grid rows, and isolated scroll regions so long cha
 
 The app shows a simple boot screen while the frontend waits for `/health`. After boot, the model picker selects a GGUF filename but does not load it. The user presses **Load**, the backend loads the model into llama.cpp, and chat is enabled only when the selected model matches `/models.active_model`.
 
-This state is useful for release robustness because model loading is an explicit failure boundary with visible errors.
+This state gives model loading a clear failure boundary with visible errors.
 
 ## Metrics
 

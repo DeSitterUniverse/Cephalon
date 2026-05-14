@@ -281,25 +281,25 @@ def test_fts_query_ignores_question_stopwords():
 
 
 def test_retrieval_prior_keeps_exact_lexical_matches_above_bad_raw_rerank():
-    lexical = {"text": "stress supplements ashwagandha rhodiola omega", "lexical_rank": 1}
+    lexical = {"text": "domain specific exact terms alpha beta gamma", "lexical_rank": 1}
     unrelated = {"text": "distributed systems cap theorem consistency availability", "dense_rank": 1}
 
-    lexical_score = retrieval._final_retrieval_score("best stress supplements", lexical, -0.6)
-    unrelated_score = retrieval._final_retrieval_score("best stress supplements", unrelated, 1.9)
+    lexical_score = retrieval._final_retrieval_score("domain exact terms", lexical, -0.6)
+    unrelated_score = retrieval._final_retrieval_score("domain exact terms", unrelated, 1.9)
 
     assert lexical_score > unrelated_score
 
 
 def test_relevant_selection_keeps_same_document_and_drops_weak_dense_strays():
     ranked = [
-        {"id": "stress_0", "doc_id": "stress", "score": 3.7, "lexical_rank": 1},
-        {"id": "stress_1", "doc_id": "stress", "score": 0.84, "dense_rank": 2},
-        {"id": "traffic_0", "doc_id": "traffic", "score": 0.64, "dense_rank": 3},
+        {"id": "domain_0", "doc_id": "domain", "score": 3.7, "lexical_rank": 1},
+        {"id": "domain_1", "doc_id": "domain", "score": 0.84, "dense_rank": 2},
+        {"id": "unrelated_0", "doc_id": "unrelated", "score": 0.64, "dense_rank": 3},
     ]
 
     selected = retrieval._select_relevant_results(ranked, 3)
 
-    assert [result["id"] for result in selected] == ["stress_0", "stress_1"]
+    assert [result["id"] for result in selected] == ["domain_0", "domain_1"]
 
 
 def test_dense_search_excludes_core_memory_rows():
@@ -315,17 +315,17 @@ def test_dense_search_excludes_core_memory_rows():
     assert [row["id"] for row in results] == ["doc_1_0"]
 
 
-def test_numeric_traffic_analysis_scans_all_chunks(tmp_path):
+def test_structured_numeric_analysis_scans_all_chunks(tmp_path):
     state = build_memory_state()
     doc_id = "11111111-1111-4111-8111-111111111111"
-    path = str(tmp_path / "history_traffic.dat")
+    path = str(tmp_path / "numeric_records.dat")
     storage.execute(
         state.sqlite,
         """
         INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (doc_id, path, "history_traffic.dat", "hash", 2, "ready", "file"),
+        (doc_id, path, "numeric_records.dat", "hash", 2, "ready", "file"),
     )
     chunks = [
         ("11111111-1111-4111-8111-111111111111_0", "2026/04/12 24403931/1000\n"),
@@ -339,22 +339,22 @@ def test_numeric_traffic_analysis_scans_all_chunks(tmp_path):
         )
         storage.upsert_chunk_fts(state.sqlite, chunk_id, doc_id, text)
 
-    context, sources = retrieval._numeric_analysis_for_query(
+    context, sources = retrieval._structured_numeric_analysis_for_query(
         state,
-        "what is my heaviest traffic day, show amount of data downloaded",
+        "what is my heaviest data day, show amount from the second value",
     )
 
-    assert "heaviest total traffic day is 2025/08/14" in context[0]
-    assert "downloaded=177090636" in context[0]
+    assert "highest total value is on 2025/08/14" in context[0]
+    assert "second=177090636" in context[0]
     assert sources[0].chunk_id.endswith("_1")
 
 
-def test_numeric_traffic_analysis_can_rank_by_download_when_explicit(tmp_path):
-    assert retrieval._traffic_ranking_metric("highest downloaded traffic day") == "downloaded"
-    assert retrieval._traffic_ranking_metric("heaviest traffic day show amount downloaded") == "total"
+def test_structured_numeric_analysis_can_rank_by_named_column_when_explicit(tmp_path):
+    assert retrieval._numeric_record_metric("highest second value day") == "second"
+    assert retrieval._numeric_record_metric("heaviest data day show amount from the second value") == "total"
 
 
-def test_numeric_traffic_query_uses_computed_context_only(monkeypatch, tmp_path):
+def test_structured_numeric_query_uses_computed_context_only(monkeypatch, tmp_path):
     state = build_memory_state()
     doc_id = "11111111-1111-4111-8111-111111111111"
     storage.execute(
@@ -363,7 +363,7 @@ def test_numeric_traffic_query_uses_computed_context_only(monkeypatch, tmp_path)
         INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (doc_id, str(tmp_path / "history_traffic.dat"), "history_traffic.dat", "hash", 1, "ready", "file"),
+        (doc_id, str(tmp_path / "numeric_records.dat"), "numeric_records.dat", "hash", 1, "ready", "file"),
     )
     storage.execute(
         state.sqlite,
@@ -372,13 +372,13 @@ def test_numeric_traffic_query_uses_computed_context_only(monkeypatch, tmp_path)
     )
 
     async def fail_search(*_args, **_kwargs):
-        raise AssertionError("numeric traffic max queries should not run generic retrieval")
+        raise AssertionError("structured numeric max queries should not run generic retrieval")
 
     monkeypatch.setattr(retrieval, "_search_once", fail_search)
 
     context, sources, meta = asyncio.run(retrieval.retrieve_context(
         state,
-        "what is my heaviest traffic day, show amount of data downloaded",
+        "what is my heaviest data day, show amount from the second value",
         [0.0],
         RagSettings(),
     ))

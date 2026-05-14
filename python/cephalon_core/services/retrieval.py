@@ -99,7 +99,7 @@ async def get_embedding(app_state, text: str) -> list[float]:
 
 async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]) -> None:
     memory_id = f"mem_{uuid.uuid4()}"
-    memory_text = f"[Past Conversation Context]: The user previously stated/asked: '{user_prompt}'"
+    memory_text = f"[Past Conversation Context]: The user stated/asked: '{user_prompt}'"
     lance_data = [{
         "vector": vector,
         "id": memory_id,
@@ -377,7 +377,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     all_sources: list[SourceChunk] = []
     search_modes: list[str] = []
     subqueries = plan_subqueries(prompt)
-    numeric_context, numeric_sources = _numeric_analysis_for_query(app_state, prompt)
+    numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
     if numeric_context:
         context_chunks.extend(numeric_context)
         all_sources.extend(numeric_sources)
@@ -432,9 +432,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
 
 
-def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list[SourceChunk]]:
+def _structured_numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list[SourceChunk]]:
     lowered = prompt.lower()
-    if not any(term in lowered for term in ("traffic", "download", "downloaded", "upload", "uploaded")):
+    if not _looks_like_numeric_record_question(lowered):
         return [], []
     if not any(term in lowered for term in ("heaviest", "highest", "max", "maximum", "most", "largest")):
         return [], []
@@ -450,20 +450,19 @@ def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list
         """,
     )
     best: dict[str, Any] | None = None
-    metric = _traffic_ranking_metric(lowered)
+    metric = _numeric_record_metric(lowered)
     for row in rows:
-        doc_label = f"{row['display_name'] or ''} {row['path'] or ''}".lower()
-        if "traffic" not in doc_label and "traffic" not in row["text"].lower():
-            continue
-        for match in re.finditer(r"(\d{4}/\d{2}/\d{2})\s+(\d+)/(\d+)", row["text"]):
-            uploaded = int(match.group(2))
-            downloaded = int(match.group(3))
-            value = downloaded if metric == "downloaded" else uploaded if metric == "uploaded" else uploaded + downloaded
+        for match in re.finditer(r"(\d{4}[/-]\d{2}[/-]\d{2})\s+(\d+)(?:/(\d+))?", row["text"]):
+            first_value = int(match.group(2))
+            second_value = int(match.group(3)) if match.group(3) is not None else None
+            total_value = first_value + second_value if second_value is not None else first_value
+            value = second_value if metric == "second" and second_value is not None else first_value if metric == "first" else total_value
             if best is None or value > best["value"]:
                 best = {
                     "date": match.group(1),
-                    "uploaded": uploaded,
-                    "downloaded": downloaded,
+                    "first_value": first_value,
+                    "second_value": second_value,
+                    "total_value": total_value,
                     "value": value,
                     "metric": metric,
                     "doc_id": row["doc_id"],
@@ -475,9 +474,9 @@ def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list
 
     text = (
         f"[Computed Source: {best['doc_name']} | Chunk: {best['chunk_id']}]\n"
-        f"Traffic numeric analysis over all indexed rows: heaviest {best['metric']} traffic day is {best['date']} "
-        f"with total={best['uploaded'] + best['downloaded']}, uploaded={best['uploaded']}, "
-        f"and downloaded={best['downloaded']}."
+        f"Structured numeric analysis over indexed rows: highest {best['metric']} value is on {best['date']} "
+        f"with total={best['total_value']}, first={best['first_value']}"
+        f"{'' if best['second_value'] is None else f', second={best['second_value']}'}."
     )
     source = SourceChunk(
         rank=1,
@@ -486,8 +485,8 @@ def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list
         chunk_id=best["chunk_id"],
         score=1.0,
         snippet=(
-            f"Heaviest {best['metric']}: {best['date']} total={best['uploaded'] + best['downloaded']} "
-            f"uploaded={best['uploaded']} downloaded={best['downloaded']}"
+            f"Highest {best['metric']}: {best['date']} total={best['total_value']} first={best['first_value']}"
+            f"{'' if best['second_value'] is None else f' second={best['second_value']}'}"
         ),
         rerank_score=1.0,
         fusion_score=1.0,
@@ -496,15 +495,19 @@ def _numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list
     return [text], [source]
 
 
-def _traffic_ranking_metric(lowered_prompt: str) -> str:
-    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}download(?:ed|s)?\b", lowered_prompt):
-        return "downloaded"
-    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}upload(?:ed|s)?\b", lowered_prompt):
-        return "uploaded"
-    if re.search(r"\bheaviest\s+(?:downloaded|downloads?)\b", lowered_prompt):
-        return "downloaded"
-    if re.search(r"\bheaviest\s+(?:uploaded|uploads?)\b", lowered_prompt):
-        return "uploaded"
+def _looks_like_numeric_record_question(lowered_prompt: str) -> bool:
+    return bool(re.search(r"\b(?:record|row|date|day|amount|value|data|total|first|second|download(?:ed|s)?|upload(?:ed|s)?)\b", lowered_prompt))
+
+
+def _numeric_record_metric(lowered_prompt: str) -> str:
+    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}(?:download(?:ed|s)?|second)\b", lowered_prompt):
+        return "second"
+    if re.search(r"\b(?:most|highest|max(?:imum)?|largest)\s+(?:\w+\s+){0,2}(?:upload(?:ed|s)?|first)\b", lowered_prompt):
+        return "first"
+    if re.search(r"\bheaviest\s+(?:download(?:ed|s)?|second)\b", lowered_prompt):
+        return "second"
+    if re.search(r"\bheaviest\s+(?:upload(?:ed|s)?|first)\b", lowered_prompt):
+        return "first"
     return "total"
 
 
