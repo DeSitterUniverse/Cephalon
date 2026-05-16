@@ -13,6 +13,11 @@ const settings: RagSettings = {
   chunk_overlap: 150,
   context_tokens: 32768,
   full_context: false,
+  trace_persistence: true,
+  no_answer_min_confidence: 0.35,
+  no_answer_min_rerank_score: 0.15,
+  no_answer_min_vector_score: 0.05,
+  no_answer_min_source_count: 1,
 };
 
 describe("SettingsPanel", () => {

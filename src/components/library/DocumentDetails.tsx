@@ -72,6 +72,13 @@ export function DocumentDetails({ document, onRename, onAddTag, onDeleteTag, onR
         {(document.chunk_preview || []).map(chunk => (
           <article key={chunk.id}>
             <strong>Chunk {chunk.index}</strong>
+            <div className="source-metrics">
+              {chunk.block_type && <span>{chunk.block_type}</span>}
+              {chunk.token_count != null && <span>{chunk.token_count} tokens</span>}
+              {chunk.char_count != null && <span>{chunk.char_count} chars</span>}
+              {chunk.embedding_status && <span>{chunk.embedding_status}</span>}
+              {chunk.chunking_profile && <span>{chunk.chunking_profile}</span>}
+            </div>
             <p>{chunk.text}</p>
           </article>
         ))}

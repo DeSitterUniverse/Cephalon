@@ -15,6 +15,11 @@ class RagSettings(BaseModel):
     chunk_overlap: int = 150
     context_tokens: int = 32768
     full_context: bool = False
+    trace_persistence: bool = True
+    no_answer_min_confidence: float = 0.35
+    no_answer_min_rerank_score: float = 0.15
+    no_answer_min_vector_score: float = 0.05
+    no_answer_min_source_count: int = 1
 
     @field_validator("top_k")
     @classmethod
@@ -65,6 +70,20 @@ class RagSettings(BaseModel):
             raise ValueError("context_tokens must be between 4096 and 131072")
         return value
 
+    @field_validator("no_answer_min_confidence", "no_answer_min_rerank_score", "no_answer_min_vector_score")
+    @classmethod
+    def validate_threshold(cls, value: float) -> float:
+        if value < 0 or value > 2:
+            raise ValueError("thresholds must be between 0 and 2")
+        return value
+
+    @field_validator("no_answer_min_source_count")
+    @classmethod
+    def validate_source_count(cls, value: int) -> int:
+        if value < 0 or value > 10:
+            raise ValueError("no_answer_min_source_count must be between 0 and 10")
+        return value
+
 
 class IngestRequest(BaseModel):
     path: str
@@ -110,3 +129,18 @@ class SourceChunk(BaseModel):
 
 class QueryEnvelope(BaseModel):
     sources: list[SourceChunk]
+
+
+class EvalItem(BaseModel):
+    id: str
+    question: str
+    expected_doc_ids: list[str] = Field(default_factory=list)
+    expected_chunk_ids: list[str] = Field(default_factory=list)
+    reference_answer: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class EvalRunRequest(BaseModel):
+    evals: list[EvalItem]
+    pipeline: str = "hybrid_rerank"
+    top_k: int = 10

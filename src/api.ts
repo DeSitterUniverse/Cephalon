@@ -11,7 +11,16 @@ export type Document = {
   last_error?: string | null;
   last_indexed_at?: number | null;
   tags?: string[];
-  chunk_preview?: Array<{ id: string; index: number; text: string }>;
+  chunk_preview?: Array<{
+    id: string;
+    index: number;
+    text: string;
+    block_type?: string | null;
+    token_count?: number | null;
+    char_count?: number | null;
+    chunking_profile?: string | null;
+    embedding_status?: string | null;
+  }>;
 };
 export type Job = {
   id: string;
@@ -35,6 +44,11 @@ export type RagSettings = {
   chunk_overlap: number;
   context_tokens: number;
   full_context: boolean;
+  trace_persistence: boolean;
+  no_answer_min_confidence: number;
+  no_answer_min_rerank_score: number;
+  no_answer_min_vector_score: number;
+  no_answer_min_source_count: number;
 };
 export type SourceChunk = {
   rank: number;
@@ -58,6 +72,62 @@ export type StoredMessage = Message & {
   meta?: Record<string, unknown>;
   created_at: number;
   sources?: SourceChunk[];
+};
+export type CitationSupport = {
+  chunk_id: string;
+  source_id?: string | null;
+  doc_id?: string;
+  doc_name?: string;
+  status: "supported" | "weak" | "unsupported";
+  reason: string;
+  score?: number | null;
+  rerank_score?: number | null;
+};
+export type AnswerSupport = {
+  status: "supported" | "weak" | "unsupported";
+  citations: CitationSupport[];
+};
+export type RetrievalTraceSummary = {
+  query_id: string;
+  raw_query: string;
+  normalized_query: string;
+  retrieval_mode?: string;
+  created_at: number;
+  total_ms?: number | null;
+  no_answer?: Record<string, unknown>;
+};
+export type RetrievalTrace = RetrievalTraceSummary & {
+  subqueries: Array<{ id: string; text: string }>;
+  latency: Record<string, number>;
+  candidates: Record<"vector" | "bm25" | "fused" | "reranked" | "unused", Array<Record<string, unknown>>>;
+  final_context: Array<Record<string, unknown>>;
+};
+export type IndexHealth = {
+  document_count: number;
+  chunk_count: number;
+  embedded_chunk_count: number;
+  stale_document_count: number;
+  failed_ingestion_count: number;
+  parse_warning_count: number;
+  duplicate_chunk_count: number;
+  duplicate_chunk_rate: number;
+  average_chunk_length: number;
+  median_chunk_length: number;
+  min_chunk_length: number;
+  max_chunk_length: number;
+  documents_never_retrieved: number;
+  index_size_bytes: number;
+  embedding_model_counts: Record<string, number>;
+  chunking_profile_counts: Record<string, number>;
+  top_retrieved_documents: Array<{ id: string; name: string; retrieval_count: number }>;
+};
+export type EvalRun = {
+  id: string;
+  pipeline: string;
+  top_k: number;
+  created_at: number;
+  aggregate: Record<string, number>;
+  results?: Array<{ eval_id: string; question: string; metrics: Record<string, number> }>;
 };
 export type Conversation = {
   id: string;
@@ -113,8 +183,21 @@ type DocumentsResponse = { documents: Document[] };
 type JobsResponse = { jobs: Job[] };
 type ConversationsResponse = { conversations: Conversation[] };
 type IngestResponse = { job_id: string; status: string; message?: string };
+type RetrievalTracesResponse = { traces: RetrievalTraceSummary[] };
+type EvalRunsResponse = { runs: EvalRun[] };
 
-const API_BASE_URL = window.localStorage.getItem("cephalon.apiBaseUrl") || import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
+function configuredApiBaseUrl(): string {
+  try {
+    const storageValue = typeof window !== "undefined" && typeof window.localStorage?.getItem === "function"
+      ? window.localStorage.getItem("cephalon.apiBaseUrl")
+      : null;
+    return storageValue || import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
+  } catch {
+    return import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
+  }
+}
+
+const API_BASE_URL = configuredApiBaseUrl();
 
 export class ApiError extends Error {
   status: number;
@@ -262,6 +345,29 @@ export function updateSettings(settings: RagSettings): Promise<RagSettings> {
 
 export function exportMetrics(): Promise<{ status: string; path: string | null; error?: string | null }> {
   return requestJson<{ status: string; path: string | null; error?: string | null }>("/metrics/export", { method: "POST" });
+}
+
+export function getRetrievalTraces(): Promise<RetrievalTracesResponse> {
+  return requestJson<RetrievalTracesResponse>("/retrieval/traces");
+}
+
+export function getRetrievalTrace(id: string): Promise<RetrievalTrace> {
+  return requestJson<RetrievalTrace>(`/retrieval/traces/${encodeURIComponent(id)}`);
+}
+
+export function getIndexHealth(): Promise<IndexHealth> {
+  return requestJson<IndexHealth>("/observability/index-health");
+}
+
+export function getEvalRuns(): Promise<EvalRunsResponse> {
+  return requestJson<EvalRunsResponse>("/eval/runs");
+}
+
+export function runEval(evals: Array<{ id: string; question: string; expected_doc_ids: string[]; expected_chunk_ids?: string[] }>, pipeline = "hybrid_rerank", top_k = 10): Promise<EvalRun> {
+  return requestJson<EvalRun>("/eval/runs", {
+    method: "POST",
+    body: JSON.stringify({ evals, pipeline, top_k }),
+  });
 }
 
 export function eventsUrl(): string {

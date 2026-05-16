@@ -273,6 +273,133 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "006_conversation_history")
 
+    if not migration_applied(conn, "007_rag_observability"):
+        for table, columns in {
+            "documents": [
+                ("text_hash", "TEXT"),
+                ("parser_version", "TEXT"),
+                ("chunking_profile", "TEXT"),
+                ("chunking_config_hash", "TEXT"),
+                ("embedding_config_hash", "TEXT"),
+                ("parse_warnings", "TEXT"),
+            ],
+            "chunks": [
+                ("block_type", "TEXT"),
+                ("section_heading", "TEXT"),
+                ("heading_path", "TEXT"),
+                ("page_number", "INTEGER"),
+                ("char_count", "INTEGER DEFAULT 0"),
+                ("text_hash", "TEXT"),
+                ("raw_text_hash", "TEXT"),
+                ("contextual_text_hash", "TEXT"),
+                ("chunking_profile", "TEXT"),
+                ("chunking_config_hash", "TEXT"),
+                ("parser_version", "TEXT"),
+                ("embedded_at", "INTEGER"),
+                ("embedding_status", "TEXT DEFAULT 'embedded'"),
+                ("parse_warnings", "TEXT"),
+            ],
+        }.items():
+            for column, definition in columns:
+                add_column_if_missing(conn, table, column, definition)
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS retrieval_queries (
+                id TEXT PRIMARY KEY,
+                raw_query TEXT NOT NULL,
+                normalized_query TEXT NOT NULL,
+                rewritten_query TEXT,
+                retrieval_mode TEXT,
+                created_at INTEGER NOT NULL,
+                subqueries_json TEXT NOT NULL,
+                no_answer_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS retrieval_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id TEXT NOT NULL REFERENCES retrieval_queries(id) ON DELETE CASCADE,
+                stage TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                chunk_id TEXT,
+                doc_id TEXT,
+                source_filename TEXT,
+                score REAL,
+                vector_score REAL,
+                bm25_score REAL,
+                fusion_score REAL,
+                rerank_score REAL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS retrieval_context (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id TEXT NOT NULL REFERENCES retrieval_queries(id) ON DELETE CASCADE,
+                rank INTEGER NOT NULL,
+                chunk_id TEXT,
+                doc_id TEXT,
+                source_id TEXT,
+                context_text TEXT,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS retrieval_latency (
+                query_id TEXT PRIMARY KEY REFERENCES retrieval_queries(id) ON DELETE CASCADE,
+                preprocessing_ms REAL DEFAULT 0,
+                rewrite_ms REAL DEFAULT 0,
+                vector_ms REAL DEFAULT 0,
+                bm25_ms REAL DEFAULT 0,
+                fusion_ms REAL DEFAULT 0,
+                rerank_ms REAL DEFAULT 0,
+                context_ms REAL DEFAULT 0,
+                generation_ms REAL DEFAULT 0,
+                total_ms REAL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS answer_records (
+                id TEXT PRIMARY KEY,
+                query_id TEXT REFERENCES retrieval_queries(id) ON DELETE SET NULL,
+                conversation_id TEXT,
+                message_id TEXT,
+                answer_text TEXT,
+                confidence REAL,
+                support_status TEXT,
+                created_at INTEGER NOT NULL,
+                meta_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS answer_citations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                answer_id TEXT NOT NULL REFERENCES answer_records(id) ON DELETE CASCADE,
+                chunk_id TEXT,
+                source_id TEXT,
+                support_status TEXT,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS eval_runs (
+                id TEXT PRIMARY KEY,
+                pipeline TEXT NOT NULL,
+                top_k INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                aggregate_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS eval_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES eval_runs(id) ON DELETE CASCADE,
+                eval_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                metrics_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id TEXT,
+                message_id TEXT,
+                feedback_value TEXT NOT NULL,
+                failure_reason TEXT,
+                correction_text TEXT,
+                expected_doc_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_retrieval_candidates_query ON retrieval_candidates(query_id, stage, rank);
+            CREATE INDEX IF NOT EXISTS idx_retrieval_context_query ON retrieval_context(query_id, rank);
+            CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
+        """)
+        mark_migration(conn, "007_rag_observability")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -545,3 +672,262 @@ def rename_conversation(conn: sqlite3.Connection, conversation_id: str, title: s
 
 def archive_conversation(conn: sqlite3.Connection, conversation_id: str) -> None:
     execute(conn, "UPDATE conversations SET archived = 1, updated_at = ? WHERE id = ?", (int(time.time()), conversation_id))
+
+
+def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> None:
+    query_id = trace["query_id"]
+    no_answer = trace.get("no_answer") or {}
+    subqueries = trace.get("subqueries") or []
+    with SQLITE_LOCK:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM retrieval_candidates WHERE query_id = ?", (query_id,))
+        cursor.execute("DELETE FROM retrieval_context WHERE query_id = ?", (query_id,))
+        cursor.execute("DELETE FROM retrieval_latency WHERE query_id = ?", (query_id,))
+        cursor.execute("DELETE FROM retrieval_queries WHERE id = ?", (query_id,))
+        cursor.execute(
+            """
+            INSERT INTO retrieval_queries (
+                id, raw_query, normalized_query, rewritten_query, retrieval_mode,
+                created_at, subqueries_json, no_answer_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                query_id,
+                trace.get("raw_query", ""),
+                trace.get("normalized_query", ""),
+                trace.get("rewritten_query"),
+                trace.get("retrieval_mode", ""),
+                int(trace.get("timestamp") or time.time()),
+                json.dumps(subqueries, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(no_answer, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        stage_map = {
+            "vector": trace.get("vector_candidates", []),
+            "bm25": trace.get("bm25_candidates", []),
+            "fused": trace.get("fused_candidates", []),
+            "reranked": trace.get("reranked_candidates", []),
+            "unused": trace.get("unused_candidates", []),
+        }
+        for stage, candidates in stage_map.items():
+            for rank, candidate in enumerate(candidates, start=1):
+                cursor.execute(
+                    """
+                    INSERT INTO retrieval_candidates (
+                        query_id, stage, rank, chunk_id, doc_id, source_filename, score,
+                        vector_score, bm25_score, fusion_score, rerank_score, payload_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        query_id,
+                        stage,
+                        int(candidate.get("rank") or rank),
+                        candidate.get("chunk_id") or candidate.get("id"),
+                        candidate.get("doc_id"),
+                        candidate.get("doc_name") or candidate.get("source_filename"),
+                        candidate.get("score"),
+                        candidate.get("vector_score"),
+                        candidate.get("lexical_score") if candidate.get("lexical_score") is not None else candidate.get("bm25_score"),
+                        candidate.get("fusion_score"),
+                        candidate.get("rerank_score"),
+                        json.dumps(candidate, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                )
+        for rank, item in enumerate(trace.get("final_context", []), start=1):
+            cursor.execute(
+                """
+                INSERT INTO retrieval_context (query_id, rank, chunk_id, doc_id, source_id, context_text, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    query_id,
+                    int(item.get("rank") or rank),
+                    item.get("chunk_id"),
+                    item.get("doc_id"),
+                    item.get("source_id"),
+                    item.get("text") or item.get("snippet"),
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+        latency = trace.get("latency") or {}
+        cursor.execute(
+            """
+            INSERT INTO retrieval_latency (
+                query_id, preprocessing_ms, rewrite_ms, vector_ms, bm25_ms, fusion_ms,
+                rerank_ms, context_ms, generation_ms, total_ms, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                query_id,
+                latency.get("preprocessing_ms", 0),
+                latency.get("rewrite_ms", 0),
+                latency.get("vector_ms", 0),
+                latency.get("bm25_ms", 0),
+                latency.get("fusion_ms", 0),
+                latency.get("rerank_ms", 0),
+                latency.get("context_ms", 0),
+                latency.get("generation_ms", 0),
+                latency.get("total_ms", latency.get("retrieval_ms", 0)),
+                json.dumps(latency, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        conn.commit()
+
+
+def list_retrieval_traces(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    rows = fetchall(
+        conn,
+        """
+        SELECT retrieval_queries.*, retrieval_latency.total_ms
+        FROM retrieval_queries
+        LEFT JOIN retrieval_latency ON retrieval_latency.query_id = retrieval_queries.id
+        ORDER BY retrieval_queries.created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return [
+        {
+            "query_id": row["id"],
+            "raw_query": row["raw_query"],
+            "normalized_query": row["normalized_query"],
+            "retrieval_mode": row["retrieval_mode"],
+            "created_at": row["created_at"],
+            "total_ms": row["total_ms"],
+            "no_answer": json.loads(row["no_answer_json"] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def get_retrieval_trace(conn: sqlite3.Connection, query_id: str) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM retrieval_queries WHERE id = ?", (query_id,))
+    if not row:
+        return None
+    candidate_rows = fetchall(conn, "SELECT stage, payload_json FROM retrieval_candidates WHERE query_id = ? ORDER BY stage, rank", (query_id,))
+    context_rows = fetchall(conn, "SELECT payload_json FROM retrieval_context WHERE query_id = ? ORDER BY rank", (query_id,))
+    latency = fetchone(conn, "SELECT payload_json FROM retrieval_latency WHERE query_id = ?", (query_id,))
+    candidates: dict[str, list[dict[str, Any]]] = {"vector": [], "bm25": [], "fused": [], "reranked": [], "unused": []}
+    for candidate in candidate_rows:
+        candidates.setdefault(candidate["stage"], []).append(json.loads(candidate["payload_json"]))
+    return {
+        "query_id": row["id"],
+        "raw_query": row["raw_query"],
+        "normalized_query": row["normalized_query"],
+        "rewritten_query": row["rewritten_query"],
+        "retrieval_mode": row["retrieval_mode"],
+        "created_at": row["created_at"],
+        "subqueries": json.loads(row["subqueries_json"] or "[]"),
+        "no_answer": json.loads(row["no_answer_json"] or "{}"),
+        "latency": json.loads(latency["payload_json"] or "{}") if latency else {},
+        "candidates": candidates,
+        "final_context": [json.loads(item["payload_json"]) for item in context_rows],
+    }
+
+
+def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    answer_id = payload["id"]
+    with SQLITE_LOCK:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO answer_records (
+                id, query_id, conversation_id, message_id, answer_text, confidence,
+                support_status, created_at, meta_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                answer_id,
+                payload.get("query_id"),
+                payload.get("conversation_id"),
+                payload.get("message_id"),
+                payload.get("answer_text", ""),
+                payload.get("confidence"),
+                payload.get("support_status"),
+                int(payload.get("created_at") or time.time()),
+                json.dumps(payload.get("meta", {}), ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        cursor.execute("DELETE FROM answer_citations WHERE answer_id = ?", (answer_id,))
+        for citation in payload.get("citations", []):
+            cursor.execute(
+                """
+                INSERT INTO answer_citations (answer_id, chunk_id, source_id, support_status, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    answer_id,
+                    citation.get("chunk_id"),
+                    citation.get("source_id"),
+                    citation.get("status"),
+                    json.dumps(citation, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+        conn.commit()
+
+
+def save_eval_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    with SQLITE_LOCK:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO eval_runs (id, pipeline, top_k, created_at, aggregate_json) VALUES (?, ?, ?, ?, ?)",
+            (
+                payload["id"],
+                payload["pipeline"],
+                payload["top_k"],
+                payload["created_at"],
+                json.dumps(payload.get("aggregate", {}), ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        cursor.execute("DELETE FROM eval_results WHERE run_id = ?", (payload["id"],))
+        for result in payload.get("results", []):
+            cursor.execute(
+                "INSERT INTO eval_results (run_id, eval_id, question, metrics_json) VALUES (?, ?, ?, ?)",
+                (
+                    payload["id"],
+                    result["eval_id"],
+                    result.get("question", ""),
+                    json.dumps(result.get("metrics", {}), ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+        conn.commit()
+
+
+def list_eval_runs(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    rows = fetchall(conn, "SELECT * FROM eval_runs ORDER BY created_at DESC LIMIT ?", (limit,))
+    return [
+        {
+            "id": row["id"],
+            "pipeline": row["pipeline"],
+            "top_k": row["top_k"],
+            "created_at": row["created_at"],
+            "aggregate": json.loads(row["aggregate_json"] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def get_eval_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM eval_runs WHERE id = ?", (run_id,))
+    if not row:
+        return None
+    result_rows = fetchall(conn, "SELECT * FROM eval_results WHERE run_id = ? ORDER BY id", (run_id,))
+    return {
+        "id": row["id"],
+        "pipeline": row["pipeline"],
+        "top_k": row["top_k"],
+        "created_at": row["created_at"],
+        "aggregate": json.loads(row["aggregate_json"] or "{}"),
+        "results": [
+            {
+                "eval_id": item["eval_id"],
+                "question": item["question"],
+                "metrics": json.loads(item["metrics_json"] or "{}"),
+            }
+            for item in result_rows
+        ],
+    }

@@ -51,7 +51,18 @@
       <tr><td>SQLite</td><td>Metadata source of truth: documents, tags, jobs, job events, settings, conversations, messages, message sources, parent chunks, summary nodes, child chunks, retrieval counters, and FTS5 lexical rows.</td></tr>
       <tr><td>SQLite FTS5</td><td>Lexical BM25 retrieval over child chunks. This replaces LanceDB Tantivy hybrid search and keeps lexical indexing transactional with metadata.</td></tr>
       <tr><td>LanceDB</td><td>Dense vector storage for child chunks and summary nodes. LanceDB does not own metadata or lexical search decisions.</td></tr>
-      <tr><td>Documents Metrics Directory</td><td>Numeric JSONL/CSV metrics for retrieval latency, source scores, quality estimates, corpus size, chunk stats, and index health.</td></tr>
+    <tr><td>Documents Metrics Directory</td><td>Numeric JSONL/CSV metrics for retrieval latency, source scores, quality estimates, corpus size, chunk stats, and index health.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Observability Data</h2>
+  <p>Cephalon records retrieval diagnostics in SQLite so the user can debug why an answer used specific evidence. The trace tables store the query, subqueries, stage candidates, final context, unused candidates, score fields, no-answer diagnostics, and latency. Answer records store confidence and citation support separately from chat messages.</p>
+  <table>
+    <thead><tr><th>Area</th><th>Tables</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Retrieval trace</td><td><code>retrieval_queries</code>, <code>retrieval_candidates</code>, <code>retrieval_context</code>, <code>retrieval_latency</code></td><td>Inspect vector, BM25, fused, reranked, unused, and selected context stages for each query.</td></tr>
+      <tr><td>Answer trust</td><td><code>answer_records</code>, <code>answer_citations</code>, <code>user_feedback</code></td><td>Track answer confidence, citation support labels, and user feedback for later eval generation.</td></tr>
+      <tr><td>Evaluation</td><td><code>eval_runs</code>, <code>eval_results</code></td><td>Store deterministic retrieval metrics such as Recall@k and MRR for small local eval sets.</td></tr>
     </tbody>
   </table>
 
@@ -71,7 +82,14 @@
     <div class="step"><strong>4. Reranking.</strong> Jina reranker ONNX scores fused candidates. Retrieval priors keep strong lexical matches from being displaced by unrelated dense matches.</div>
     <div class="step"><strong>5. Context reconstruction.</strong> Child hits point back to parent chunks. The prompt receives compressed parent context with stable source tags such as <code>[[src:S1]]</code>.</div>
     <div class="step"><strong>6. Streaming.</strong> The backend streams typed SSE events for subqueries, conversation ids, source metadata, answer metadata, tokens, saved message ids, errors, and completion.</div>
+    <div class="step"><strong>7. Trace persistence.</strong> Candidate lists, scores, ranks, no-answer diagnostics, latency, and final context are written to SQLite when trace persistence is enabled.</div>
   </div>
+
+  <h2>Index Health</h2>
+  <p>The index health API summarizes document count, chunk count, embedded chunks, stale documents, failed ingestions, parse warnings, duplicate chunk rate, chunk length distribution, never-retrieved documents, retrieval counts, index size, embedding model distribution, and chunking profile distribution. These values are computed from SQLite and the LanceDB data directory; they do not require cloud services or a separate analytics database.</p>
+
+  <h2>Evaluation</h2>
+  <p>The eval harness accepts small JSON eval sets and records deterministic retrieval metrics. The first metrics are Recall@k, MRR, expected document hit rate, and expected chunk hit rate. This keeps quality checks cheap enough to run locally after changing chunking or retrieval settings.</p>
 
   <h2>Model Runtime</h2>
   <p>Embedding and reranking use ONNX Runtime to avoid a PyTorch runtime requirement in the normal app path. The embedder is <code>jinaai/jina-embeddings-v5-text-small</code> and the reranker is <code>jinaai/jina-reranker-v3</code>. llama.cpp loads the selected GGUF chat model only after the user presses <strong>Load</strong>. The backend reports Vulkan availability, llama.cpp library paths, active context size, and model metadata through health/model APIs.</p>
@@ -87,7 +105,7 @@
     <li>Missing or invalid ONNX artifacts create a structured startup error instead of silent fallback.</li>
     <li>Querying without a loaded GGUF returns a conflict response and the UI keeps the Run button disabled.</li>
     <li>Unsupported/binary ingestion failures are stored as failed document or job state with a clear reason.</li>
-    <li>Metrics write failures are non-fatal and surfaced through health.</li>
+    <li>Metrics and trace write failures are non-fatal where possible and surfaced through health or diagnostics.</li>
     <li>SQLite FTS5 search is explicit and testable, avoiding LanceDB Tantivy Python-package drift.</li>
   </ul>
 </main>

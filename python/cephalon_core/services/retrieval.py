@@ -12,6 +12,7 @@ from .. import storage
 from ..config import EMBEDDING_DIMENSION
 from ..schemas import RagSettings, SourceChunk
 from . import metrics
+from . import observability
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -254,20 +255,29 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
     return sources
 
 
-async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str]:
+async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str, dict[str, Any]]:
     table_name = vector_table_name(app_state)
     index = ensure_retrieval_index(app_state)
+    latency: dict[str, float] = {}
+    stage_started = time.perf_counter()
     summary_results = _summary_dense_search(app_state, table_name, query_vector, max(4, settings.top_k // 3))
+    latency["summary_ms"] = round((time.perf_counter() - stage_started) * 1000, 2)
     summary_parent_rank = {
         result["parent_id"]: rank
         for rank, result in enumerate(summary_results, start=1)
         if result.get("parent_id")
     }
+    stage_started = time.perf_counter()
     dense_results = _dense_search(app_state, table_name, query_vector, settings.top_k)
+    latency["vector_ms"] = round((time.perf_counter() - stage_started) * 1000, 2)
+    stage_started = time.perf_counter()
     lexical_results = _lexical_search(app_state, prompt, settings.top_k)
+    latency["bm25_ms"] = round((time.perf_counter() - stage_started) * 1000, 2)
     _apply_summary_parent_boost(dense_results, summary_parent_rank)
     _apply_summary_parent_boost(lexical_results, summary_parent_rank)
+    stage_started = time.perf_counter()
     fused = _fuse_rrf(dense_results, lexical_results, settings.top_k)
+    latency["fusion_ms"] = round((time.perf_counter() - stage_started) * 1000, 2)
     modes = []
     if summary_results:
         modes.append("summary_dense")
@@ -277,7 +287,14 @@ async def _search_once(app_state, prompt: str, query_vector: list[float], settin
         modes.append("sqlite_fts5")
     if not index.get("lexical_available"):
         modes.append("lexical_unavailable")
-    return fused, "+".join(modes) if modes else "empty"
+    trace = {
+        "summary_candidates": [_trace_candidate(row, rank) for rank, row in enumerate(summary_results, start=1)],
+        "vector_candidates": [_trace_candidate(row, rank) for rank, row in enumerate(dense_results, start=1)],
+        "bm25_candidates": [_trace_candidate(row, rank) for rank, row in enumerate(lexical_results, start=1)],
+        "fused_candidates": [_trace_candidate(row, rank) for rank, row in enumerate(fused, start=1)],
+        "latency": latency,
+    }
+    return fused, "+".join(modes) if modes else "empty", trace
 
 
 def _summary_dense_search(app_state, table_name: str, query_vector: list[float], limit: int) -> list[dict]:
@@ -480,30 +497,44 @@ def compress_context(query: str, sources: list[CompressionSource], max_sentences
     return compressed, stats
 
 
-def confidence_from_sources(sources: list[SourceChunk]) -> dict[str, Any]:
-    if not sources:
-        return {"confidence": 0.0, "uncertainty": "high", "no_answer": True, "reason": "No retrieved sources."}
-    scores = [source.rerank_score if source.rerank_score is not None else source.score for source in sources]
-    top = max(scores)
-    second = sorted(scores, reverse=True)[1] if len(scores) > 1 else top
-    spread = abs(top - second)
-    confidence = max(0.0, min(1.0, 0.45 + min(top, 1.0) * 0.35 + min(spread, 1.0) * 0.2))
-    no_answer = len(sources) < 1 or confidence < 0.35
-    return {
-        "confidence": round(confidence, 4),
-        "uncertainty": "high" if confidence < 0.45 else "medium" if confidence < 0.7 else "low",
-        "no_answer": no_answer,
-        "reason": "Closest matches are weak." if no_answer else "Retrieved sources are usable.",
-    }
+def confidence_from_sources(sources: list[SourceChunk], settings: RagSettings | None = None) -> dict[str, Any]:
+    thresholds = None
+    if settings is not None:
+        thresholds = {
+            "min_confidence": settings.no_answer_min_confidence,
+            "min_rerank_score": settings.no_answer_min_rerank_score,
+            "min_vector_score": settings.no_answer_min_vector_score,
+            "min_source_count": settings.no_answer_min_source_count,
+        }
+    return observability.no_answer_diagnostics(sources, thresholds)
 
 
 async def retrieve_context(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[str, list[SourceChunk], dict[str, Any]]:
     started = time.perf_counter()
+    query_id = str(uuid.uuid4())
     context_chunks: list[str] = []
     all_sources: list[SourceChunk] = []
     compression_inputs: list[CompressionSource] = []
     search_modes: list[str] = []
+    trace: dict[str, Any] = {
+        "query_id": query_id,
+        "raw_query": prompt,
+        "normalized_query": " ".join(prompt.strip().split()),
+        "rewritten_query": None,
+        "timestamp": int(time.time()),
+        "retrieval_mode": "",
+        "subqueries": [],
+        "vector_candidates": [],
+        "bm25_candidates": [],
+        "fused_candidates": [],
+        "reranked_candidates": [],
+        "final_context": [],
+        "unused_candidates": [],
+        "latency": {"preprocessing_ms": 0, "rewrite_ms": 0, "vector_ms": 0, "bm25_ms": 0, "fusion_ms": 0, "rerank_ms": 0, "context_ms": 0},
+        "no_answer": {},
+    }
     subqueries = plan_subqueries(prompt)
+    trace["subqueries"] = subqueries
     numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
     if numeric_context:
         context_chunks.extend(numeric_context)
@@ -513,12 +544,33 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             for source in numeric_sources
         ])
         search_modes.append("numeric_scan")
+        trace["reranked_candidates"] = [source.model_dump() for source in numeric_sources]
     else:
         for subquery in subqueries:
             vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
-            results, mode = await _search_once(app_state, subquery["text"], vector, settings)
+            search_output = await _search_once(app_state, subquery["text"], vector, settings)
+            if len(search_output) == 2:
+                results, mode = search_output
+                stage_trace = {"latency": {}}
+            else:
+                results, mode, stage_trace = search_output
             search_modes.append(mode)
-            reranked = _select_relevant_results(rerank(app_state, subquery["text"], results), settings.rerank_top_n)
+            trace["vector_candidates"].extend(stage_trace.get("vector_candidates", []))
+            trace["bm25_candidates"].extend(stage_trace.get("bm25_candidates", []))
+            trace["fused_candidates"].extend(stage_trace.get("fused_candidates", []))
+            for key in ("vector_ms", "bm25_ms", "fusion_ms"):
+                trace["latency"][key] = round(trace["latency"].get(key, 0) + stage_trace.get("latency", {}).get(key, 0), 2)
+            rerank_started = time.perf_counter()
+            all_ranked = rerank(app_state, subquery["text"], results)
+            trace["latency"]["rerank_ms"] = round(trace["latency"].get("rerank_ms", 0) + ((time.perf_counter() - rerank_started) * 1000), 2)
+            reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
+            selected_ids = {item["id"] for item in reranked}
+            trace["reranked_candidates"].extend([_trace_candidate(row, rank) for rank, row in enumerate(all_ranked, start=1)])
+            trace["unused_candidates"].extend([
+                {**_trace_candidate(row, rank), "reason": "below final context cutoff"}
+                for rank, row in enumerate(all_ranked, start=1)
+                if row["id"] not in selected_ids
+            ][: max(settings.top_k, 10)])
             sources = hydrate_sources(app_state, reranked, subquery["id"])
             all_sources.extend(sources)
             source_by_chunk = {source.chunk_id: source for source in sources}
@@ -542,8 +594,12 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 
     _mark_sources_retrieved(app_state, all_sources)
-    confidence = confidence_from_sources(all_sources)
+    confidence = confidence_from_sources(all_sources, settings)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    trace["retrieval_mode"] = "+".join(search_modes) if search_modes else "empty"
+    trace["final_context"] = [source.model_dump() for source in all_sources]
+    trace["no_answer"] = confidence
+    trace["latency"]["total_ms"] = elapsed_ms
     try:
         metrics_path = metrics.append_retrieval_event(app_state, {
             "query_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -566,13 +622,44 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         app_state.last_metrics_error = str(error)
     meta = {
         **confidence,
+        "query_id": query_id,
         "subqueries": subqueries,
         "retrieval_latency_ms": elapsed_ms,
         "search_modes": search_modes,
         "metrics_path": metrics_path,
         "compression": compression_stats,
+        "trace": trace,
     }
     return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
+
+
+def _trace_candidate(row: dict[str, Any], rank: int) -> dict[str, Any]:
+    return {
+        "rank": rank,
+        "chunk_id": _trace_value(row.get("id") or row.get("chunk_id")),
+        "doc_id": _trace_value(row.get("doc_id")),
+        "parent_id": _trace_value(row.get("parent_id")),
+        "source_kind": _trace_value(row.get("source_kind")),
+        "chunk_index": _trace_value(row.get("chunk_index")),
+        "score": _trace_value(row.get("score")),
+        "vector_score": _trace_value(row.get("vector_score")),
+        "lexical_score": _trace_value(row.get("lexical_score")),
+        "fusion_score": _trace_value(row.get("fusion_score")),
+        "rerank_score": _trace_value(row.get("rerank_score")),
+        "dense_rank": _trace_value(row.get("dense_rank")),
+        "lexical_rank": _trace_value(row.get("lexical_rank")),
+        "summary_rank": _trace_value(row.get("summary_rank")),
+        "snippet": str(row.get("text", ""))[:500],
+    }
+
+
+def _trace_value(value: Any) -> Any:
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+    return value
 
 
 def _parent_context(app_state, result: dict) -> str | None:

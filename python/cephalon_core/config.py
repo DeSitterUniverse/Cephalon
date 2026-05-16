@@ -28,6 +28,11 @@ class RagDefaults:
     chunk_overlap: int = 150
     context_tokens: int = 32768
     full_context: bool = False
+    trace_persistence: bool = True
+    no_answer_min_confidence: float = 0.35
+    no_answer_min_rerank_score: float = 0.15
+    no_answer_min_vector_score: float = 0.05
+    no_answer_min_source_count: int = 1
 
 
 class Settings:
@@ -45,6 +50,11 @@ class Settings:
             chunk_overlap=int(os.getenv("CEPHALON_CHUNK_OVERLAP", "150")),
             context_tokens=int(os.getenv("CEPHALON_CONTEXT_TOKENS", "32768")),
             full_context=os.getenv("CEPHALON_FULL_CONTEXT", "0") == "1",
+            trace_persistence=os.getenv("CEPHALON_TRACE_PERSISTENCE", "1") != "0",
+            no_answer_min_confidence=float(os.getenv("CEPHALON_NO_ANSWER_MIN_CONFIDENCE", "0.35")),
+            no_answer_min_rerank_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_RERANK_SCORE", "0.15")),
+            no_answer_min_vector_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_VECTOR_SCORE", "0.05")),
+            no_answer_min_source_count=int(os.getenv("CEPHALON_NO_ANSWER_MIN_SOURCE_COUNT", "1")),
         )
         self.max_tokens = self.rag_defaults.max_tokens
         self.metrics_dir = os.path.abspath(os.path.expanduser(

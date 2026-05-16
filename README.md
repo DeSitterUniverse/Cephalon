@@ -14,6 +14,10 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking cited
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
+- Retrieval Trace panel for inspecting vector, BM25, fused, reranked, unused, and final context candidates.
+- Index Health panel for chunk counts, stale state, duplicate rates, retrieval counts, and embedding distribution.
+- Minimal local eval runner with Recall@k and MRR.
+- Answer Support panel with deterministic citation trust labels.
 - Persistent chat history stored in SQLite.
 - Numeric-first metrics under the user Documents metrics directory.
 
@@ -150,6 +154,11 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `GET/PUT /settings`: RAG and generation defaults.
 - `POST /ingest`: queue file/folder ingestion.
 - `GET /jobs`: recent ingestion jobs.
+- `GET /retrieval/traces`: recent retrieval traces.
+- `GET /retrieval/traces/{query_id}`: full retrieval trace with candidate stages, scores, context, and latency.
+- `GET /observability/index-health`: document/chunk/index health summary.
+- `GET/POST /eval/runs`: run and inspect small JSON eval sets.
+- `POST /feedback`: store answer or citation feedback locally.
 - `GET /events`: SSE job/document/settings stream.
 - `GET/PATCH/DELETE /documents/{id}`: document details, rename, and delete.
 - `POST /documents/{id}/reindex`: reindex while preserving display name and tags.

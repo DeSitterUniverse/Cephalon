@@ -2,7 +2,7 @@ import { Send } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Conversation, Message, RagSettings, SourceChunk } from "../../api";
+import type { AnswerSupport, Conversation, Message, RagSettings, SourceChunk } from "../../api";
 import { queryModel } from "../../api";
 import { useUiStore } from "../../store";
 
@@ -36,6 +36,7 @@ type Props = {
 type ChatMessage = Message & {
   id?: string;
   sources?: SourceChunk[];
+  support?: AnswerSupport | null;
 };
 
 export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected }: Props) {
@@ -44,10 +45,13 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
   const [isTyping, setIsTyping] = useState(false);
   const [reasoningMode, setReasoningMode] = useState("balanced");
   const setSelectedSources = useUiStore(state => state.setSelectedSources);
+  const setSelectedSupport = useUiStore(state => state.setSelectedSupport);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (typeof endRef.current?.scrollIntoView === "function") {
+      endRef.current.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -57,6 +61,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
       role: message.role,
       content: message.content,
       sources: message.sources || [],
+      support: (message.meta?.support as AnswerSupport | undefined) || null,
     })) as ChatMessage[]);
   }, [conversation?.id, conversation?.messages]);
 
@@ -89,6 +94,14 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
       }, conversationId => {
         if (conversationId) onConversationSelected?.(conversationId);
       }, meta => {
+        if (meta?.support) {
+          setMessages(prev => {
+            const next = [...prev] as ChatMessage[];
+            const last = next.length - 1;
+            next[last] = { ...next[last], support: meta.support as AnswerSupport };
+            return next;
+          });
+        }
         if (meta?.no_answer) {
           setMessages(prev => {
             const next = [...prev];
@@ -133,9 +146,16 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
                 {parsed.thinking && <details className="thinking"><summary>Internal trace</summary><ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.thinking}</ReactMarkdown></details>}
                 {response ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderSourceTags(response)}</ReactMarkdown> : <span className="subtle">Working...</span>}
                 {message.role === "assistant" && (message as ChatMessage).sources?.length ? (
-                  <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
-                    {(message as ChatMessage).sources?.length} cited sources
-                  </button>
+                  <div className="message-actions">
+                    <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
+                      {(message as ChatMessage).sources?.length} sources
+                    </button>
+                    {(message as ChatMessage).support && (
+                      <button className="source-link-row" type="button" onClick={() => setSelectedSupport((message as ChatMessage).support || null)}>
+                        support: {(message as ChatMessage).support?.status}
+                      </button>
+                    )}
+                  </div>
                 ) : null}
               </div>
             </article>

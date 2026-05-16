@@ -15,11 +15,16 @@ import {
   getDocuments,
   getJobs,
   getHealth,
+  getIndexHealth,
   getModels,
+  getEvalRuns,
+  getRetrievalTrace,
+  getRetrievalTraces,
   getSettings,
   ingestPath,
   loadModel,
   reindexDocument,
+  runEval,
   updateDocument,
   updateSettings,
   type Document,
@@ -27,6 +32,10 @@ import {
   type RagSettings,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
+import { AnswerSupportPanel } from "./components/diagnostics/AnswerSupportPanel";
+import { EvaluationPanel } from "./components/diagnostics/EvaluationPanel";
+import { IndexHealthPanel } from "./components/diagnostics/IndexHealthPanel";
+import { RetrievalTracePanel } from "./components/diagnostics/RetrievalTracePanel";
 import { ChatHistoryPanel } from "./components/chat/ChatHistoryPanel";
 import { JobsPanel } from "./components/jobs/JobsPanel";
 import { LibraryPanel } from "./components/library/LibraryPanel";
@@ -59,7 +68,9 @@ export default function App() {
   const selectedConversationId = useUiStore(state => state.selectedConversationId);
   const setSelectedConversationId = useUiStore(state => state.setSelectedConversationId);
   const selectedSources = useUiStore(state => state.selectedSources);
+  const selectedSupport = useUiStore(state => state.selectedSupport);
   const rightPanel = useUiStore(state => state.rightPanel);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   useEventStream();
 
@@ -68,6 +79,14 @@ export default function App() {
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: getJobs, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
+  const tracesQuery = useQuery({ queryKey: ["retrieval-traces"], queryFn: getRetrievalTraces, enabled: bootReady && rightPanel === "trace" });
+  const traceQuery = useQuery({
+    queryKey: ["retrieval-trace", selectedTraceId],
+    queryFn: () => getRetrievalTrace(selectedTraceId as string),
+    enabled: Boolean(selectedTraceId),
+  });
+  const indexHealthQuery = useQuery({ queryKey: ["index-health"], queryFn: getIndexHealth, enabled: bootReady && rightPanel === "health" });
+  const evalRunsQuery = useQuery({ queryKey: ["eval-runs"], queryFn: getEvalRuns, enabled: bootReady && rightPanel === "eval" });
   const documentQuery = useQuery({
     queryKey: ["document", selectedDocumentId],
     queryFn: () => getDocument(selectedDocumentId as string),
@@ -131,6 +150,19 @@ export default function App() {
       setSelectedConversationId(data.id);
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
     },
+  });
+
+  const evalMutation = useMutation({
+    mutationFn: ({ question, expectedDoc }: { question: string; expectedDoc: string }) => runEval([{
+      id: `manual-${Date.now()}`,
+      question,
+      expected_doc_ids: [expectedDoc],
+    }]),
+    onSuccess: () => {
+      setToast("Eval run saved.");
+      queryClient.invalidateQueries({ queryKey: ["eval-runs"] });
+    },
+    onError: error => setToast(error instanceof Error ? error.message : "Eval run failed."),
   });
 
   const deleteConversationMutation = useMutation({
@@ -223,6 +255,21 @@ export default function App() {
     ? <SettingsPanel models={modelsQuery.data?.models || []} selectedModel={selectedModel} setSelectedModel={setSelectedModel} settings={settingsQuery.data} updateSettings={(value: RagSettings) => settingsMutation.mutate(value)} onExportMetrics={() => metricsMutation.mutate()} />
     : rightPanel === "sources"
       ? <SourcesPanel sources={selectedSources} />
+      : rightPanel === "trace"
+        ? (
+          <RetrievalTracePanel
+            traces={tracesQuery.data?.traces || []}
+            selected={traceQuery.data}
+            selectedId={selectedTraceId}
+            onSelect={setSelectedTraceId}
+          />
+        )
+      : rightPanel === "health"
+        ? <IndexHealthPanel health={indexHealthQuery.data} isLoading={indexHealthQuery.isLoading} />
+      : rightPanel === "eval"
+        ? <EvaluationPanel runs={evalRunsQuery.data?.runs || []} isRunning={evalMutation.isPending} onRun={(question, expectedDoc) => evalMutation.mutate({ question, expectedDoc })} />
+      : rightPanel === "support"
+        ? <AnswerSupportPanel support={selectedSupport} />
       : rightPanel === "history"
         ? (
           <ChatHistoryPanel

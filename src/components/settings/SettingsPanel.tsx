@@ -42,6 +42,14 @@ export function SettingsPanel({ models, selectedModel, setSelectedModel, setting
       </label>
       <SettingSlider label="Top K" value={settings.top_k} min={1} max={60} step={1} onChange={value => setValue("top_k", value)} />
       <SettingSlider label="Rerank" value={settings.rerank_top_n} min={1} max={10} step={1} onChange={value => setValue("rerank_top_n", value)} />
+      <SettingSlider label="Min confidence" value={settings.no_answer_min_confidence} min={0} max={1} step={0.05} onChange={value => setValue("no_answer_min_confidence", value)} />
+      <SettingSlider label="Min rerank" value={settings.no_answer_min_rerank_score} min={0} max={2} step={0.05} onChange={value => setValue("no_answer_min_rerank_score", value)} />
+      <SettingSlider label="Min dense" value={settings.no_answer_min_vector_score} min={0} max={1} step={0.05} onChange={value => setValue("no_answer_min_vector_score", value)} />
+      <SettingSlider label="Min sources" value={settings.no_answer_min_source_count} min={0} max={5} step={1} onChange={value => setValue("no_answer_min_source_count", value)} />
+      <label className="field checkbox-field">
+        <span>Save retrieval traces<strong>{settings.trace_persistence ? "on" : "off"}</strong></span>
+        <input type="checkbox" checked={settings.trace_persistence} onChange={event => setBool("trace_persistence", event.target.checked)} />
+      </label>
       <SettingSlider label="Chunk size" value={settings.chunk_size} min={512} max={4000} step={128} onChange={value => setValue("chunk_size", value)} />
       <SettingSlider label="Overlap" value={settings.chunk_overlap} min={0} max={800} step={25} onChange={value => setValue("chunk_overlap", value)} />
       <div className="action-row">

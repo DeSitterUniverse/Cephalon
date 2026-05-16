@@ -5,12 +5,15 @@ import time
 from .. import storage
 from ..schemas import RagSettings
 from . import documents
+from . import observability
 from .retrieval import ensure_vector_table, get_embedding, vector_table_name
 
 PARENT_TARGET_TOKENS = 520
 PARENT_MAX_TOKENS = 650
 CHILD_TARGET_TOKENS = 110
 CHILD_MAX_TOKENS = 150
+PARSER_VERSION = "cephalon-basic-2026-05"
+CHUNKING_PROFILE = "semantic_parent_child_v1"
 
 
 async def process_single_file(app_state, file_path: str, rag_settings: RagSettings, *, force_text: bool = False, existing_doc_id: str | None = None) -> dict:
@@ -29,6 +32,30 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
         raw_text, extraction_mode = documents.extract_text(file_path, force_text=force_text)
         metadata = storage.active_embedding_metadata(app_state)
         doc_id = documents.register_ingesting_document(app_state.sqlite, file_path, content_hash, extraction_mode, existing_doc_id, metadata)
+        chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, {
+            "parent_target_tokens": PARENT_TARGET_TOKENS,
+            "parent_max_tokens": PARENT_MAX_TOKENS,
+            "child_target_tokens": CHILD_TARGET_TOKENS,
+            "child_max_tokens": CHILD_MAX_TOKENS,
+        })
+        text_hash = observability.text_hash(raw_text)
+        storage.execute(
+            app_state.sqlite,
+            """
+            UPDATE documents
+            SET text_hash = ?, parser_version = ?, chunking_profile = ?,
+                chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = NULL
+            WHERE id = ?
+            """,
+            (
+                text_hash,
+                PARSER_VERSION,
+                CHUNKING_PROFILE,
+                chunking_hash,
+                f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
+                doc_id,
+            ),
+        )
         storage.delete_document_fts(app_state.sqlite, doc_id)
         storage.delete_document_hierarchy(app_state.sqlite, doc_id)
         storage.execute(app_state.sqlite, "DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
@@ -81,14 +108,18 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
                 chunk_id = f"{doc_id}_{child_count}"
                 vector = await get_embedding(app_state, child_text)
                 token_count = estimate_tokens(child_text)
+                child_hash = observability.text_hash(child_text)
+                contextual_text = contextualize_chunk(child_text, os.path.basename(file_path), None, "paragraph")
                 storage.execute(
                     app_state.sqlite,
                     """
                     INSERT INTO chunks (
                         id, doc_id, chunk_index, text, parent_id, summary_id, token_count,
-                        semantic_role, chunk_length, embedding_model_id, embedding_dim
+                        semantic_role, chunk_length, embedding_model_id, embedding_dim,
+                        block_type, char_count, text_hash, raw_text_hash, contextual_text_hash,
+                        chunking_profile, chunking_config_hash, parser_version, embedded_at, embedding_status
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk_id,
@@ -102,6 +133,16 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
                         len(child_text),
                         metadata["embedding_model_id"],
                         metadata["embedding_dim"],
+                        "paragraph",
+                        len(child_text),
+                        child_hash,
+                        child_hash,
+                        observability.text_hash(contextual_text),
+                        CHUNKING_PROFILE,
+                        chunking_hash,
+                        PARSER_VERSION,
+                        now,
+                        "embedded",
                     ),
                 )
                 storage.upsert_chunk_fts(app_state.sqlite, chunk_id, doc_id, child_text)
@@ -230,6 +271,14 @@ def summarize_parent(text: str) -> str:
     selected = units[:3]
     summary = " ".join(selected)
     return summary[:700]
+
+
+def contextualize_chunk(chunk_text: str, title: str, heading_path: str | None, block_type: str) -> str:
+    parts = [f"Document: {title}"]
+    if heading_path:
+        parts.append(f"Section: {heading_path}")
+    parts.append(f"Block type: {block_type}")
+    return "\n".join(parts) + "\n\n" + chunk_text.strip()
 
 
 async def process_directory(app_state, dir_path: str, rag_settings: RagSettings, *, force_text: bool = False) -> list[dict]:
