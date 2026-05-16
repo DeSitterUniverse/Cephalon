@@ -62,7 +62,9 @@ def llama_backend_info() -> dict:
         "loaded_lib_base_path": str(loaded_base_path) if loaded_base_path else None,
         "override_lib_path": os.getenv("LLAMA_CPP_LIB_PATH"),
         "dll_search_paths": [str(path) for path in lib_dirs],
-        "vulkan_required": os.getenv("CEPHALON_REQUIRE_VULKAN") == "1",
+        "gpu_backend_available": vulkan_dll is not None,
+        "backend_label": "GPU backend" if vulkan_dll is not None else "CPU backend",
+        "vulkan_required": False,
         "vulkan_available": vulkan_dll is not None,
         "vulkan_dll": str(vulkan_dll) if vulkan_dll else None,
     }
@@ -75,15 +77,21 @@ def list_models(settings: Settings) -> list[str]:
 def model_inventory(settings: Settings) -> dict[str, list[str]]:
     os.makedirs(settings.model_dir, exist_ok=True)
     chat_models: list[str] = []
+    chat_model_details: list[dict] = []
     auxiliary_gguf: list[str] = []
     for entry in os.scandir(settings.model_dir):
         if not entry.is_file() or not entry.name.lower().endswith(".gguf"):
             continue
         if _looks_like_chat_model(entry.name):
             chat_models.append(entry.name)
+            chat_model_details.append({"name": entry.name, "size_bytes": entry.stat().st_size})
         else:
             auxiliary_gguf.append(entry.name)
-    return {"chat_models": sorted(chat_models), "auxiliary_gguf": sorted(auxiliary_gguf)}
+    return {
+        "chat_models": sorted(chat_models),
+        "chat_model_details": sorted(chat_model_details, key=lambda item: item["name"]),
+        "auxiliary_gguf": sorted(auxiliary_gguf),
+    }
 
 
 def _looks_like_chat_model(filename: str) -> bool:
@@ -138,16 +146,6 @@ def load_llm(app_state, model_filename: str) -> None:
     model_context_tokens = _model_context_length(model_path)
     context_tokens = model_context_tokens if rag_settings.full_context and model_context_tokens else rag_settings.context_tokens
     backend = llama_backend_info()
-    if os.getenv("CEPHALON_REQUIRE_VULKAN") == "1" and not backend["vulkan_available"]:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The Vulkan llama.cpp backend is required but ggml-vulkan.dll was not found. "
-                f"Checked: {', '.join(backend['dll_search_paths'])}. "
-                f"Active llama_cpp package: {backend['package']}"
-            ),
-        )
-
     if getattr(app_state, "llm", None) is not None:
         print("Deallocating active VRAM model...")
         del app_state.llm
@@ -155,7 +153,7 @@ def load_llm(app_state, model_filename: str) -> None:
 
     print(
         f"Loading {model_filename} with llama.cpp "
-        f"({'Vulkan backend available' if backend['vulkan_available'] else 'CPU backend only'})."
+        f"({backend['backend_label']})."
     )
     try:
         with _quiet_llama_stderr():

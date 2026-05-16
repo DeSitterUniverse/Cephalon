@@ -141,21 +141,25 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
           const response = parsed.response || (!message.content.includes("</think>") ? message.content : "");
           return (
             <article key={index} className={`message ${message.role}`}>
-              <div className="message-role">{message.role === "assistant" ? "response" : "query"}</div>
               <div className="message-body">
-                {parsed.thinking && <details className="thinking"><summary>Internal trace</summary><ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.thinking}</ReactMarkdown></details>}
                 {response ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderSourceTags(response)}</ReactMarkdown> : <span className="subtle">Working...</span>}
-                {message.role === "assistant" && (message as ChatMessage).sources?.length ? (
-                  <div className="message-actions">
-                    <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
-                      {(message as ChatMessage).sources?.length} sources
-                    </button>
-                    {(message as ChatMessage).support && (
-                      <button className="source-link-row" type="button" onClick={() => setSelectedSupport((message as ChatMessage).support || null)}>
-                        support: {(message as ChatMessage).support?.status}
-                      </button>
-                    )}
-                  </div>
+                {message.role === "assistant" && (parsed.thinking || (message as ChatMessage).sources?.length || (message as ChatMessage).support) ? (
+                  <details className="message-inspector">
+                    <summary>Details</summary>
+                    {parsed.thinking && <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.thinking}</ReactMarkdown>}
+                    {(message as ChatMessage).sources?.length ? (
+                      <div className="message-actions">
+                        <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
+                          {(message as ChatMessage).sources?.length} sources
+                        </button>
+                        {(message as ChatMessage).support && (
+                          <button className="source-link-row" type="button" onClick={() => setSelectedSupport((message as ChatMessage).support || null)}>
+                            support: {(message as ChatMessage).support?.status}
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
+                  </details>
                 ) : null}
               </div>
             </article>
@@ -171,9 +175,9 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
           disabled={isTyping}
           title="Reasoning depth"
         >
-          <option value="fast">Fast</option>
-          <option value="balanced">Balanced</option>
-          <option value="deep">Deep</option>
+          <option value="fast">Top 12 / Rerank 3 / 512</option>
+          <option value="balanced">Current settings</option>
+          <option value="deep">Top 28 / Rerank 6 / 1024</option>
         </select>
         <input
           value={input}

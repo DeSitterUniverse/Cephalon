@@ -63,7 +63,6 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
     command.env("CEPHALON_HOST", env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()));
     command.env("CEPHALON_PORT", env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()));
     command.env("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,https://tauri.localhost");
-    command.env("CEPHALON_REQUIRE_VULKAN", "1");
     command.env("CEPHALON_LLAMA_VERBOSE", "0");
 
     if let Some(internal) = sidecar_internal {

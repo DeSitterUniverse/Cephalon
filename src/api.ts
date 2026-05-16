@@ -151,6 +151,8 @@ export type HealthResponse = {
     vulkan_available?: boolean;
     vulkan_required?: boolean;
     vulkan_dll?: string | null;
+    gpu_backend_available?: boolean;
+    backend_label?: string;
     loaded_lib_base_path?: string | null;
     override_lib_path?: string | null;
   };
@@ -166,6 +168,7 @@ export type HealthResponse = {
 
 export type ModelsResponse = {
   models: string[];
+  model_details?: Array<{ name: string; size_bytes: number }>;
   auxiliary_gguf?: string[];
   model_dir?: string;
   active_model?: string | null;

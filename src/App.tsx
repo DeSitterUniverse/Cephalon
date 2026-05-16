@@ -43,6 +43,7 @@ import { JobsPanel } from "./components/jobs/JobsPanel";
 import { LibraryPanel } from "./components/library/LibraryPanel";
 import { DocumentDetails } from "./components/library/DocumentDetails";
 import { WorkbenchLayout } from "./components/layout/WorkbenchLayout";
+import { ModelPicker } from "./components/model/ModelPicker";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { SourcesPanel } from "./components/sources/SourcesPanel";
 import { useEventStream } from "./hooks/useEventStream";
@@ -75,6 +76,12 @@ export default function App() {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   useEventStream();
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady });
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
@@ -194,11 +201,17 @@ export default function App() {
         try {
           const health = await getHealth();
           setBootHealth(health);
-          setBootStatus(health.startup_error ? "Backend is reachable with startup warnings." : "Backend is ready.");
+          setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and local model inventory.");
           setBootReady(true);
           return;
         } catch {
-          setBootStatus(`Waiting for local backend (${attempts})...`);
+          const steps = [
+            "Starting local backend.",
+            "Loading ONNX embedder and reranker.",
+            "Opening SQLite and LanceDB indexes.",
+            "Scanning local model directory.",
+          ];
+          setBootStatus(`${steps[Math.min(attempts - 1, steps.length - 1)]} (${attempts})`);
         }
         await new Promise(resolve => setTimeout(resolve, 750));
       }
@@ -337,10 +350,7 @@ export default function App() {
 
   const activeModel = modelsQuery.data?.active_model || "";
   const modelReady = Boolean(selectedModel && activeModel === selectedModel);
-  const backendLabel = modelsQuery.data?.llama_backend?.vulkan_available ? "Vulkan" : "CPU";
-  const contextLabel = modelsQuery.data?.active_context_tokens
-    ? `${Math.round(modelsQuery.data.active_context_tokens / 1024)}k ctx`
-    : backendLabel;
+  const backendLabel = modelsQuery.data?.llama_backend?.backend_label || "llama.cpp";
 
   return (
     <>
@@ -373,24 +383,18 @@ export default function App() {
           />
         )}
         modelControl={(
-          <div className={modelReady ? "top-model-picker ready" : "top-model-picker"} title="Local GGUF model">
-            <label>
-              <span>Model</span>
-              <select value={selectedModel} onChange={event => setSelectedModel(event.target.value)} disabled={modelsQuery.isLoading || loadModelMutation.isPending}>
-                <option value="">{modelsQuery.isLoading ? "Scanning models..." : (modelsQuery.data?.models?.length ? "Select model" : "No chat GGUF models found")}</option>
-                {(modelsQuery.data?.models || []).map(model => <option key={model} value={model}>{model}</option>)}
-              </select>
-            </label>
-            <small>{modelReady ? `Loaded / ${contextLabel}` : backendLabel}</small>
-            <button
-              type="button"
-              onClick={() => selectedModel && loadModelMutation.mutate(selectedModel)}
-              disabled={!selectedModel || modelReady || loadModelMutation.isPending}
-              title={modelReady ? "Selected model is loaded." : "Load selected GGUF model into memory."}
-            >
-              {loadModelMutation.isPending ? "Loading" : modelReady ? "Loaded" : "Load"}
-            </button>
-          </div>
+          <ModelPicker
+            models={modelsQuery.data?.models || []}
+            modelDetails={modelsQuery.data?.model_details || []}
+            selectedModel={selectedModel}
+            activeModel={activeModel}
+            backendLabel={backendLabel}
+            contextTokens={modelsQuery.data?.active_context_tokens}
+            isScanning={modelsQuery.isLoading}
+            isLoading={loadModelMutation.isPending}
+            onSelect={setSelectedModel}
+            onLoad={() => selectedModel && loadModelMutation.mutate(selectedModel)}
+          />
         )}
         right={right}
       />

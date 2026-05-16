@@ -73,6 +73,7 @@ def get_models(request: Request):
     inventory = models.model_inventory(app_state.settings)
     return {
         "models": inventory["chat_models"],
+        "model_details": inventory.get("chat_model_details", []),
         "auxiliary_gguf": inventory["auxiliary_gguf"],
         "model_dir": app_state.settings.model_dir,
         "active_model": getattr(app_state, "active_model_name", None),

@@ -8,7 +8,7 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking cited
 - Document library with import, text-safe unknown file ingestion, reindexing, tags, delete, and document details.
 - Durable ingestion jobs with live SSE progress.
 - Explicit GGUF model picker and **Load** action before querying.
-- Vulkan/GPU backend diagnostics for llama.cpp.
+- llama.cpp backend diagnostics and explicit local model loading.
 - Hybrid retrieval without Tantivy: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
 - Jina ONNX embedder and reranker with strict validation and no silent model fallback.
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
@@ -132,7 +132,6 @@ $env:CEPHALON_METRICS_DIR="$HOME\Documents\Cephalon Metrics"
 $env:CEPHALON_OBSIDIAN_VAULT_DIR="$HOME\Documents\Obsidian Vault"
 $env:CEPHALON_HOST="127.0.0.1"
 $env:CEPHALON_PORT="8765"
-$env:CEPHALON_REQUIRE_VULKAN="1"
 $env:CEPHALON_LLAMA_VERBOSE="0"
 $env:CEPHALON_CONTEXT_TOKENS="32768"
 $env:CEPHALON_FULL_CONTEXT="0"
@@ -150,7 +149,7 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 
 ## API
 
-- `GET /health`: startup status, paths, model diagnostics, Vulkan status, retrieval state, and embedding metadata.
+- `GET /health`: startup status, paths, model diagnostics, backend status, retrieval state, and embedding metadata.
 - `GET /models`: available chat GGUF models, auxiliary GGUF assets, and active model state.
 - `POST /models/load`: load the selected GGUF into llama.cpp.
 - `GET/PUT /settings`: RAG and generation defaults.
@@ -169,7 +168,3 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `GET/POST/PATCH/DELETE /conversations`: chat history management.
 - `POST /query`: typed SSE query stream. The selected model must already be loaded.
 - `POST /metrics/export`: write a numeric corpus snapshot CSV.
-
-## Model Licenses
-
-The default Jina embedder and reranker models are distributed under CC BY-NC 4.0. When bundling those model files with a release, include their license notices with the packaged artifacts. For commercial distribution or commercial use, verify that the selected embedding and reranking models are licensed for that use case, or replace them with models that are.

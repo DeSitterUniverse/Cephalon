@@ -30,6 +30,7 @@ def stream_llama(app_state, prompt: str, context: str, history: list[Message], s
         "Tone: Analytical, helpful, and highly competent. Avoid AI mannerisms like 'As an AI...'. "
         "Below are fragments of your past conversations and files added to your local memory library. "
         "Synthesize this context carefully to answer the user's prompt. "
+        "Do not repeat the user's prompt as part of the answer. "
         "When using retrieved evidence, cite source tags exactly as provided, for example [[src:S1]]. "
         "Do not invent source tags. Do not expose internal parsing instructions. "
         "For multi-part questions, answer each subquestion separately and keep citations attached to the relevant subquestion. "

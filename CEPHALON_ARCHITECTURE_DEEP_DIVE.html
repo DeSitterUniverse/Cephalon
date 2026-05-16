@@ -92,7 +92,7 @@
   <p>The eval harness accepts small JSON eval sets and records deterministic retrieval metrics. The first metrics are Recall@k, MRR, expected document hit rate, and expected chunk hit rate. This keeps quality checks cheap enough to run locally after changing chunking or retrieval settings.</p>
 
   <h2>Model Runtime</h2>
-  <p>Embedding and reranking use ONNX Runtime to avoid a PyTorch runtime requirement in the normal app path. The embedder is <code>jinaai/jina-embeddings-v5-text-small</code> and the reranker is <code>jinaai/jina-reranker-v3</code>. llama.cpp loads the selected GGUF chat model only after the user presses <strong>Load</strong>. The backend reports Vulkan availability, llama.cpp library paths, active context size, and model metadata through health/model APIs.</p>
+  <p>Embedding and reranking use ONNX Runtime to avoid a PyTorch runtime requirement in the normal app path. The embedder is <code>jinaai/jina-embeddings-v5-text-small</code> and the reranker is <code>jinaai/jina-reranker-v3</code>. llama.cpp loads the selected GGUF chat model only after the user presses <strong>Load</strong>. The backend reports llama.cpp library paths, backend availability, active context size, and model metadata through health/model APIs.</p>
 
   <h2>Chat History And Memory</h2>
   <p>Chats are stored in SQLite as conversations, messages, and per-message source metadata. This gives the app durable history and allows later retrieval over summarized conversation memory. This is retrieval memory, not training: model weights do not change.</p>
