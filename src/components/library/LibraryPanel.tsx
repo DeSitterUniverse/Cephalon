@@ -1,4 +1,4 @@
-import { FileText, FolderPlus, RefreshCw, Search, Tag, Trash2 } from "lucide-react";
+import { BookOpen, FileText, FolderPlus, RefreshCw, Search, Tag, Trash2 } from "lucide-react";
 import type { Document } from "../../api";
 import { useUiStore } from "../../store";
 
@@ -10,11 +10,12 @@ type Props = {
   setStatusFilter: (value: string) => void;
   onImportFolder: () => void;
   onImportText: () => void;
+  onImportVault: () => void;
   onDelete: (doc: Document) => void;
   onReindex: (doc: Document) => void;
 };
 
-export function LibraryPanel({ documents, search, setSearch, statusFilter, setStatusFilter, onImportFolder, onImportText, onDelete, onReindex }: Props) {
+export function LibraryPanel({ documents, search, setSearch, statusFilter, setStatusFilter, onImportFolder, onImportText, onImportVault, onDelete, onReindex }: Props) {
   const selectedDocumentId = useUiStore(state => state.selectedDocumentId);
   const setSelectedDocumentId = useUiStore(state => state.setSelectedDocumentId);
 
@@ -34,6 +35,7 @@ export function LibraryPanel({ documents, search, setSearch, statusFilter, setSt
         <div className="action-row compact-actions">
           <button className="icon-button" onClick={onImportText} title="Import file as text"><FileText size={16} /></button>
           <button className="icon-button" onClick={onImportFolder} title="Import folder"><FolderPlus size={16} /></button>
+          <button className="icon-button" onClick={onImportVault} title="Import Obsidian vault"><BookOpen size={16} /></button>
         </div>
       </div>
 

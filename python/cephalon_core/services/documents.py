@@ -12,6 +12,15 @@ from pypdf import PdfReader
 from .. import storage
 from ..validators import is_supported_file
 
+SKIPPED_DIRECTORY_NAMES = {
+    ".git",
+    ".obsidian",
+    ".trash",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
+
 
 def get_file_hash(path: str) -> str:
     hasher = hashlib.sha256()
@@ -104,10 +113,31 @@ def collect_supported_files(path: str, force_text: bool = False) -> list[str]:
         return [path]
 
     files: list[str] = []
-    for root, _, names in os.walk(path):
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [name for name in dirs if name not in SKIPPED_DIRECTORY_NAMES]
         for name in names:
             full_path = os.path.join(root, name)
             if is_supported_file(full_path) or looks_like_text(full_path) or force_text:
+                files.append(full_path)
+    return sorted(files)
+
+
+def collect_obsidian_files(vault_path: str) -> list[str]:
+    if not os.path.isdir(vault_path):
+        return []
+
+    files: list[str] = []
+    for root, dirs, names in os.walk(vault_path):
+        dirs[:] = [
+            name for name in dirs
+            if name not in SKIPPED_DIRECTORY_NAMES and not name.startswith(".")
+        ]
+        for name in names:
+            if name.startswith("."):
+                continue
+            full_path = os.path.join(root, name)
+            ext = os.path.splitext(name)[1].lower()
+            if ext in {".md", ".txt", ".canvas"} or looks_like_text(full_path):
                 files.append(full_path)
     return sorted(files)
 

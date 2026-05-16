@@ -143,6 +143,7 @@ export type HealthResponse = {
   data_dir: string;
   model_dir: string;
   metrics_dir?: string;
+  obsidian_vault_dir?: string;
   active_model?: string | null;
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
@@ -183,6 +184,7 @@ type DocumentsResponse = { documents: Document[] };
 type JobsResponse = { jobs: Job[] };
 type ConversationsResponse = { conversations: Conversation[] };
 type IngestResponse = { job_id: string; status: string; message?: string };
+type ObsidianVaultResponse = { path: string; exists: boolean };
 type RetrievalTracesResponse = { traces: RetrievalTraceSummary[] };
 type EvalRunsResponse = { runs: EvalRun[] };
 
@@ -278,6 +280,14 @@ export function ingestPath(path: string, force_text = false): Promise<IngestResp
     method: "POST",
     body: JSON.stringify({ path, force_text }),
   });
+}
+
+export function getObsidianVault(): Promise<ObsidianVaultResponse> {
+  return requestJson<ObsidianVaultResponse>("/vaults/obsidian");
+}
+
+export function ingestObsidianVault(): Promise<IngestResponse & { path: string }> {
+  return requestJson<IngestResponse & { path: string }>("/vaults/obsidian/ingest", { method: "POST" });
 }
 
 export function reindexDocument(id: string): Promise<IngestResponse> {

@@ -68,7 +68,7 @@
 
   <h2>Ingestion Pipeline</h2>
   <div class="flow">
-    <div class="step"><strong>1. Resolve input.</strong> A queued job receives a file or folder path. Supported file types use native extraction. Unknown text-like files are imported as text after binary guards.</div>
+    <div class="step"><strong>1. Resolve input.</strong> A queued job receives a file, folder, or configured Obsidian vault path. Supported file types use native extraction. Unknown text-like files are imported as text after binary guards. Obsidian imports skip <code>.obsidian</code> and other internal folders.</div>
     <div class="step"><strong>2. Register document.</strong> SQLite records path, content hash, extraction mode, indexing state, display name, size, timestamps, and embedding metadata.</div>
     <div class="step"><strong>3. Build hierarchy.</strong> Text is split into semantic units, grouped into parent chunks, summarized into summary nodes, and broken into smaller child chunks for precise retrieval.</div>
     <div class="step"><strong>4. Index.</strong> Child chunks go to SQLite, SQLite FTS5, and LanceDB. Summary nodes go to SQLite and LanceDB. Reindexing clears generated rows and vectors for the document before writing fresh state.</div>

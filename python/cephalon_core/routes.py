@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -50,6 +51,7 @@ def health(request: Request):
         "data_dir": app_state.settings.data_dir,
         "model_dir": app_state.settings.model_dir,
         "metrics_dir": app_state.settings.metrics_dir,
+        "obsidian_vault_dir": app_state.settings.obsidian_vault_dir,
         "last_metrics_error": getattr(app_state, "last_metrics_error", None),
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
@@ -78,6 +80,26 @@ def get_models(request: Request):
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "llama_backend": models.llama_backend_info(),
     }
+
+
+@router.get("/vaults/obsidian")
+def get_obsidian_vault(request: Request):
+    app_state = state(request)
+    vault_path = app_state.settings.obsidian_vault_dir
+    return {
+        "path": vault_path,
+        "exists": os.path.isdir(vault_path),
+    }
+
+
+@router.post("/vaults/obsidian/ingest")
+async def ingest_obsidian_vault(request: Request):
+    app_state = state(request)
+    vault_path = app_state.settings.obsidian_vault_dir
+    if not os.path.isdir(vault_path):
+        raise HTTPException(status_code=404, detail=f"Obsidian vault not found: {vault_path}")
+    job = await app_state.job_manager.enqueue_ingest(vault_path, kind="obsidian", force_text=True)
+    return {"job_id": job["id"], "status": job["status"], "message": "Obsidian vault ingestion queued.", "path": vault_path}
 
 
 @router.post("/models/load")

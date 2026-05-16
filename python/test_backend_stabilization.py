@@ -14,6 +14,7 @@ from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
 from cephalon_core.services import metrics, retrieval
 from cephalon_core.services import models
+from cephalon_core.services.documents import collect_obsidian_files
 from cephalon_core.services.ingestion import delete_document_rows, delete_document_vectors, process_single_file
 from cephalon_core.services.jobs import JobManager
 from cephalon_core.services.retrieval import vector_table_name
@@ -300,6 +301,22 @@ def test_unknown_text_file_imports_without_force_text(monkeypatch, tmp_path):
     assert result["status"] == "ready"
     assert row["status"] == "ready"
     assert row["extraction_mode"] == "text"
+
+
+def test_obsidian_collection_skips_internal_config(tmp_path):
+    vault = tmp_path / "Obsidian Vault"
+    vault.mkdir()
+    (vault / "Daily.md").write_text("# Daily\nA note about local RAG.", encoding="utf-8")
+    (vault / "Board.canvas").write_text('{"nodes":[]}', encoding="utf-8")
+    internal = vault / ".obsidian"
+    internal.mkdir()
+    (internal / "app.json").write_text('{"theme":"obsidian"}', encoding="utf-8")
+
+    collected = [path.replace("\\", "/") for path in collect_obsidian_files(str(vault))]
+
+    assert any(path.endswith("/Daily.md") for path in collected)
+    assert any(path.endswith("/Board.canvas") for path in collected)
+    assert not any("/.obsidian/" in path for path in collected)
 
 
 def test_unknown_binary_file_fails_with_clear_reason(tmp_path):

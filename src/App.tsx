@@ -17,11 +17,13 @@ import {
   getHealth,
   getIndexHealth,
   getModels,
+  getObsidianVault,
   getEvalRuns,
   getRetrievalTrace,
   getRetrievalTraces,
   getSettings,
   ingestPath,
+  ingestObsidianVault,
   loadModel,
   reindexDocument,
   runEval,
@@ -79,6 +81,7 @@ export default function App() {
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: getJobs, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
+  const obsidianVaultQuery = useQuery({ queryKey: ["obsidian-vault"], queryFn: getObsidianVault, enabled: bootReady });
   const tracesQuery = useQuery({ queryKey: ["retrieval-traces"], queryFn: getRetrievalTraces, enabled: bootReady && rightPanel === "trace" });
   const traceQuery = useQuery({
     queryKey: ["retrieval-trace", selectedTraceId],
@@ -142,6 +145,15 @@ export default function App() {
     mutationFn: exportMetrics,
     onSuccess: data => setToast(data.status === "success" && data.path ? `Metrics exported: ${data.path}` : `Metrics export failed: ${data.error || "metrics directory is unavailable"}`),
     onError: error => setToast(error instanceof Error ? error.message : "Failed to export metrics."),
+  });
+
+  const obsidianMutation = useMutation({
+    mutationFn: ingestObsidianVault,
+    onSuccess: data => {
+      setToast(data.message || `Obsidian vault queued: ${data.path}`);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: error => setToast(error instanceof Error ? error.message : "Failed to queue Obsidian vault."),
   });
 
   const newConversationMutation = useMutation({
@@ -251,6 +263,14 @@ export default function App() {
     if (window.confirm(`Delete ${doc.name} from the library?`)) deleteMutation.mutate(doc);
   }
 
+  function importObsidianVault() {
+    if (!obsidianVaultQuery.data?.exists) {
+      setToast(`Obsidian vault not found: ${obsidianVaultQuery.data?.path || "configured path unavailable"}`);
+      return;
+    }
+    obsidianMutation.mutate();
+  }
+
   const right = rightPanel === "settings"
     ? <SettingsPanel models={modelsQuery.data?.models || []} selectedModel={selectedModel} setSelectedModel={setSelectedModel} settings={settingsQuery.data} updateSettings={(value: RagSettings) => settingsMutation.mutate(value)} onExportMetrics={() => metricsMutation.mutate()} />
     : rightPanel === "sources"
@@ -334,6 +354,7 @@ export default function App() {
             setStatusFilter={setStatusFilter}
             onImportFolder={importFolder}
             onImportText={importTextFile}
+            onImportVault={importObsidianVault}
             onDelete={removeDocument}
             onReindex={(doc) => reindexMutation.mutate(doc)}
           />

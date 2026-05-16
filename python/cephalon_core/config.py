@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
-    ".txt", ".md", ".json", ".py", ".js", ".ts", ".html",
+    ".txt", ".md", ".json", ".canvas", ".py", ".js", ".ts", ".html",
 }
 
 ACTIVE_VECTOR_TABLE = "vectors_jina_v5_small_1024"
@@ -39,6 +39,9 @@ class Settings:
     def __init__(self) -> None:
         self.data_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_DATA_DIR", "~/cephalon-data")))
         self.model_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_MODEL_DIR", os.path.join(self.data_dir, "models"))))
+        self.obsidian_vault_dir = os.path.abspath(os.path.expanduser(
+            os.getenv("CEPHALON_OBSIDIAN_VAULT_DIR", "~/Documents/Obsidian Vault")
+        ))
         self.host = os.getenv("CEPHALON_HOST", "127.0.0.1")
         self.port = int(os.getenv("CEPHALON_PORT", "8765"))
         self.rag_defaults = RagDefaults(

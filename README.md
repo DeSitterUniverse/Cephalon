@@ -38,6 +38,7 @@ Default paths:
 ~/cephalon-data
 ~/cephalon-data/models
 ~/Documents/Cephalon Metrics
+~/Documents/Obsidian Vault
 ```
 
 Expected model layout:
@@ -128,6 +129,7 @@ Common runtime variables:
 $env:CEPHALON_DATA_DIR="C:\path\to\data"
 $env:CEPHALON_MODEL_DIR="C:\path\to\models"
 $env:CEPHALON_METRICS_DIR="$HOME\Documents\Cephalon Metrics"
+$env:CEPHALON_OBSIDIAN_VAULT_DIR="$HOME\Documents\Obsidian Vault"
 $env:CEPHALON_HOST="127.0.0.1"
 $env:CEPHALON_PORT="8765"
 $env:CEPHALON_REQUIRE_VULKAN="1"
@@ -153,6 +155,8 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `POST /models/load`: load the selected GGUF into llama.cpp.
 - `GET/PUT /settings`: RAG and generation defaults.
 - `POST /ingest`: queue file/folder ingestion.
+- `GET /vaults/obsidian`: configured Obsidian vault path and existence check.
+- `POST /vaults/obsidian/ingest`: queue the configured Obsidian vault, skipping `.obsidian` and other internal folders.
 - `GET /jobs`: recent ingestion jobs.
 - `GET /retrieval/traces`: recent retrieval traces.
 - `GET /retrieval/traces/{query_id}`: full retrieval trace with candidate stages, scores, context, and latency.

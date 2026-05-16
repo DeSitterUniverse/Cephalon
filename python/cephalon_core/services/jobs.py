@@ -5,7 +5,7 @@ import uuid
 
 from .. import storage
 from ..events import EventBus
-from .documents import collect_supported_files
+from .documents import collect_obsidian_files, collect_supported_files
 from .ingestion import delete_document_vectors, process_single_file
 
 
@@ -72,7 +72,7 @@ class JobManager:
         job = self.get_job(job_id)
         path = job["path"]
         force_text = bool(job.get("force_text"))
-        files = collect_supported_files(path, force_text=force_text)
+        files = collect_obsidian_files(path) if job["kind"] == "obsidian" else collect_supported_files(path, force_text=force_text)
         total = len(files)
         await self._update_job(job_id, status="running", total_files=total, current_file=os.path.basename(path))
 
@@ -96,7 +96,7 @@ class JobManager:
                 self.app_state,
                 file_path,
                 rag_settings,
-                force_text=force_text,
+                force_text=force_text or job["kind"] == "obsidian",
                 existing_doc_id=existing_doc_id,
             )
             processed += 1
