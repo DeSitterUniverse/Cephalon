@@ -174,12 +174,18 @@ def test_model_inventory_separates_chat_and_auxiliary_ggufs(tmp_path):
     ]
 
 
-def test_packaged_vulkan_dll_discovery_uses_sidecar_path_when_present():
+def test_packaged_llama_dll_discovery_uses_sidecar_path_when_present():
     discovered = models._discover_packaged_llama_dll_dir()
 
     if discovered is not None:
         assert discovered.endswith("llama_cpp\\lib") or discovered.endswith("llama_cpp/lib")
-        assert os.path.exists(os.path.join(discovered, "ggml-vulkan.dll"))
+        assert any(name.startswith("ggml") for name in os.listdir(discovered))
+
+
+def test_quiet_llama_stderr_preserves_loader_exceptions():
+    with pytest.raises(RuntimeError, match="load failed"):
+        with models._quiet_llama_stderr():
+            raise RuntimeError("load failed")
 
 
 def test_conversation_persistence_roundtrip():

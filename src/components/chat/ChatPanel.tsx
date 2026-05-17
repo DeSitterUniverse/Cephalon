@@ -71,24 +71,27 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
 
     const userMsg = input.trim();
     const historyPayload = messages.slice(-6).map(message => ({ role: message.role, content: message.content }));
+    const assistantDraftId = `draft-${Date.now()}`;
     setInput("");
     setIsTyping(true);
-    setMessages(prev => [...prev, { role: "user", content: userMsg }, { role: "assistant", content: "" }]);
+    setMessages(prev => [...prev, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "" }]);
 
     try {
       const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, reasoningMode);
       await consumeQueryStream(body, setSelectedSources, chunk => {
         setMessages(prev => {
           const next = [...prev];
-          const last = next.length - 1;
-          next[last] = { ...next[last], content: next[last].content + chunk };
+          const target = next.findIndex(message => message.id === assistantDraftId);
+          if (target === -1) return next;
+          next[target] = { ...next[target], content: next[target].content + chunk };
           return next;
         });
       }, sources => {
         setMessages(prev => {
           const next = [...prev] as ChatMessage[];
-          const last = next.length - 1;
-          next[last] = { ...next[last], sources };
+          const target = next.findIndex(message => message.id === assistantDraftId);
+          if (target === -1) return next;
+          next[target] = { ...next[target], sources };
           return next;
         });
       }, conversationId => {
@@ -97,18 +100,20 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
         if (meta?.support) {
           setMessages(prev => {
             const next = [...prev] as ChatMessage[];
-            const last = next.length - 1;
-            next[last] = { ...next[last], support: meta.support as AnswerSupport };
+            const target = next.findIndex(message => message.id === assistantDraftId);
+            if (target === -1) return next;
+            next[target] = { ...next[target], support: meta.support as AnswerSupport };
             return next;
           });
         }
         if (meta?.no_answer) {
           setMessages(prev => {
             const next = [...prev];
-            const last = next.length - 1;
-            next[last] = {
-              ...next[last],
-              content: `${next[last].content}\n\n_Confidence is low. Closest retrieved matches are shown in Sources._`,
+            const target = next.findIndex(message => message.id === assistantDraftId);
+            if (target === -1) return next;
+            next[target] = {
+              ...next[target],
+              content: `${next[target].content}\n\n_Confidence is low. Closest retrieved matches are shown in Sources._`,
             };
             return next;
           });
@@ -118,8 +123,8 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
       const message = error instanceof Error ? error.message : "Error connecting to local service.";
       setMessages(prev => {
         const next = [...prev];
-        const last = next.length - 1;
-        if (next[last]?.role === "assistant") next[last] = { role: "assistant", content: message };
+        const target = next.findIndex(item => item.id === assistantDraftId);
+        if (target !== -1) next[target] = { id: assistantDraftId, role: "assistant", content: message };
         return next;
       });
     } finally {

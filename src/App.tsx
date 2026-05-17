@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { X } from "lucide-react";
 import {
   addDocumentTag,
   createConversation,
@@ -73,6 +74,7 @@ export default function App() {
   const selectedSources = useUiStore(state => state.selectedSources);
   const selectedSupport = useUiStore(state => state.selectedSupport);
   const rightPanel = useUiStore(state => state.rightPanel);
+  const setRightPanel = useUiStore(state => state.setRightPanel);
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   useEventStream();
@@ -112,6 +114,7 @@ export default function App() {
     mutationFn: (path: string) => ingestPath(path),
     onSuccess: data => {
       setToast(data.message || "Ingestion queued.");
+      setRightPanel("jobs");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
     onError: error => setToast(error instanceof Error ? error.message : "Failed to queue ingestion."),
@@ -129,6 +132,7 @@ export default function App() {
     mutationFn: (doc: Document) => reindexDocument(doc.id),
     onSuccess: data => {
       setToast(data.message || "Reindex queued.");
+      setRightPanel("jobs");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
@@ -158,6 +162,7 @@ export default function App() {
     mutationFn: ingestObsidianVault,
     onSuccess: data => {
       setToast(data.message || `Obsidian vault queued: ${data.path}`);
+      setRightPanel("jobs");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
     onError: error => setToast(error instanceof Error ? error.message : "Failed to queue Obsidian vault."),
@@ -267,6 +272,7 @@ export default function App() {
     if (selectedPath && typeof selectedPath === "string") ingestPath(selectedPath, true)
       .then(data => {
         setToast(data.message || "Text ingestion queued.");
+        setRightPanel("jobs");
         queryClient.invalidateQueries({ queryKey: ["jobs"] });
       })
       .catch(error => setToast(error instanceof Error ? error.message : "Failed to queue text import."));
@@ -398,7 +404,14 @@ export default function App() {
         )}
         right={right}
       />
-      {toast && <button className="toast" onClick={() => setToast(null)}>{toast}</button>}
+      {toast && (
+        <div className="toast" role="status">
+          <span>{toast}</span>
+          <button type="button" onClick={() => setToast(null)} aria-label="Dismiss notification">
+            <X size={14} />
+          </button>
+        </div>
+      )}
     </>
   );
 }

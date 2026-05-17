@@ -67,8 +67,6 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
 
     if let Some(internal) = sidecar_internal {
         let dll_dir = internal.join("llama_cpp").join("lib");
-        command.env("CEPHALON_LLAMA_DLL_DIR", &dll_dir);
-        command.env("LLAMA_CPP_LIB_PATH", &dll_dir);
         let path = prepend_path(env::var("PATH").ok(), &[dll_dir, internal.to_path_buf()]);
         command.env("PATH", path);
 

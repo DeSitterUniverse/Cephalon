@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { BarChart3, Circle, FileText, ListChecks, MessageSquareText, SearchCode, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { BarChart3, Circle, FileText, ListChecks, Maximize2, MessageSquareText, Minus, SearchCode, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
 
@@ -23,6 +24,14 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
 
   return (
     <div className="app-frame">
+      <div className="app-titlebar" data-tauri-drag-region>
+        <div className="window-title" data-tauri-drag-region>Cephalon</div>
+        <div className="window-controls">
+          <button type="button" onClick={() => getCurrentWindow().minimize()} title="Minimize"><Minus size={14} /></button>
+          <button type="button" onClick={() => getCurrentWindow().toggleMaximize()} title="Maximize"><Maximize2 size={13} /></button>
+          <button type="button" onClick={() => getCurrentWindow().close()} title="Close"><X size={15} /></button>
+        </div>
+      </div>
       <div className="workbench">
         <aside className="panel panel-left">{left}</aside>
         <main className="workspace">

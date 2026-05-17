@@ -38,7 +38,7 @@ export function ModelPicker({ models, modelDetails, selectedModel, activeModel, 
         <span className="model-title">{selectedModel ? compactName(selectedModel) : isScanning ? "Scanning models" : "Select model"}</span>
         <span className="model-meta">
           <HardDrive size={12} />
-          {selectedModel ? `${sizeLabel(selectedDetail?.size_bytes)} · ${contextLabel}` : `${models.length} available`}
+          {selectedModel ? `${sizeLabel(selectedDetail?.size_bytes)} / ${contextLabel}` : `${models.length} available`}
         </span>
         <ChevronDown size={15} />
       </button>
@@ -60,7 +60,7 @@ export function ModelPicker({ models, modelDetails, selectedModel, activeModel, 
                 }}
               >
                 <strong>{compactName(model)}</strong>
-                <span>{sizeLabel(detail?.size_bytes)} · GGUF</span>
+                <span>{sizeLabel(detail?.size_bytes)} / GGUF</span>
               </button>
             );
           })}

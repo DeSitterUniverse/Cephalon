@@ -20,8 +20,12 @@ export function LibraryPanel({ documents, search, setSearch, statusFilter, setSt
   const setSelectedDocumentId = useUiStore(state => state.setSelectedDocumentId);
 
   const filtered = documents.filter(doc => {
-    const matchesSearch = doc.name.toLowerCase().includes(search.toLowerCase()) || doc.path.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = statusFilter === "all" || doc.status === statusFilter;
+    const query = search.toLowerCase();
+    const matchesSearch = doc.name.toLowerCase().includes(query)
+      || doc.path.toLowerCase().includes(query)
+      || (doc.tags || []).some(tag => tag.toLowerCase().includes(query));
+    const normalizedStatus = doc.status.startsWith("failed") ? "failed" : doc.status === "queued" ? "ingesting" : doc.status;
+    const matchesStatus = statusFilter === "all" || normalizedStatus === statusFilter;
     return matchesSearch && matchesStatus;
   });
 

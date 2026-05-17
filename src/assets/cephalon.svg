@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cephalon">
-  <path d="M32 6 54 20 32 34 10 20 32 6Z" fill="#ff9a2e"/>
-  <path d="M10 20 32 34v24L10 44V20Z" fill="#c95e12"/>
-  <path d="M54 20 32 34v24l22-14V20Z" fill="#7a2e08"/>
-  <path d="M32 6 54 20 32 34 10 20 32 6Z" fill="none" stroke="#ffd08a" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M32 6 54 20 32 34 10 20 32 6Z" fill="none" stroke="#ff9a2e" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M10 20 32 34v24L10 44V20Z" fill="none" stroke="#c95e12" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M54 20 32 34v24l22-14V20Z" fill="none" stroke="#8a3b0b" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M32 34v24" stroke="#ffd08a" stroke-width="2" stroke-linecap="round"/>
 </svg>

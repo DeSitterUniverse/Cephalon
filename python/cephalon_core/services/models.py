@@ -8,10 +8,9 @@ from fastapi import HTTPException
 
 
 def _configure_llama_dll_search() -> None:
-    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR") or _discover_packaged_llama_dll_dir()
+    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR")
     if dll_dir and os.path.isdir(dll_dir):
         os.environ.setdefault("LLAMA_CPP_LIB_PATH", dll_dir)
-        os.environ.setdefault("CEPHALON_LLAMA_DLL_DIR", dll_dir)
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(dll_dir)
 
@@ -25,7 +24,7 @@ def _discover_packaged_llama_dll_dir() -> str | None:
         repo_root / "src-tauri" / "target" / "release" / "backend" / "engine" / "_internal" / "llama_cpp" / "lib",
     ]
     for candidate in candidates:
-        if (candidate / "ggml-vulkan.dll").exists():
+        if any(candidate.glob("ggml*.dll")) or any(candidate.glob("libggml*")):
             return str(candidate)
     return None
 
@@ -44,7 +43,7 @@ def llama_backend_info() -> dict:
     package_dir = Path(llama_cpp.__file__).resolve().parent
     loaded_base_path = getattr(getattr(llama_cpp, "llama_cpp", None), "_base_path", None)
     lib_dirs = []
-    env_dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR")
+    env_dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR") or os.getenv("LLAMA_CPP_LIB_PATH")
     if env_dll_dir:
         lib_dirs.append(Path(env_dll_dir))
     lib_dirs.extend([package_dir / "lib", package_dir])
@@ -54,19 +53,20 @@ def llama_backend_info() -> dict:
 
     seen = set()
     lib_dirs = [path for path in lib_dirs if not (str(path) in seen or seen.add(str(path)))]
-    vulkan_candidates = [path / "ggml-vulkan.dll" for path in lib_dirs]
-    vulkan_dll = next((candidate for candidate in vulkan_candidates if candidate.exists()), None)
+    backend_lib = next((candidate for path in lib_dirs for candidate in path.glob("ggml*.dll")), None)
+    backend_available = backend_lib is not None or loaded_base_path is not None
     return {
         "package": str(package_dir),
         "lib_dir": str(package_dir / "lib"),
         "loaded_lib_base_path": str(loaded_base_path) if loaded_base_path else None,
         "override_lib_path": os.getenv("LLAMA_CPP_LIB_PATH"),
         "dll_search_paths": [str(path) for path in lib_dirs],
-        "gpu_backend_available": vulkan_dll is not None,
-        "backend_label": "GPU backend" if vulkan_dll is not None else "CPU backend",
+        "gpu_backend_available": backend_available,
+        "backend_label": "llama.cpp backend" if backend_available else "CPU backend",
         "vulkan_required": False,
-        "vulkan_available": vulkan_dll is not None,
-        "vulkan_dll": str(vulkan_dll) if vulkan_dll else None,
+        "vulkan_available": False,
+        "vulkan_dll": None,
+        "backend_library": str(backend_lib) if backend_lib else str(loaded_base_path) if loaded_base_path else None,
     }
 
 
@@ -104,19 +104,25 @@ def _quiet_llama_stderr():
     if os.getenv("CEPHALON_LLAMA_VERBOSE", "0") != "0":
         yield
         return
+    stderr_fd = None
+    saved_fd = None
+    devnull_fd = None
     try:
         stderr_fd = sys.stderr.fileno()
         saved_fd = os.dup(stderr_fd)
         devnull_fd = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull_fd, stderr_fd)
-        try:
-            yield
-        finally:
-            os.dup2(saved_fd, stderr_fd)
-            os.close(saved_fd)
-            os.close(devnull_fd)
     except Exception:
         yield
+        return
+    try:
+        yield
+    finally:
+        if stderr_fd is not None and saved_fd is not None:
+            os.dup2(saved_fd, stderr_fd)
+            os.close(saved_fd)
+        if devnull_fd is not None:
+            os.close(devnull_fd)
 
 
 def _model_context_length(model_path: str) -> int | None:

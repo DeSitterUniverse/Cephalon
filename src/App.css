@@ -1,5 +1,5 @@
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   color: #ededed;
   background: #000;
   --bg: #000;
@@ -24,6 +24,8 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 body { margin: 0; background: var(--bg); color: var(--text); overflow: hidden; }
 button, input, select { font: inherit; }
 button { color: inherit; }
+button { transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease; }
+button:active { border-color: rgba(255, 154, 46, 0.62); color: #ffbd6b; }
 select, option { background: #050505; color: var(--text); }
 
 .boot-screen {
@@ -63,10 +65,40 @@ select, option { background: #050505; color: var(--text); }
 .app-frame {
   height: 100dvh;
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: 32px minmax(0, 1fr);
   background: #000;
   overflow: hidden;
 }
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #000;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  user-select: none;
+}
+.window-title {
+  padding-left: 10px;
+  font-size: 0.78rem;
+}
+.window-controls {
+  display: flex;
+  height: 100%;
+}
+.window-controls button {
+  width: 42px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.window-controls button:hover { background: #171717; color: var(--text); }
+.window-controls button:active { background: #241204; color: var(--accent-2); }
 .workbench {
   min-height: 0;
   display: grid;
@@ -134,6 +166,10 @@ select, option { background: #050505; color: var(--text); }
   color: var(--text);
   cursor: pointer;
 }
+.model-trigger:hover {
+  border-color: rgba(255, 154, 46, 0.42);
+  background: #090909;
+}
 .model-picker.loaded .model-trigger { border-color: rgba(110, 231, 168, 0.45); }
 .model-title {
   min-width: 0;
@@ -165,6 +201,10 @@ select, option { background: #050505; color: var(--text); }
   color: var(--text);
   cursor: pointer;
 }
+.model-load:hover:not(:disabled) {
+  border-color: rgba(255, 154, 46, 0.42);
+  background: #15110c;
+}
 .model-load:disabled { opacity: 0.6; cursor: not-allowed; }
 .model-menu {
   position: absolute;
@@ -192,6 +232,7 @@ select, option { background: #050505; color: var(--text); }
   cursor: pointer;
 }
 .model-menu button:hover, .model-menu button.active { background: #111; }
+.model-menu button:active { background: #181008; }
 .model-menu strong {
   font-size: 0.8rem;
   overflow-wrap: anywhere;
@@ -213,6 +254,7 @@ select, option { background: #050505; color: var(--text); }
   cursor: pointer;
 }
 .icon-button:hover, .icon-button.active { border-color: var(--line-strong); color: var(--text); background: #111; }
+.icon-button:active { background: #181008; }
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -376,16 +418,28 @@ select, option { background: #050505; color: var(--text); }
 .message.user { justify-content: flex-end; }
 .message-body {
   max-width: min(780px, 78%);
-  border: 1px solid var(--line);
+  border: 1px solid #303030;
   border-radius: var(--radius);
-  background: var(--panel);
+  background: #060606;
   padding: 9px 11px;
   line-height: 1.45;
   font-size: 0.84rem;
 }
+.message.assistant .message-body {
+  border-color: #2b2b2b;
+  background: #050505;
+}
 .message.user .message-body {
-  border-color: rgba(255, 154, 46, 0.55);
-  background: #120904;
+  border-color: rgba(255, 154, 46, 0.48);
+  background: #160c05;
+}
+.message-body a {
+  color: #ffbd6b;
+  text-decoration-color: rgba(255, 189, 107, 0.65);
+}
+.message-body a:hover {
+  color: #ffd08a;
+  text-decoration-color: #ffd08a;
 }
 .message-body p:first-child { margin-top: 0; }
 .message-body p:last-child { margin-bottom: 0; }
@@ -461,6 +515,11 @@ select, option { background: #050505; color: var(--text); }
   background: #0a0a0a;
   color: var(--text);
   cursor: pointer;
+}
+.composer button:hover:not(:disabled),
+.action-row button:hover:not(:disabled) {
+  background: #15110c;
+  border-color: rgba(255, 154, 46, 0.42);
 }
 .composer button:disabled { cursor: not-allowed; opacity: 0.45; border-color: var(--line); }
 
@@ -691,12 +750,39 @@ select, option { background: #050505; color: var(--text); }
   left: 14px;
   bottom: 18px;
   max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: #0a0a0a;
   color: var(--text);
-  padding: 10px 14px;
+  padding: 8px 10px 8px 12px;
+  user-select: text;
+  cursor: default;
+  z-index: 30;
+}
+.toast span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.toast button {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #050505;
+  color: var(--muted);
   cursor: pointer;
+  user-select: none;
+}
+.toast button:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: #111;
 }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }

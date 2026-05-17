@@ -59,12 +59,30 @@ def ensure_vector_table(app_state, rows: list[dict[str, Any]]):
     table_name = vector_table_name(app_state)
     if table_name in app_state.lance.table_names():
         table = app_state.lance.open_table(table_name)
+        if not _vector_table_has_current_schema(table):
+            app_state.lance.drop_table(table_name)
+            table = app_state.lance.create_table(
+                table_name,
+                data=rows,
+                schema=storage.vector_schema(getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)),
+            )
+            ensure_retrieval_index(app_state)
+            return table
         if rows:
             table.add(rows)
     else:
         table = app_state.lance.create_table(table_name, data=rows, schema=storage.vector_schema(getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)))
     ensure_retrieval_index(app_state)
     return table
+
+
+def _vector_table_has_current_schema(table) -> bool:
+    try:
+        schema = table.schema
+        names = set(schema.names if hasattr(schema, "names") else schema.to_arrow_schema().names)
+    except Exception:
+        return True
+    return {"parent_id", "source_kind", "embedding_model_id", "embedding_dim", "chunk_length"} <= names
 
 
 async def get_embedding(app_state, text: str) -> list[float]:
