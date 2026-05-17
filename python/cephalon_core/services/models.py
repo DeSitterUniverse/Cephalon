@@ -144,13 +144,25 @@ def _model_context_length(model_path: str) -> int | None:
     return None
 
 
+def _context_attempts(requested_context: int, configured_context: int) -> list[int]:
+    floors = [65536, 32768, 16384, 8192, 4096]
+    values = [requested_context, configured_context]
+    values.extend(value for value in floors if value < requested_context)
+    attempts: list[int] = []
+    for value in values:
+        value = max(4096, min(131072, int(value)))
+        if value not in attempts:
+            attempts.append(value)
+    return attempts
+
+
 def load_llm(app_state, model_filename: str) -> None:
     if not _looks_like_chat_model(model_filename):
         raise HTTPException(status_code=400, detail="Selected GGUF is an embedding/reranker asset, not a chat model.")
     model_path = validate_model_filename(model_filename, app_state.settings.model_dir)
     rag_settings = storage.get_rag_settings(app_state.sqlite)
     model_context_tokens = _model_context_length(model_path)
-    context_tokens = model_context_tokens if rag_settings.full_context and model_context_tokens else rag_settings.context_tokens
+    requested_context_tokens = model_context_tokens if rag_settings.full_context and model_context_tokens else rag_settings.context_tokens
     backend = llama_backend_info()
     if getattr(app_state, "llm", None) is not None:
         print("Deallocating active VRAM model...")
@@ -161,23 +173,36 @@ def load_llm(app_state, model_filename: str) -> None:
         f"Loading {model_filename} with llama.cpp "
         f"({backend['backend_label']})."
     )
+    errors: list[str] = []
     try:
-        with _quiet_llama_stderr():
-            app_state.llm = Llama(
-                model_path=model_path,
-                n_gpu_layers=-1,
-                n_ctx=context_tokens,
-                main_gpu=int(os.getenv("CEPHALON_MAIN_GPU", "0")),
-                offload_kqv=True,
-                verbose=os.getenv("CEPHALON_LLAMA_VERBOSE", "0") != "0",
-            )
-        app_state.active_model_name = model_filename
-        app_state.active_context_tokens = context_tokens
-        app_state.active_model_context_tokens = model_context_tokens
-        print(f"Model '{model_filename}' loaded successfully.")
+        for context_tokens in _context_attempts(requested_context_tokens, rag_settings.context_tokens):
+            try:
+                with _quiet_llama_stderr():
+                    app_state.llm = Llama(
+                        model_path=model_path,
+                        n_gpu_layers=-1,
+                        n_ctx=context_tokens,
+                        main_gpu=int(os.getenv("CEPHALON_MAIN_GPU", "0")),
+                        offload_kqv=True,
+                        verbose=os.getenv("CEPHALON_LLAMA_VERBOSE", "0") != "0",
+                    )
+                app_state.active_model_name = model_filename
+                app_state.active_context_tokens = context_tokens
+                app_state.active_model_context_tokens = model_context_tokens
+                print(f"Model '{model_filename}' loaded successfully at {context_tokens} context tokens.")
+                return
+            except Exception as e:
+                errors.append(f"{context_tokens}: {e}")
+                app_state.llm = None
+                gc.collect()
     except Exception as e:
         app_state.llm = None
         app_state.active_model_name = None
         app_state.active_context_tokens = None
         app_state.active_model_context_tokens = None
         raise HTTPException(status_code=500, detail=f"Failed to load model: {e}") from e
+    app_state.llm = None
+    app_state.active_model_name = None
+    app_state.active_context_tokens = None
+    app_state.active_model_context_tokens = None
+    raise HTTPException(status_code=500, detail=f"Failed to load model at all context sizes: {'; '.join(errors)}")

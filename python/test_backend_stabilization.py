@@ -188,6 +188,34 @@ def test_quiet_llama_stderr_preserves_loader_exceptions():
             raise RuntimeError("load failed")
 
 
+def test_load_llm_retries_configured_context_when_full_context_fails(monkeypatch, tmp_path):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
+    settings = Settings()
+    settings.model_dir = str(model_dir)
+    state = build_memory_state()
+    state.settings = settings
+    state.llm = None
+    storage.save_rag_settings(state.sqlite, RagSettings(context_tokens=32768, full_context=True))
+    attempts = []
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            attempts.append(kwargs["n_ctx"])
+            if kwargs["n_ctx"] == 131072:
+                raise RuntimeError("Failed to create llama_context")
+
+    monkeypatch.setattr(models, "_model_context_length", lambda _path: 131072)
+    monkeypatch.setattr(models, "Llama", FakeLlama)
+
+    models.load_llm(state, "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf")
+
+    assert attempts == [131072, 32768]
+    assert state.active_model_name == "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
+    assert state.active_context_tokens == 32768
+
+
 def test_conversation_persistence_roundtrip():
     state = build_memory_state()
     conversation = storage.create_conversation(state.sqlite, "Stress supplements")

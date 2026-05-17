@@ -92,8 +92,6 @@ fn spawn_dev_backend() -> Option<Child> {
         repo_root.join(".venv").join("bin").join("python")
     };
     let python = if python.exists() { python } else { PathBuf::from("python") };
-    let sidecar_internal = repo_root.join("src-tauri").join("backend").join("engine").join("_internal");
-
     let mut command = Command::new(python);
     command
         .arg(repo_root.join("python").join("main.py"))
@@ -104,7 +102,7 @@ fn spawn_dev_backend() -> Option<Child> {
     apply_backend_env(
         &mut command,
         Some(&repo_root),
-        sidecar_internal.exists().then_some(sidecar_internal.as_path()),
+        None,
     );
 
     match command.spawn() {
