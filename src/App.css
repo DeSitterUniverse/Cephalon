@@ -78,11 +78,19 @@ select, option { background: #050505; color: var(--text); }
   color: var(--muted);
   user-select: none;
 }
+.titlebar-drag-area {
+  min-width: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+}
 .window-title {
   padding-left: 10px;
   font-size: 0.78rem;
 }
 .window-controls {
+  flex: 0 0 auto;
   display: flex;
   height: 100%;
 }
@@ -123,15 +131,21 @@ select, option { background: #050505; color: var(--text); }
 }
 .topbar {
   min-height: 56px;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--line);
   background: #030303;
   z-index: 3;
 }
-.brand-block { display: flex; align-items: center; gap: 8px; }
+.brand-block {
+  min-width: 118px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .brand-block img { width: 26px; height: 26px; }
 .brand-block > div { display: grid; gap: 2px; }
 .brand { font-weight: 750; letter-spacing: 0.02em; line-height: 1.05; }
@@ -141,12 +155,20 @@ select, option { background: #050505; color: var(--text); }
   align-items: center;
   gap: 8px;
 }
+.topbar-actions {
+  min-width: 0;
+  justify-content: flex-end;
+}
+.topbar-actions > * {
+  flex: 0 0 auto;
+}
 .compact-actions { padding: 0; gap: 5px; }
 
 .model-picker {
   position: relative;
-  min-width: 430px;
-  max-width: min(40vw, 520px);
+  flex: 1 1 320px;
+  min-width: 220px;
+  max-width: min(36vw, 460px);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
@@ -246,8 +268,8 @@ select, option { background: #050505; color: var(--text); }
 .icon-button {
   display: inline-grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 29px;
+  height: 29px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel-2);
@@ -255,6 +277,42 @@ select, option { background: #050505; color: var(--text); }
 }
 .icon-button:hover, .icon-button.active { border-color: var(--line-strong); color: var(--text); background: #111; }
 .icon-button:active { background: #181008; }
+.panel-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+.panel-menu-list {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  z-index: 20;
+  width: 178px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #050505;
+  box-shadow: 0 8px 18px rgba(0,0,0,0.35);
+  padding: 4px;
+}
+.panel-menu-list button {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 0.75rem;
+  text-align: left;
+}
+.panel-menu-list button:hover,
+.panel-menu-list button.active {
+  background: #111;
+  color: var(--text);
+}
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -795,10 +853,20 @@ select, option { background: #050505; color: var(--text); }
 }
 
 @media (max-width: 1300px) {
-  .brand-block .subtle { display: none; }
+  .brand-block {
+    min-width: 34px;
+  }
+  .brand-block > div { display: none; }
   .model-picker {
-    min-width: 270px;
-    max-width: 34vw;
+    min-width: 210px;
+    max-width: 32vw;
   }
   .model-meta { display: none; }
+  .topbar {
+    gap: 8px;
+    padding-inline: 8px;
+  }
+  .topbar-actions {
+    gap: 6px;
+  }
 }
