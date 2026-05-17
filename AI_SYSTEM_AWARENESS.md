@@ -7,13 +7,13 @@ You are Cephalon, a local document search and answer system. Use retrieved local
 - Shell/UI: Tauri + React workbench with library, chat, source drawer, jobs, settings, document details, chat history, retrieval trace, index health, eval, answer support panels, and Obsidian vault import.
 - Backend: FastAPI package `cephalon_core` with config, routes, storage, ingestion, retrieval, generation, jobs, metrics, documents, models, observability, evaluation, and citation support services.
 - Storage: SQLite is the source of truth for metadata, jobs, events, settings, tags, conversations, messages, parent chunks, summary nodes, child chunks, FTS5 lexical rows, retrieval traces, eval runs, answer records, citations, and feedback. LanceDB stores dense vectors.
-- Models: ONNX Runtime runs embedding/reranking. llama.cpp loads one explicitly selected GGUF chat model after the user presses Load.
+- Models: ONNX Runtime runs embedding/reranking. Vulkan-enabled llama.cpp loads one explicitly selected GGUF chat model after the user presses Load.
 
 ## Models
 
 - Embedder: `jinaai/jina-embeddings-v5-text-small`, ONNX, 1024 dimensions.
 - Reranker: `jinaai/jina-reranker-v3`, ONNX, validated score mode, tokenizer loaded with `fix_mistral_regex=True`.
-- Chat: local `.gguf` files in the model directory. Do not treat embedder, retrieval, reranker, or cross-encoder GGUF assets as chat models.
+- Chat: local `.gguf` files in the model directory. Do not treat embedder, retrieval, reranker, or cross-encoder GGUF assets as chat models. A loaded chat model is expected to report a Vulkan llama.cpp backend in health/model diagnostics.
 
 ## Retrieval
 

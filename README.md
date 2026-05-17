@@ -1,14 +1,14 @@
 # Cephalon
 
-Cephalon is a local-first desktop RAG workbench for indexing files, asking cited questions over them, and running local GGUF chat models through llama.cpp. The app is built for offline use: metadata stays in SQLite, dense vectors stay in LanceDB, embedding/reranking runs through ONNX Runtime, and generation runs through an explicitly loaded local model.
+Cephalon is a local-first desktop RAG workbench for indexing files, asking cited questions over them, and running local GGUF chat models through Vulkan-enabled llama.cpp. The app is built for offline use: metadata stays in SQLite, dense vectors stay in LanceDB, embedding/reranking runs through ONNX Runtime, and generation runs through an explicitly loaded local model.
 
 ## Features
 
-- Tauri desktop app with a dense dark React workbench.
+- Tauri desktop app with a dense dark React workbench and custom draggable titlebar controls.
 - Document library with import, text-safe unknown file ingestion, reindexing, tags, delete, and document details.
 - Durable ingestion jobs with live SSE progress.
 - Explicit GGUF model picker and **Load** action before querying.
-- llama.cpp backend diagnostics and explicit local model loading.
+- Vulkan-enabled llama.cpp backend diagnostics and explicit local model loading.
 - Hybrid retrieval without Tantivy: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
 - Jina ONNX embedder and reranker with strict validation and no silent model fallback.
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
@@ -92,6 +92,14 @@ npm run dev
 ```
 
 In the app, select a chat GGUF model and press **Load** before running a query.
+
+The development runtime expects the workspace `.venv` `llama-cpp-python` package to include `ggml-vulkan.dll`. Rebuild it when needed:
+
+```powershell
+$env:CMAKE_ARGS="-DGGML_VULKAN=on"
+$env:FORCE_CMAKE="1"
+.\.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python==0.3.23
+```
 
 ## Build
 
