@@ -1,8 +1,7 @@
-import type { ReactNode } from "react";
-import type { PointerEvent } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { BarChart3, Circle, FileText, ListChecks, Maximize2, MessageSquareText, Minus, MoreHorizontal, SearchCode, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
 
@@ -28,20 +27,23 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
     setRightPanel(panel);
     setPanelMenuOpen(false);
   };
-  const stopWindowDrag = (event: PointerEvent<HTMLButtonElement>) => {
+  const stopWindowDrag = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
+  };
+  const windowCommand = (command: "minimize_window" | "toggle_maximize_window" | "close_window") => {
+    invoke(command).catch(error => console.error(`Window command failed: ${command}`, error));
   };
 
   return (
     <div className="app-frame">
       <div className="app-titlebar">
-        <div className="titlebar-drag-area" data-tauri-drag-region>
+        <div className="titlebar-drag-area" data-tauri-drag-region onDoubleClick={() => windowCommand("toggle_maximize_window")}>
           <div className="window-title" data-tauri-drag-region>Cephalon</div>
         </div>
         <div className="window-controls">
-          <button type="button" onPointerDown={stopWindowDrag} onClick={() => getCurrentWindow().minimize()} title="Minimize"><Minus size={14} /></button>
-          <button type="button" onPointerDown={stopWindowDrag} onClick={() => getCurrentWindow().toggleMaximize()} title="Maximize"><Maximize2 size={13} /></button>
-          <button type="button" onPointerDown={stopWindowDrag} onClick={() => getCurrentWindow().close()} title="Close"><X size={15} /></button>
+          <button type="button" onMouseDown={stopWindowDrag} onClick={() => windowCommand("minimize_window")} title="Minimize"><Minus size={14} /></button>
+          <button type="button" onMouseDown={stopWindowDrag} onClick={() => windowCommand("toggle_maximize_window")} title="Maximize"><Maximize2 size={13} /></button>
+          <button type="button" onMouseDown={stopWindowDrag} onClick={() => windowCommand("close_window")} title="Close"><X size={15} /></button>
         </div>
       </div>
       <div className="workbench">

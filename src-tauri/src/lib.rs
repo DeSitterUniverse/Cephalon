@@ -24,6 +24,28 @@ fn check_backend() -> bool {
     backend_is_listening()
 }
 
+#[tauri::command]
+fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    window.minimize().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn toggle_maximize_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    if window.is_maximized().map_err(|error| error.to_string())? {
+        window.unmaximize().map_err(|error| error.to_string())
+    } else {
+        window.maximize().map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn close_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    window.close().map_err(|error| error.to_string())
+}
+
 fn home_dir() -> PathBuf {
     env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
@@ -64,6 +86,20 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
     command.env("CEPHALON_PORT", env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()));
     command.env("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,https://tauri.localhost");
     command.env("CEPHALON_LLAMA_VERBOSE", "0");
+
+    if let Some(root) = repo_root {
+        let venv_llama_lib = if cfg!(target_os = "windows") {
+            root.join(".venv").join("Lib").join("site-packages").join("llama_cpp").join("lib")
+        } else {
+            root.join(".venv").join("lib").join("python").join("site-packages").join("llama_cpp").join("lib")
+        };
+        if venv_llama_lib.exists() {
+            command.env("CEPHALON_LLAMA_DLL_DIR", &venv_llama_lib);
+            command.env("LLAMA_CPP_LIB_PATH", &venv_llama_lib);
+            let path = prepend_path(env::var("PATH").ok(), &[venv_llama_lib]);
+            command.env("PATH", path);
+        }
+    }
 
     if let Some(internal) = sidecar_internal {
         let dll_dir = internal.join("llama_cpp").join("lib");
@@ -171,7 +207,12 @@ pub fn run() {
                 };
             }
         })
-        .invoke_handler(tauri::generate_handler![check_backend])
+        .invoke_handler(tauri::generate_handler![
+            check_backend,
+            minimize_window,
+            toggle_maximize_window,
+            close_window,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

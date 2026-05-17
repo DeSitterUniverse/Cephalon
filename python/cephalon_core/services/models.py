@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 
 def _configure_llama_dll_search() -> None:
-    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR")
+    dll_dir = os.getenv("CEPHALON_LLAMA_DLL_DIR") or os.getenv("LLAMA_CPP_LIB_PATH")
     if dll_dir and os.path.isdir(dll_dir):
         os.environ.setdefault("LLAMA_CPP_LIB_PATH", dll_dir)
         if hasattr(os, "add_dll_directory"):
@@ -53,7 +53,8 @@ def llama_backend_info() -> dict:
 
     seen = set()
     lib_dirs = [path for path in lib_dirs if not (str(path) in seen or seen.add(str(path)))]
-    backend_lib = next((candidate for path in lib_dirs for candidate in path.glob("ggml*.dll")), None)
+    vulkan_lib = next((path / "ggml-vulkan.dll" for path in lib_dirs if (path / "ggml-vulkan.dll").exists()), None)
+    backend_lib = vulkan_lib or next((candidate for path in lib_dirs for candidate in path.glob("ggml*.dll")), None)
     backend_available = backend_lib is not None or loaded_base_path is not None
     return {
         "package": str(package_dir),
@@ -62,10 +63,10 @@ def llama_backend_info() -> dict:
         "override_lib_path": os.getenv("LLAMA_CPP_LIB_PATH"),
         "dll_search_paths": [str(path) for path in lib_dirs],
         "gpu_backend_available": backend_available,
-        "backend_label": "llama.cpp backend" if backend_available else "CPU backend",
-        "vulkan_required": False,
-        "vulkan_available": False,
-        "vulkan_dll": None,
+        "backend_label": "Vulkan llama.cpp" if vulkan_lib else "CPU llama.cpp" if backend_available else "llama.cpp unavailable",
+        "vulkan_required": True,
+        "vulkan_available": vulkan_lib is not None,
+        "vulkan_dll": str(vulkan_lib) if vulkan_lib else None,
         "backend_library": str(backend_lib) if backend_lib else str(loaded_base_path) if loaded_base_path else None,
     }
 
