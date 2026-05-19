@@ -18,6 +18,7 @@ RUNTIME_IMPORTS = [
     "pypdf",
     "onnxruntime",
     "transformers",
+    "huggingface_hub",
     "numpy",
     "llama_cpp",
 ]
@@ -80,6 +81,7 @@ def gguf_assets(model_root: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the Cephalon local Python runtime.")
     parser.add_argument("--model-dir", default=os.getenv("CEPHALON_MODEL_DIR", str(Path.home() / "cephalon-data" / "models")))
+    parser.add_argument("--skip-onnx", action="store_true", help="Skip embedder/reranker asset checks for app-only release packaging.")
     args = parser.parse_args()
     model_root = Path(args.model_dir).expanduser().resolve()
 
@@ -93,13 +95,13 @@ def main() -> int:
         },
         "imports": imports,
         "llama_cpp": llama_info(),
-        "onnx_assets": onnx_assets(model_root),
+        "onnx_assets": {"skipped": True} if args.skip_onnx else onnx_assets(model_root),
         "gguf_assets": gguf_assets(model_root),
     }
     print(json.dumps(report, indent=2))
 
     failed_imports = [item["name"] for item in imports if not item["ok"]]
-    failed_onnx = [name for name, item in report["onnx_assets"].items() if not item["ok"]]
+    failed_onnx = [] if args.skip_onnx else [name for name, item in report["onnx_assets"].items() if not item["ok"]]
     failures = []
     if failed_imports:
         failures.append(f"missing imports: {', '.join(failed_imports)}")

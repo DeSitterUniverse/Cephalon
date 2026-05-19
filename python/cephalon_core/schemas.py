@@ -103,6 +103,17 @@ class LoadModelRequest(BaseModel):
     model: str
 
 
+class OnnxInstallLocalRequest(BaseModel):
+    kind: str
+    path: str
+
+
+class OnnxDownloadRequest(BaseModel):
+    kind: str = "all"
+    repo_id: str | None = None
+    subfolder: str | None = None
+
+
 class DocumentUpdateRequest(BaseModel):
     display_name: str | None = None
 

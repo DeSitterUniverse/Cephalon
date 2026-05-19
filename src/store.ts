@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { AnswerSupport, SourceChunk } from "./api";
 
 type UiState = {
+  theme: "black" | "graphite";
   selectedModel: string;
   selectedDocumentId: string | null;
   selectedConversationId: string | null;
@@ -16,9 +17,21 @@ type UiState = {
   setSelectedSupport: (support: AnswerSupport | null) => void;
   setRightPanel: (panel: UiState["rightPanel"]) => void;
   setEventStatus: (status: UiState["eventStatus"]) => void;
+  setTheme: (theme: UiState["theme"]) => void;
 };
 
+function storedTheme(): UiState["theme"] {
+  try {
+    return typeof window !== "undefined" && typeof window.localStorage?.getItem === "function" && window.localStorage.getItem("cephalon.theme") === "graphite"
+      ? "graphite"
+      : "black";
+  } catch {
+    return "black";
+  }
+}
+
 export const useUiStore = create<UiState>((set) => ({
+  theme: storedTheme(),
   selectedModel: "",
   selectedDocumentId: null,
   selectedConversationId: null,
@@ -33,4 +46,10 @@ export const useUiStore = create<UiState>((set) => ({
   setSelectedSupport: (selectedSupport) => set({ selectedSupport, rightPanel: selectedSupport ? "support" : "jobs" }),
   setRightPanel: (rightPanel) => set({ rightPanel }),
   setEventStatus: (eventStatus) => set({ eventStatus }),
+  setTheme: (theme) => {
+    try {
+      if (typeof window.localStorage?.setItem === "function") window.localStorage.setItem("cephalon.theme", theme);
+    } catch {}
+    set({ theme });
+  },
 }));

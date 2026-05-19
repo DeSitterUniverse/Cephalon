@@ -12,6 +12,8 @@ ACTIVE_VECTOR_TABLE = "vectors_jina_v5_small_1024"
 EMBEDDING_MODEL_ID = "jinaai/jina-embeddings-v5-text-small"
 RERANKER_MODEL_ID = "jinaai/jina-reranker-v3"
 EMBEDDING_DIMENSION = 1024
+DEFAULT_EMBEDDER_ONNX_REPO = "s-lorin/jina-embeddings-v5-small-onnx"
+DEFAULT_RERANKER_ONNX_REPO = "s-lorin/jina-reranker-v3-onnx"
 
 DOCUMENT_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -39,6 +41,10 @@ class Settings:
     def __init__(self) -> None:
         self.data_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_DATA_DIR", "~/cephalon-data")))
         self.model_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_MODEL_DIR", os.path.join(self.data_dir, "models"))))
+        self.embedder_onnx_repo = os.getenv("CEPHALON_EMBEDDER_ONNX_REPO", DEFAULT_EMBEDDER_ONNX_REPO)
+        self.reranker_onnx_repo = os.getenv("CEPHALON_RERANKER_ONNX_REPO", DEFAULT_RERANKER_ONNX_REPO)
+        self.embedder_onnx_subfolder = os.getenv("CEPHALON_EMBEDDER_ONNX_SUBFOLDER", "")
+        self.reranker_onnx_subfolder = os.getenv("CEPHALON_RERANKER_ONNX_SUBFOLDER", "")
         self.obsidian_vault_dir = os.path.abspath(os.path.expanduser(
             os.getenv("CEPHALON_OBSIDIAN_VAULT_DIR", "~/Documents/Obsidian Vault")
         ))

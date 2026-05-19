@@ -12,18 +12,20 @@ def build():
         "transformers",
         "numpy",
         "llama_cpp",
+        "huggingface_hub",
         "uvicorn",
         "docx",
         "openpyxl",
         "pypdf"
     ]
-    
-    onnx_cross = os.path.expanduser("~/cephalon-data/models/reranker")
-    onnx_embed = os.path.expanduser("~/cephalon-data/models/embedder")
-    
-    if not os.path.exists(onnx_cross) or not os.path.exists(onnx_embed):
-        print("ERROR: ONNX models not found. Run 'python export_onnx.py' first.")
-        sys.exit(1)
+    excluded_modules = [
+        "torch",
+        "tensorflow",
+        "jax",
+        "flax",
+        "optimum",
+        "accelerate",
+    ]
     
     cmd = [
         sys.executable,
@@ -34,13 +36,13 @@ def build():
         "--collect-all=llama_cpp",
         "--add-data", "AI_SYSTEM_AWARENESS.md;.",
         "--add-data", "CEPHALON_ARCHITECTURE_DEEP_DIVE.html;.",
-        "--add-data", f"{onnx_cross};onnx_models/reranker",
-        "--add-data", f"{onnx_embed};onnx_models/embedder",
         "python/main.py"
     ]
     
     for imp in hidden_imports:
         cmd.extend(["--hidden-import", imp])
+    for module in excluded_modules:
+        cmd.extend(["--exclude-module", module])
         
     subprocess.run(cmd, check=True)
     

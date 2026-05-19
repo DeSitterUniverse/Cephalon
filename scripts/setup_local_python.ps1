@@ -39,4 +39,4 @@ if ($WithExportTools) {
   Invoke-LocalPython -m pip install --upgrade -r requirements-export.txt
 }
 
-Invoke-LocalPython scripts\preflight_runtime.py
+Invoke-LocalPython scripts\preflight_runtime.py --skip-onnx

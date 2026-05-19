@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 
 def validate_embedder(model_dir: Path) -> dict:
-    meta_path = model_dir / "cephalon_onnx_meta.json"
+    meta_path = find_meta_path(model_dir)
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     tokenizer = AutoTokenizer.from_pretrained(model_dir, fix_mistral_regex=True)
     session = ort.InferenceSession(str(model_dir / "model.onnx"))
@@ -75,7 +75,7 @@ def reranker_scores(raw_scores: np.ndarray) -> tuple[list[float], str]:
 
 
 def mark_validated(model_dir: Path, key: str, valid: bool, extra: dict | None = None) -> None:
-    meta_path = model_dir / "cephalon_onnx_meta.json"
+    meta_path = find_meta_path(model_dir)
     meta = {}
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -86,10 +86,20 @@ def mark_validated(model_dir: Path, key: str, valid: bool, extra: dict | None = 
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
+def find_meta_path(model_dir: Path) -> Path:
+    generic = model_dir / "onnx_profile.json"
+    if generic.exists():
+        return generic
+    legacy = model_dir / "cephalon_onnx_meta.json"
+    if legacy.exists():
+        return legacy
+    return generic
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate exported Cephalon ONNX models.")
+    parser = argparse.ArgumentParser(description="Validate exported ONNX embedder/reranker models.")
     parser.add_argument("--model-dir", default=str(Path.home() / "cephalon-data" / "models"))
-    parser.add_argument("--mark", action="store_true", help="Write validation result into cephalon_onnx_meta.json files.")
+    parser.add_argument("--mark", action="store_true", help="Write validation result into onnx_profile.json files.")
     args = parser.parse_args()
     root = Path(args.model_dir).expanduser().resolve()
     results = {

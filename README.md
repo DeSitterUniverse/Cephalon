@@ -4,13 +4,13 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking quest
 
 ## Features
 
-- Lightweight OLED friendly Tauriv2 desktop app with #000000 background and #FFE5CC Text!
+- Lightweight OLED friendly Tauri v2 desktop app with a default #000000 background and #FFE5CC text. Optional Graphite theme uses a #171717 dark background with #FFFFFF text.
 - Document library with import, text-safe unknown file ingestion, reindexing, tags, delete, and document details.
 - Durable ingestion jobs with live SSE progress.
 - Explicit GGUF model picker and **Load** action before querying.
 - Vulkan-enabled llama.cpp backend diagnostics and explicit local model loading.
 - Hybrid retrieval: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
-- Jina ONNX embedder and reranker.
+- Jina ONNX embedder and reranker setup from Settings.
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
@@ -54,6 +54,26 @@ Expected model layout:
 
 Only chat-capable `.gguf` files appear in the model picker. GGUF files whose names indicate embedding, retrieval, reranking, or cross-encoder use are reported as auxiliary assets and are hidden from chat selection.
 
+Packaged installers do not bundle the embedder/reranker ONNX artifacts. If they are missing, Cephalon opens Settings and shows the configured download sources. Install the configured ONNX engines or browse to local exported folders. A valid embedder/reranker folder contains `model.onnx`, `tokenizer.json`, `tokenizer_config.json`, `onnx_profile.json`, and any external ONNX data files referenced by the model. Older exported folders are still accepted automatically.
+
+Current prepared ONNX repos:
+
+- Embedder: [s-lorin/jina-embeddings-v5-small-onnx](https://huggingface.co/s-lorin/jina-embeddings-v5-small-onnx)
+- Reranker: [s-lorin/jina-reranker-v3-onnx](https://huggingface.co/s-lorin/jina-reranker-v3-onnx)
+
+Use different prepared repos with:
+
+```powershell
+$env:CEPHALON_EMBEDDER_ONNX_REPO="s-lorin/jina-embeddings-v5-small-onnx"
+$env:CEPHALON_RERANKER_ONNX_REPO="s-lorin/jina-reranker-v3-onnx"
+```
+
+Upload the prepared local model repos with:
+
+```powershell
+.\scripts\upload_onnx_models_to_hf.ps1 -Namespace "s-lorin"
+```
+
 ## Install
 
 ```powershell
@@ -61,7 +81,7 @@ npm install
 .\scripts\setup_local_python.ps1
 ```
 
-The setup script uses `python` or `py -3` from PATH, disables user-site package leakage with `PYTHONNOUSERSITE=1`, installs the latest stable packages allowed by the requirements files, force-rebuilds `llama-cpp-python` with Vulkan enabled, and runs the runtime preflight.
+The setup script uses `python` or `py -3` from PATH, disables user-site package leakage with `PYTHONNOUSERSITE=1`, installs the packages in `requirements.txt`, force-rebuilds `llama-cpp-python` with Vulkan enabled, and runs the runtime preflight without requiring ONNX artifacts.
 
 Export ONNX models only when missing or intentionally replacing them:
 
@@ -99,7 +119,7 @@ The selected Python environment must contain a Vulkan-enabled `llama-cpp-python`
 $env:CMAKE_ARGS="-DGGML_VULKAN=on"
 $env:FORCE_CMAKE="1"
 python -m pip install --upgrade --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
-python scripts\preflight_runtime.py
+python scripts\preflight_runtime.py --skip-onnx
 ```
 
 ## Build
@@ -115,6 +135,8 @@ Backend sidecar:
 ```powershell
 python build_backend.py
 ```
+
+The sidecar build packages the backend only. It does not include embedder/reranker model folders; those are installed into the user model directory from the app Settings screen.
 
 Tauri package:
 
@@ -142,6 +164,8 @@ $env:CEPHALON_PORT="8765"
 $env:CEPHALON_LLAMA_VERBOSE="0"
 $env:CEPHALON_CONTEXT_TOKENS="32768"
 $env:CEPHALON_FULL_CONTEXT="0"
+$env:CEPHALON_EMBEDDER_ONNX_REPO="s-lorin/jina-embeddings-v5-small-onnx"
+$env:CEPHALON_RERANKER_ONNX_REPO="s-lorin/jina-reranker-v3-onnx"
 ```
 
 Future remote/offloaded backend mode:
@@ -159,6 +183,9 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `GET /health`: startup status, paths, model diagnostics, backend status, retrieval state, and embedding metadata.
 - `GET /models`: available chat GGUF models, auxiliary GGUF assets, and active model state.
 - `POST /models/load`: load the selected GGUF into llama.cpp.
+- `GET /models/onnx/status`: inspect embedder/reranker setup state.
+- `POST /models/onnx/download`: download configured prepared ONNX artifacts into the model directory.
+- `POST /models/onnx/install-local`: install a local exported ONNX folder for the embedder or reranker.
 - `GET/PUT /settings`: RAG and generation defaults.
 - `POST /ingest`: queue file/folder ingestion.
 - `GET /vaults/obsidian`: configured Obsidian vault path and existence check.

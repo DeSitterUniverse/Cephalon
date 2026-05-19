@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 import json
 from contextlib import asynccontextmanager
@@ -16,7 +15,7 @@ from .config import EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, RERANKER_MODEL_ID, 
 from .events import EventBus
 from .routes import router
 from .services.jobs import JobManager
-from .services import retrieval
+from .services import onnx_setup, retrieval
 
 
 def load_architecture_context() -> str:
@@ -39,19 +38,7 @@ def load_onnx_engines(app_state) -> str | None:
     embed_file = os.path.join(embed_path, "model.onnx")
 
     if not os.path.exists(model_file) or not os.path.exists(embed_file):
-        if getattr(sys, "frozen", False):
-            bundled_base = os.path.join(sys._MEIPASS, "onnx_models")
-            bundled_reranker = os.path.join(bundled_base, "reranker")
-            bundled_embed = os.path.join(bundled_base, "embedder")
-            if os.path.exists(bundled_reranker) and os.path.exists(bundled_embed):
-                if not os.path.exists(onnx_path):
-                    shutil.copytree(bundled_reranker, onnx_path)
-                if not os.path.exists(embed_path):
-                    shutil.copytree(bundled_embed, embed_path)
-            else:
-                return "Bundled ONNX models were not found."
-        else:
-            return "Native ONNX models were not found. Run export_onnx.py once to generate them."
+        return "Embedding and reranker models are not set up. Open Settings to download prepared ONNX models or select local ONNX folders."
 
     embed_meta = _read_model_meta(embed_path)
     reranker_meta = _read_model_meta(onnx_path)
@@ -122,7 +109,7 @@ def _warm_onnx_engines(app_state) -> dict:
 
 
 def _reranker_export_validated(model_dir: str) -> bool:
-    meta_file = os.path.join(model_dir, "cephalon_onnx_meta.json")
+    meta_file = _find_model_meta_file(model_dir)
     if not os.path.exists(meta_file):
         return False
     try:
@@ -133,7 +120,7 @@ def _reranker_export_validated(model_dir: str) -> bool:
 
 
 def _read_model_meta(model_dir: str) -> dict:
-    meta_file = os.path.join(model_dir, "cephalon_onnx_meta.json")
+    meta_file = _find_model_meta_file(model_dir)
     if not os.path.exists(meta_file):
         return {}
     try:
@@ -142,6 +129,14 @@ def _read_model_meta(model_dir: str) -> dict:
             return meta if isinstance(meta, dict) else {}
     except Exception:
         return {}
+
+
+def _find_model_meta_file(model_dir: str) -> str:
+    for filename in ("onnx_profile.json", "cephalon_onnx_meta.json"):
+        candidate = os.path.join(model_dir, filename)
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(model_dir, "onnx_profile.json")
 
 
 def _validate_embedder_meta(meta: dict) -> str | None:
@@ -179,6 +174,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.sqlite = storage.connect_sqlite(active_settings)
         app.state.lance = storage.connect_lance(active_settings)
         app.state.startup_error = load_onnx_engines(app.state)
+        app.state.onnx_setup = onnx_setup.runtime_status(app.state)
         app.state.generated_index_backup = storage.clean_generated_vector_state(active_settings, app.state.lance)
         app.state.retrieval_index = retrieval.ensure_retrieval_index(app.state)
         app.state.event_bus = EventBus(app.state.sqlite)

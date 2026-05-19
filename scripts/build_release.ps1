@@ -1,6 +1,6 @@
 param(
-  [string]$Version = "1.4.0",
-  [switch]$SkipModelExport
+  [string]$Version = "1.5.0",
+  [switch]$WithModelExport
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,12 +33,12 @@ Invoke-LocalPython -m pip install --upgrade -r requirements.txt
 $env:CMAKE_ARGS = "-DGGML_VULKAN=on"
 $env:FORCE_CMAKE = "1"
 Invoke-LocalPython -m pip install --upgrade --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
-if (-not $SkipModelExport) {
+if ($WithModelExport) {
   Invoke-LocalPython -m pip install --upgrade -r requirements-export.txt
   Invoke-LocalPython export_onnx.py
+  Invoke-LocalPython scripts\validate_onnx_models.py --mark
 }
-Invoke-LocalPython scripts\preflight_runtime.py
-Invoke-LocalPython scripts\validate_onnx_models.py --mark
+Invoke-LocalPython scripts\preflight_runtime.py --skip-onnx
 
 Invoke-LocalPython -m py_compile python\main.py python\test_ingest_query.py python\test_query_only.py
 Invoke-LocalPython -m pytest

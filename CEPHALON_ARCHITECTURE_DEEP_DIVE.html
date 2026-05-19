@@ -5,109 +5,177 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cephalon Architecture Deep Dive</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#000; color:#ededed; }
-    body { margin:0; background:#000; }
-    main { max-width:1120px; margin:0 auto; padding:32px 22px 56px; }
-    h1 { font-size:32px; margin:0 0 8px; }
-    h2 { font-size:18px; margin:28px 0 10px; border-bottom:1px solid #222; padding-bottom:8px; }
-    h3 { font-size:15px; margin:18px 0 8px; color:#fff; }
-    p, li { color:#b8b8b8; line-height:1.55; }
-    code { background:#080808; border:1px solid #202020; padding:1px 5px; border-radius:4px; color:#f0f0f0; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
-    .card { border:1px solid #202020; background:#050505; border-radius:6px; padding:12px; }
-    .flow { display:grid; gap:8px; }
-    .step { border:1px solid #1d1d1d; background:#040404; border-radius:6px; padding:10px 12px; }
-    .muted { color:#8d8d8d; }
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background:#000; color:#FFE5CC; --bg:#000; --panel:#050505; --panel2:#0a0a0a; --line:#272727; --muted:#b9a797; --text:#FFE5CC; --accent:#ff9a2e; --ok:#6ee7a8; --warn:#e9b949; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); }
+    main { max-width:1180px; margin:0 auto; padding:28px 22px 60px; }
+    h1 { font-size:31px; margin:0 0 8px; color:#fff; }
+    h2 { font-size:18px; margin:30px 0 10px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#fff; }
+    h3 { font-size:14px; margin:0 0 8px; color:#fff; }
+    p, li { color:var(--muted); line-height:1.55; }
+    code { background:#0d0d0d; border:1px solid var(--line); padding:1px 5px; border-radius:4px; color:#fff; }
     table { width:100%; border-collapse:collapse; margin-top:10px; }
-    th, td { border:1px solid #202020; padding:8px; text-align:left; vertical-align:top; }
-    th { background:#080808; color:#fff; }
+    th, td { border:1px solid var(--line); padding:8px; text-align:left; vertical-align:top; }
+    th { background:#0a0a0a; color:#fff; }
+    .muted { color:#8f8175; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; }
+    .card, .step, .note { border:1px solid var(--line); background:var(--panel); border-radius:6px; padding:12px; }
+    .note { border-color:#3a2717; background:#080503; }
+    .flow { display:grid; gap:8px; }
+    .step strong { color:#fff; }
+    .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; }
+    .diagram { border:1px solid var(--line); background:#030303; border-radius:6px; padding:12px; overflow:auto; }
+    .diagram pre { margin:0; color:#e8d0bd; font-size:12px; line-height:1.45; }
+    .badge { color:#000; background:var(--accent); padding:1px 5px; border-radius:4px; font-size:12px; font-weight:700; }
+    .ok { color:var(--ok); }
+    .warn { color:var(--warn); }
+    @media (max-width:820px) { .two { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
 <main>
   <h1>Cephalon Architecture Deep Dive</h1>
-  <p class="muted">Current architecture for the local-first desktop RAG workbench.</p>
+  <p class="muted">Current architecture for the local-first desktop RAG workbench. This document describes how the app is built now, not a release checklist.</p>
 
-  <h2>System Shape</h2>
+  <h2>System Overview</h2>
+  <div class="diagram">
+<pre>
+Tauri desktop shell
+  -> React workbench
+      -> typed API client
+      -> SSE live events
+  -> Python sidecar or dev backend
+      -> FastAPI routes
+      -> SQLite metadata / FTS5
+      -> LanceDB dense vectors
+      -> ONNX Runtime embedder + reranker
+      -> llama.cpp GGUF generation
+</pre>
+  </div>
   <div class="grid">
     <section class="card">
       <h3>Desktop Shell</h3>
-      <p><code>src-tauri</code> owns the native window, sidecar launch, file dialog permissions, packaging resources, and release-time configuration. The app uses a custom draggable titlebar with Rust-backed window commands for minimize, maximize, and close.</p>
+      <p><code>src-tauri</code> owns the native window, Tauri permissions, file dialogs, sidecar launch, and packaging. The shell keeps frontend assets and backend launch mechanics separate from model/data folders.</p>
     </section>
     <section class="card">
       <h3>Frontend</h3>
-      <p><code>src</code> is a React/Vite app. TanStack Query handles server state, Zustand stores local UI state, and the typed API client centralizes backend calls and query streaming.</p>
+      <p><code>src</code> is a React/Vite app. TanStack Query caches backend state. Zustand stores UI-only selections such as active model, panels, theme, selected sources, and event-stream status.</p>
     </section>
     <section class="card">
       <h3>Backend</h3>
-      <p><code>python/cephalon_core</code> is the FastAPI backend package. The package is split by responsibility: routes, storage, ingestion, retrieval, generation, models, jobs, documents, events, metrics, schemas, and config.</p>
+      <p><code>python/cephalon_core</code> is a FastAPI package split into routes, config, schemas, storage, ingestion, retrieval, generation, jobs, metrics, events, observability, evaluation, support, and model setup services.</p>
     </section>
   </div>
 
-  <h2>Storage Responsibilities</h2>
+  <h2>Local Data Layout</h2>
   <table>
-    <thead><tr><th>Store</th><th>Responsibilities</th></tr></thead>
+    <thead><tr><th>Path</th><th>Role</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td>SQLite</td><td>Metadata source of truth: documents, tags, jobs, job events, settings, conversations, messages, message sources, parent chunks, summary nodes, child chunks, retrieval counters, and FTS5 lexical rows.</td></tr>
-      <tr><td>SQLite FTS5</td><td>Lexical BM25 retrieval over child chunks. This replaces LanceDB Tantivy hybrid search and keeps lexical indexing transactional with metadata.</td></tr>
-      <tr><td>LanceDB</td><td>Dense vector storage for child chunks and summary nodes. LanceDB does not own metadata or lexical search decisions.</td></tr>
-    <tr><td>Documents Metrics Directory</td><td>Numeric JSONL/CSV metrics for retrieval latency, source scores, quality estimates, corpus size, chunk stats, and index health.</td></tr>
+      <tr><td><code>~/cephalon-data</code></td><td>Primary local app data</td><td>SQLite database, LanceDB directory, temporary downloads, and model directory live here by default.</td></tr>
+      <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td>Chat GGUF files plus <code>embedder</code> and <code>reranker</code> ONNX Runtime folders.</td></tr>
+      <tr><td><code>~/Documents/Cephalon Metrics</code></td><td>Analysis exports</td><td>Numeric-first JSONL/CSV files intended for spreadsheet or data-tool ingestion.</td></tr>
+      <tr><td><code>~/Documents/Obsidian Vault</code></td><td>Optional import source</td><td>The vault path is configurable and imported through the normal ingestion job path.</td></tr>
     </tbody>
   </table>
 
-  <h2>Observability Data</h2>
-  <p>Cephalon records retrieval diagnostics in SQLite so the user can debug why an answer used specific evidence. The trace tables store the query, subqueries, stage candidates, final context, unused candidates, score fields, no-answer diagnostics, and latency. Answer records store confidence and citation support separately from chat messages.</p>
+  <h2>Storage Responsibilities</h2>
+  <div class="two">
+    <section class="card">
+      <h3>SQLite</h3>
+      <p>SQLite is the source of truth for metadata and observability: documents, tags, jobs, job events, settings, conversations, messages, message sources, parent chunks, summary nodes, child chunks, retrieval traces, eval runs, answer records, citations, feedback, and FTS5 rows.</p>
+    </section>
+    <section class="card">
+      <h3>LanceDB</h3>
+      <p>LanceDB stores dense vectors only. It does not own document metadata, lexical search, or hybrid fusion. This keeps vector storage simple and avoids depending on LanceDB's Tantivy-backed hybrid path.</p>
+    </section>
+  </div>
+
+  <h2>Model Runtime</h2>
   <table>
-    <thead><tr><th>Area</th><th>Tables</th><th>Purpose</th></tr></thead>
+    <thead><tr><th>Model</th><th>Runtime</th><th>Loaded From</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>Retrieval trace</td><td><code>retrieval_queries</code>, <code>retrieval_candidates</code>, <code>retrieval_context</code>, <code>retrieval_latency</code></td><td>Inspect vector, BM25, fused, reranked, unused, and selected context stages for each query.</td></tr>
-      <tr><td>Answer trust</td><td><code>answer_records</code>, <code>answer_citations</code>, <code>user_feedback</code></td><td>Track answer confidence, citation support labels, and user feedback for later eval generation.</td></tr>
-      <tr><td>Evaluation</td><td><code>eval_runs</code>, <code>eval_results</code></td><td>Store deterministic retrieval metrics such as Recall@k and MRR for small local eval sets.</td></tr>
+      <tr><td>Embedder</td><td>ONNX Runtime</td><td><code>models/embedder</code></td><td>Generates 1024-dimensional vectors for documents and queries.</td></tr>
+      <tr><td>Reranker</td><td>ONNX Runtime</td><td><code>models/reranker</code></td><td>Scores fused candidates with cross-encoder style relevance.</td></tr>
+      <tr><td>Chat LLM</td><td>llama.cpp</td><td>Selected <code>.gguf</code> file</td><td>Generates responses after the user explicitly loads a model.</td></tr>
     </tbody>
   </table>
+  <p>The installer packages the app and backend runtime. Embedder/reranker artifacts are installed into the user model directory from Settings by using configured prepared ONNX repos or selecting exported local folders. A valid ONNX engine folder contains <code>model.onnx</code>, tokenizer files, <code>onnx_profile.json</code>, and any external ONNX data files referenced by the model.</p>
 
   <h2>Ingestion Pipeline</h2>
   <div class="flow">
-    <div class="step"><strong>1. Resolve input.</strong> A queued job receives a file, folder, or configured Obsidian vault path. Supported file types use native extraction. Unknown text-like files are imported as text after binary guards. Obsidian imports skip <code>.obsidian</code> and other internal folders.</div>
-    <div class="step"><strong>2. Register document.</strong> SQLite records path, content hash, extraction mode, indexing state, display name, size, timestamps, and embedding metadata.</div>
-    <div class="step"><strong>3. Build hierarchy.</strong> Text is split into semantic units, grouped into parent chunks, summarized into summary nodes, and broken into smaller child chunks for precise retrieval.</div>
-    <div class="step"><strong>4. Index.</strong> Child chunks go to SQLite, SQLite FTS5, and LanceDB. Summary nodes go to SQLite and LanceDB. Reindexing clears generated rows and vectors for the document before writing fresh state.</div>
+    <div class="step"><strong>1. Queue.</strong> Files, folders, and the configured Obsidian vault enter the durable job queue. The UI receives job/document updates through SSE.</div>
+    <div class="step"><strong>2. Extract.</strong> Known formats use format-specific parsers. Unknown text-like files are imported with encoding sniffing and binary guards. Extraction warnings and failures are stored instead of disappearing.</div>
+    <div class="step"><strong>3. Fingerprint.</strong> Documents and chunks receive content hashes, parser version, chunking profile, embedding model id, embedding dimension, and timestamps for stale detection.</div>
+    <div class="step"><strong>4. Chunk.</strong> The backend creates parent chunks for generation context, smaller child chunks for precise retrieval, and summary nodes for high-level steering.</div>
+    <div class="step"><strong>5. Index.</strong> Child chunks are written to SQLite, SQLite FTS5, and LanceDB. Reindex/delete operations clean SQLite rows and LanceDB vectors for the affected document.</div>
   </div>
 
   <h2>Retrieval Pipeline</h2>
-  <div class="flow">
-    <div class="step"><strong>1. Query planning.</strong> Compound prompts are split into bounded subqueries. Exact numeric max/min/sort questions can use a deterministic indexed-row scan before generation.</div>
-    <div class="step"><strong>2. Summary steering.</strong> Summary vectors identify likely parent regions and provide a parent-level boost.</div>
-    <div class="step"><strong>3. Hybrid search.</strong> Dense child search runs in LanceDB. Lexical BM25 search runs in SQLite FTS5. Results are merged with reciprocal rank fusion.</div>
-    <div class="step"><strong>4. Reranking.</strong> Jina reranker ONNX scores fused candidates. Retrieval priors keep strong lexical matches from being displaced by unrelated dense matches.</div>
-    <div class="step"><strong>5. Context reconstruction.</strong> Child hits point back to parent chunks. The prompt receives compressed parent context with stable source tags such as <code>[[src:S1]]</code>.</div>
-    <div class="step"><strong>6. Streaming.</strong> The backend streams typed SSE events for subqueries, conversation ids, source metadata, answer metadata, tokens, saved message ids, errors, and completion.</div>
-    <div class="step"><strong>7. Trace persistence.</strong> Candidate lists, scores, ranks, no-answer diagnostics, latency, and final context are written to SQLite when trace persistence is enabled.</div>
+  <div class="diagram">
+<pre>
+question
+  -> normalize and optionally split into subqueries
+  -> embed query
+  -> summary steering
+  -> dense child search in LanceDB
+  -> lexical BM25 search in SQLite FTS5
+  -> reciprocal rank fusion
+  -> Jina reranker
+  -> parent context reconstruction
+  -> context compression
+  -> typed source/meta/token stream
+  -> retrieval trace persistence
+</pre>
+  </div>
+  <p>Hybrid retrieval is explicit: vector and lexical searches run independently, then merge by reciprocal rank fusion. This makes every score visible and keeps BM25 behavior local, transactional, and testable.</p>
+
+  <h2>Streaming And Live Updates</h2>
+  <table>
+    <thead><tr><th>Stream</th><th>Events</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td><code>/events</code></td><td><code>ready</code>, <code>heartbeat</code>, <code>job</code>, <code>document</code>, <code>settings</code></td><td>Keeps library/jobs/settings fresh. The frontend reconnects automatically and only uses polling as a temporary fallback.</td></tr>
+      <tr><td><code>/query</code></td><td><code>subquery</code>, <code>conversation</code>, <code>source</code>, <code>answer_meta</code>, <code>token</code>, <code>message</code>, <code>error</code>, <code>done</code></td><td>Streams source and metadata before generation tokens so the UI can show evidence while the model is still producing text.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Observability</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Retrieval Trace</h3>
+      <p>Each saved trace records raw query, normalized query, subqueries, vector candidates, BM25 candidates, fused candidates, reranked candidates, final context, unused candidates, score fields, latency, and no-answer gate values.</p>
+    </section>
+    <section class="card">
+      <h3>Index Health</h3>
+      <p>Index health summarizes document/chunk counts, embedded chunks, stale state, failed ingestions, parse warnings, duplicate chunks, chunk length stats, never-retrieved documents, retrieval counts, index size, embedding distribution, and chunking profiles.</p>
+    </section>
+    <section class="card">
+      <h3>Answer Support</h3>
+      <p>Answer records and citations are stored separately from chat messages. Support labels are deterministic: supported, weak, or unsupported based on final context presence and retrieval/rerank scores.</p>
+    </section>
   </div>
 
-  <h2>Index Health</h2>
-  <p>The index health API summarizes document count, chunk count, embedded chunks, stale documents, failed ingestions, parse warnings, duplicate chunk rate, chunk length distribution, never-retrieved documents, retrieval counts, index size, embedding model distribution, and chunking profile distribution. These values are computed from SQLite and the LanceDB data directory; they do not require cloud services or a separate analytics database.</p>
+  <h2>Frontend Panels</h2>
+  <table>
+    <thead><tr><th>Panel</th><th>Data Source</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Library</td><td><code>/documents</code></td><td>Search, filter, import, reindex, delete, and select documents.</td></tr>
+      <tr><td>Chat</td><td><code>/query</code>, conversations APIs</td><td>Ask questions, stream answers, save chat history, and attach per-message sources.</td></tr>
+      <tr><td>Sources</td><td>query stream/message sources</td><td>Inspect source scores, snippets, ranks, and document references.</td></tr>
+      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, GGUF selection, ONNX engine setup, generation/retrieval controls, metrics export.</td></tr>
+      <tr><td>Diagnostics</td><td>trace, health, eval, support APIs</td><td>Debug retrieval quality and index state without leaving the app.</td></tr>
+    </tbody>
+  </table>
 
-  <h2>Evaluation</h2>
-  <p>The eval harness accepts small JSON eval sets and records deterministic retrieval metrics. The first metrics are Recall@k, MRR, expected document hit rate, and expected chunk hit rate. This keeps quality checks cheap enough to run locally after changing chunking or retrieval settings.</p>
-
-  <h2>Model Runtime</h2>
-  <p>Embedding and reranking use ONNX Runtime to avoid a PyTorch runtime requirement in the normal app path. The embedder is <code>jinaai/jina-embeddings-v5-text-small</code> and the reranker is <code>jinaai/jina-reranker-v3</code>. Vulkan-enabled llama.cpp loads the selected GGUF chat model only after the user presses <strong>Load</strong>. In development, Tauri starts the backend with the Python executable available on PATH, disables user-site package leakage, and resolves the llama.cpp library directory from that interpreter; packaged builds use the bundled sidecar library directory. The backend reports the Python executable, llama.cpp library paths, Vulkan availability, active context size, and model metadata through health/model APIs.</p>
-
-  <h2>Chat History And Memory</h2>
-  <p>Chats are stored in SQLite as conversations, messages, and per-message source metadata. This gives the app durable history and allows later retrieval over summarized conversation memory. This is retrieval memory, not training: model weights do not change.</p>
-
-  <h2>Frontend Data Flow</h2>
-  <p>The frontend uses TanStack Query for health, models, documents, jobs, settings, conversations, and document details. Zustand stores selected model, selected document, selected conversation, selected sources, right panel, and live event state. Query streaming is consumed as typed events so sources can arrive before generation tokens.</p>
+  <h2>Build And Packaging</h2>
+  <p>The development path uses the Python executable on PATH. The release path builds the frontend, checks Rust, builds a PyInstaller sidecar, and packages Tauri. The sidecar includes backend code and runtime libraries but intentionally excludes ONNX model artifacts. This keeps the installer smaller and lets model engines be updated separately from app releases.</p>
 
   <h2>Failure Handling</h2>
   <ul>
-    <li>Missing or invalid ONNX artifacts create a structured startup error instead of silent fallback.</li>
-    <li>Querying without a loaded GGUF returns a conflict response and the UI keeps the Run button disabled.</li>
-    <li>Model loading reports the active llama.cpp library and Vulkan DLL so a false CPU-only load is visible in diagnostics.</li>
-    <li>Unsupported/binary ingestion failures are stored as failed document or job state with a clear reason.</li>
+    <li>Missing ONNX engines create a visible setup state; the app does not silently fall back to another embedder or reranker.</li>
+    <li>Querying without a loaded GGUF returns a conflict response and the UI keeps the run action disabled.</li>
+    <li>Model diagnostics report Python runtime, llama.cpp package path, backend libraries, active context, and load errors.</li>
     <li>Metrics and trace write failures are non-fatal where possible and surfaced through health or diagnostics.</li>
-    <li>SQLite FTS5 search is explicit and testable, avoiding LanceDB Tantivy Python-package drift.</li>
+    <li>Event-stream disconnects trigger reconnect attempts and temporary polling rather than permanently lying about state.</li>
   </ul>
 </main>
 </body>

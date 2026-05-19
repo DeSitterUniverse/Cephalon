@@ -31,7 +31,7 @@ export function ChatHistoryPanel({ conversations, selectedId, onSelect, onNew, o
           <button
             key={conversation.id}
             type="button"
-            className={conversation.id === selectedId ? "document-row active" : "document-row"}
+            className={conversation.id === selectedId ? "document-row history-row active" : "document-row history-row"}
             onClick={() => onSelect(conversation.id)}
           >
             <div className="document-main">

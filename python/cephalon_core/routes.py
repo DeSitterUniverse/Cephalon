@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from . import storage
-from .schemas import DocumentUpdateRequest, EvalRunRequest, IngestRequest, LoadModelRequest, QueryRequest, RagSettings, TagRequest
-from .services import evaluation, generation, ingestion, metrics, models, observability, retrieval, support
+from .schemas import DocumentUpdateRequest, EvalRunRequest, IngestRequest, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings, TagRequest
+from .services import evaluation, generation, ingestion, metrics, models, observability, onnx_setup, retrieval, support
 from .validators import normalize_existing_path, validate_document_id, validate_tag
 
 
@@ -58,6 +58,7 @@ def health(request: Request):
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
         "onnx_warmup": getattr(app_state, "onnx_warmup", None),
+        "onnx_setup": onnx_setup.runtime_status(app_state),
         "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
@@ -68,6 +69,39 @@ def health(request: Request):
             "table": retrieval.vector_table_name(app_state),
         },
     }
+
+
+@router.get("/models/onnx/status")
+def get_onnx_status(request: Request):
+    app_state = state(request)
+    return onnx_setup.runtime_status(app_state)
+
+
+@router.post("/models/onnx/install-local")
+def install_local_onnx(request: Request, req: OnnxInstallLocalRequest):
+    app_state = state(request)
+    try:
+        payload = onnx_setup.install_local(app_state.settings, req.kind, req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    app_state.onnx_setup = onnx_setup.runtime_status(app_state)
+    return {"status": "installed", "kind": req.kind, "restart_required": True, "model": payload, "setup": app_state.onnx_setup}
+
+
+@router.post("/models/onnx/download")
+def download_onnx(request: Request, req: OnnxDownloadRequest):
+    app_state = state(request)
+    try:
+        if req.kind == "all":
+            payload = onnx_setup.install_all_from_download(app_state.settings)
+        else:
+            payload = onnx_setup.download(app_state.settings, req.kind, req.repo_id, req.subfolder)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    app_state.onnx_setup = onnx_setup.runtime_status(app_state)
+    return {"status": "installed", "kind": req.kind, "restart_required": True, "model": payload, "setup": app_state.onnx_setup}
 
 
 @router.get("/models")

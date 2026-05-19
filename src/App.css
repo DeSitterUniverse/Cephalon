@@ -69,6 +69,34 @@ select, option { background: #050505; color: var(--text); }
   background: #000;
   overflow: hidden;
 }
+.theme-graphite {
+  color: #fff;
+  --bg: #171717;
+  --panel: #1d1d1d;
+  --panel-2: #242424;
+  --panel-3: #2b2b2b;
+  --line: #343434;
+  --line-strong: #4a4a4a;
+  --text: #fff;
+  --muted: #c4c4c4;
+  --faint: #8b8b8b;
+  --accent: #f5f5f5;
+}
+.theme-graphite.app-frame,
+.theme-graphite .app-titlebar,
+.theme-graphite .topbar,
+.theme-graphite .composer {
+  background: var(--bg);
+}
+.theme-graphite .search-box,
+.theme-graphite .segmented,
+.theme-graphite .field select,
+.theme-graphite .inline-field,
+.theme-graphite .field input[type="text"],
+.theme-graphite .composer input,
+.theme-graphite .reasoning-select {
+  background: #202020;
+}
 .app-titlebar {
   display: flex;
   align-items: center;
@@ -113,6 +141,9 @@ select, option { background: #050505; color: var(--text); }
   grid-template-columns: 330px minmax(430px, 1fr) 350px;
   background: var(--bg);
   overflow: hidden;
+}
+.workbench.panel-settings {
+  grid-template-columns: 330px minmax(430px, 1fr) 430px;
 }
 .panel {
   min-width: 0;
@@ -410,6 +441,20 @@ select, option { background: #050505; color: var(--text); }
 }
 .document-row:hover { border-color: #303030; }
 .document-row.active { border-color: rgba(255, 154, 46, 0.45); }
+.history-row {
+  display: block;
+  padding: 10px 54px 10px 12px;
+  cursor: pointer;
+}
+.history-row .document-main {
+  padding-right: 0;
+}
+.history-row:hover {
+  background: #090909;
+}
+.history-row:active {
+  background: #0d0a06;
+}
 .document-select {
   width: 100%;
   min-height: 70px;
@@ -635,6 +680,151 @@ select, option { background: #050505; color: var(--text); }
   display: grid;
   gap: 8px;
   margin: 0 10px 8px;
+}
+.settings-screen {
+  background: var(--panel);
+}
+.settings-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+.settings-section {
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 12px;
+  margin-bottom: 12px;
+}
+.settings-section h3 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.settings-note {
+  margin: 0 0 9px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+.runtime-line {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 7px 8px;
+  margin-bottom: 8px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.runtime-line.ok { color: var(--ok); }
+.runtime-line.warn { color: var(--warn); }
+.theme-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+.theme-choice {
+  display: grid;
+  gap: 4px;
+  min-height: 58px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px;
+}
+.theme-choice:hover,
+.theme-choice.active {
+  border-color: rgba(255, 154, 46, 0.55);
+  background: #15100a;
+}
+.theme-choice span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.compact-field {
+  margin: 0;
+}
+.onnx-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 8px;
+  margin-bottom: 7px;
+}
+.onnx-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.onnx-main strong {
+  font-size: 0.8rem;
+}
+.onnx-main code,
+.onnx-main small,
+.onnx-main em {
+  color: var(--muted);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+  font-style: normal;
+}
+.onnx-main em {
+  color: var(--warn);
+}
+.onnx-main a {
+  color: #ffbd6b;
+  text-decoration: none;
+}
+.onnx-main a:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+.status-text {
+  font-size: 0.72rem;
+}
+.status-text.ok { color: var(--ok); }
+.status-text.warn { color: var(--warn); }
+.onnx-actions {
+  display: flex;
+  gap: 6px;
+}
+.onnx-actions button,
+.settings-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.onnx-actions button {
+  width: 30px;
+}
+.onnx-actions button:hover:not(:disabled),
+.settings-actions button:hover:not(:disabled) {
+  border-color: rgba(255, 154, 46, 0.55);
+  background: #15100a;
+}
+.onnx-actions button:disabled,
+.settings-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.settings-actions button {
+  width: auto;
+  padding: 0 10px;
 }
 .field span {
   display: flex;

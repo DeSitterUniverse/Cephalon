@@ -15,6 +15,7 @@ type Props = {
 export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
   const [panelMenuOpen, setPanelMenuOpen] = useState(false);
   const rightPanel = useUiStore(state => state.rightPanel);
+  const theme = useUiStore(state => state.theme);
   const setRightPanel = useUiStore(state => state.setRightPanel);
   const eventStatus = useUiStore(state => state.eventStatus);
   const liveLabel = eventStatus === "connected" ? "Live" : eventStatus === "offline" ? "Offline" : "Reconnecting";
@@ -35,7 +36,7 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
   };
 
   return (
-    <div className="app-frame">
+    <div className={`app-frame theme-${theme}`}>
       <div className="app-titlebar">
         <div className="titlebar-drag-area" data-tauri-drag-region onDoubleClick={() => windowCommand("toggle_maximize_window")}>
           <div className="window-title" data-tauri-drag-region>Cephalon</div>
@@ -46,7 +47,7 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
           <button type="button" onMouseDown={stopWindowDrag} onClick={() => windowCommand("close_window")} title="Close"><X size={15} /></button>
         </div>
       </div>
-      <div className="workbench">
+      <div className={`workbench panel-${rightPanel}`}>
         <aside className="panel panel-left">{left}</aside>
         <main className="workspace">
           <header className="topbar">

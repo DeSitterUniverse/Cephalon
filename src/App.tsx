@@ -9,6 +9,7 @@ import {
   deleteConversation,
   deleteDocument,
   deleteDocumentTag,
+  downloadOnnxModels,
   exportMetrics,
   getConversation,
   getConversations,
@@ -18,6 +19,7 @@ import {
   getHealth,
   getIndexHealth,
   getModels,
+  getOnnxSetupStatus,
   getObsidianVault,
   getEvalRuns,
   getRetrievalTrace,
@@ -25,6 +27,7 @@ import {
   getSettings,
   ingestPath,
   ingestObsidianVault,
+  installLocalOnnxModel,
   loadModel,
   reindexDocument,
   runEval,
@@ -32,6 +35,7 @@ import {
   updateSettings,
   type Document,
   type HealthResponse,
+  type OnnxModelKind,
   type RagSettings,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
@@ -90,6 +94,7 @@ export default function App() {
   const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: getJobs, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
+  const onnxStatusQuery = useQuery({ queryKey: ["onnx-setup"], queryFn: getOnnxSetupStatus, enabled: bootReady && rightPanel === "settings" });
   const obsidianVaultQuery = useQuery({ queryKey: ["obsidian-vault"], queryFn: getObsidianVault, enabled: bootReady });
   const tracesQuery = useQuery({ queryKey: ["retrieval-traces"], queryFn: getRetrievalTraces, enabled: bootReady && rightPanel === "trace" });
   const traceQuery = useQuery({
@@ -158,6 +163,27 @@ export default function App() {
     onError: error => setToast(error instanceof Error ? error.message : "Failed to export metrics."),
   });
 
+  const onnxDownloadMutation = useMutation({
+    mutationFn: (kind: OnnxModelKind) => downloadOnnxModels(kind),
+    onMutate: (kind) => setToast(kind === "all" ? "Downloading ONNX engines..." : `Downloading ${kind} ONNX engine...`),
+    onSuccess: () => {
+      setToast("ONNX model setup finished. Restart the backend to load the new engines.");
+      queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+    onError: error => setToast(error instanceof Error ? error.message : "Failed to set up ONNX models."),
+  });
+
+  const onnxInstallMutation = useMutation({
+    mutationFn: ({ kind, path }: { kind: "embedder" | "reranker"; path: string }) => installLocalOnnxModel(kind, path),
+    onSuccess: () => {
+      setToast("ONNX model folder installed. Restart the backend to load the new engine.");
+      queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+    onError: error => setToast(error instanceof Error ? error.message : "Failed to install ONNX model folder."),
+  });
+
   const obsidianMutation = useMutation({
     mutationFn: ingestObsidianVault,
     onSuccess: data => {
@@ -207,6 +233,10 @@ export default function App() {
           const health = await getHealth();
           setBootHealth(health);
           setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and local model inventory.");
+          if (!health.engines_ready || health.onnx_setup?.startup_error) {
+            setRightPanel("settings");
+            setToast("Embedding and reranking setup needed.");
+          }
           setBootReady(true);
           return;
         } catch {
@@ -223,7 +253,7 @@ export default function App() {
     };
     poll();
     return () => { active = false; };
-  }, []);
+  }, [setRightPanel]);
 
   useEffect(() => {
     const names = modelsQuery.data?.models || [];
@@ -278,6 +308,16 @@ export default function App() {
       .catch(error => setToast(error instanceof Error ? error.message : "Failed to queue text import."));
   }
 
+  async function browseOnnxFolder(kind: "embedder" | "reranker") {
+    if (!isTauriRuntime()) {
+      setToast("Model folder browsing is available in the Tauri app.");
+      return;
+    }
+    const defaultPath = onnxStatusQuery.data?.[kind]?.path || onnxStatusQuery.data?.model_dir;
+    const selectedPath = await openDialog({ directory: true, multiple: false, defaultPath });
+    if (selectedPath && typeof selectedPath === "string") onnxInstallMutation.mutate({ kind, path: selectedPath });
+  }
+
   function removeDocument(doc: Document) {
     if (window.confirm(`Delete ${doc.name} from the library?`)) deleteMutation.mutate(doc);
   }
@@ -291,7 +331,20 @@ export default function App() {
   }
 
   const right = rightPanel === "settings"
-    ? <SettingsPanel models={modelsQuery.data?.models || []} selectedModel={selectedModel} setSelectedModel={setSelectedModel} settings={settingsQuery.data} updateSettings={(value: RagSettings) => settingsMutation.mutate(value)} onExportMetrics={() => metricsMutation.mutate()} />
+    ? (
+      <SettingsPanel
+        models={modelsQuery.data?.models || []}
+        selectedModel={selectedModel}
+        setSelectedModel={setSelectedModel}
+        settings={settingsQuery.data}
+        onnxStatus={onnxStatusQuery.data}
+        isDownloadingModels={onnxDownloadMutation.isPending || onnxInstallMutation.isPending}
+        updateSettings={(value: RagSettings) => settingsMutation.mutate(value)}
+        onDownloadOnnx={(kind) => onnxDownloadMutation.mutate(kind)}
+        onBrowseOnnx={browseOnnxFolder}
+        onExportMetrics={() => metricsMutation.mutate()}
+      />
+    )
     : rightPanel === "sources"
       ? <SourcesPanel sources={selectedSources} />
       : rightPanel === "trace"
