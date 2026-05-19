@@ -1,9 +1,18 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
 import type { Conversation, RagSettings } from "../../api";
+import { queryModel } from "../../api";
 import { useUiStore } from "../../store";
+
+vi.mock("../../api", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return {
+    ...actual,
+    queryModel: vi.fn(),
+  };
+});
 
 const settings: RagSettings = {
   top_k: 8,
@@ -47,7 +56,10 @@ const conversation: Conversation = {
 };
 
 describe("ChatPanel", () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.mocked(queryModel).mockReset();
+  });
 
   it("restores saved chat messages and exposes per-message source badges", async () => {
     const user = userEvent.setup();
@@ -76,5 +88,43 @@ describe("ChatPanel", () => {
     render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} />);
 
     expect(screen.getByTitle("Reasoning depth")).toHaveValue("balanced");
+  });
+
+  it("keeps the first streamed answer visible after the conversation event", async () => {
+    const user = userEvent.setup();
+    const onConversationSelected = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode([
+          "event: conversation",
+          "data: {\"conversation_id\":\"new-chat\"}",
+          "",
+          "event: token",
+          "data: {\"text\":\"First answer\"}",
+          "",
+          "event: done",
+          "data: {\"ok\":true}",
+          "",
+        ].join("\n")));
+        controller.close();
+      },
+    });
+    vi.mocked(queryModel).mockResolvedValue(stream);
+
+    render(
+      <ChatPanel
+        selectedModel="local.gguf"
+        modelReady
+        settings={settings}
+        selectedConversationId={null}
+        onConversationSelected={onConversationSelected}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search, compare, summarize..."), "hello");
+    await user.click(screen.getByRole("button", { name: /run/i }));
+
+    await waitFor(() => expect(screen.getByText("First answer")).toBeInTheDocument());
+    expect(onConversationSelected).toHaveBeenCalledWith("new-chat");
   });
 });

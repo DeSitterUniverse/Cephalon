@@ -71,6 +71,15 @@ def llama_backend_info() -> dict:
     }
 
 
+def python_runtime_info() -> dict:
+    return {
+        "executable": sys.executable,
+        "version": sys.version,
+        "prefix": sys.prefix,
+        "base_prefix": getattr(sys, "base_prefix", sys.prefix),
+    }
+
+
 def list_models(settings: Settings) -> list[str]:
     return model_inventory(settings)["chat_models"]
 
@@ -169,6 +178,7 @@ def load_llm(app_state, model_filename: str) -> None:
         print("Deallocating active VRAM model...")
         del app_state.llm
         gc.collect()
+    app_state.last_model_load_error = None
 
     print(
         f"Loading {model_filename} with llama.cpp "
@@ -194,6 +204,7 @@ def load_llm(app_state, model_filename: str) -> None:
                 return
             except Exception as e:
                 errors.append(f"{context_tokens}: {e}")
+                app_state.last_model_load_error = f"{context_tokens}: {e}"
                 app_state.llm = None
                 gc.collect()
     except Exception as e:
@@ -201,9 +212,11 @@ def load_llm(app_state, model_filename: str) -> None:
         app_state.active_model_name = None
         app_state.active_context_tokens = None
         app_state.active_model_context_tokens = None
+        app_state.last_model_load_error = str(e)
         raise HTTPException(status_code=500, detail=f"Failed to load model: {e}") from e
     app_state.llm = None
     app_state.active_model_name = None
     app_state.active_context_tokens = None
     app_state.active_model_context_tokens = None
+    app_state.last_model_load_error = "; ".join(errors)
     raise HTTPException(status_code=500, detail=f"Failed to load model at all context sizes: {'; '.join(errors)}")

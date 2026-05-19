@@ -1,16 +1,16 @@
 # Cephalon
 
-Cephalon is a local-first desktop RAG workbench for indexing files, asking cited questions over them, and running local GGUF chat models through Vulkan-enabled llama.cpp. The app is built for offline use: metadata stays in SQLite, dense vectors stay in LanceDB, embedding/reranking runs through ONNX Runtime, and generation runs through an explicitly loaded local model.
+Cephalon is a local-first desktop RAG workbench for indexing files, asking questions over them and getting cited answers when needed, and running local GGUF chat models through Vulkan-enabled llama.cpp. The app is built for offline use: metadata stays in SQLite, dense vectors stay in LanceDB, embedding/reranking runs through ONNX Runtime, and generation runs through an explicitly loaded local model.
 
 ## Features
 
-- Tauri desktop app with a dense dark React workbench and custom draggable titlebar controls.
+- Lightweight OLED friendly Tauriv2 desktop app with #000000 background and #FFE5CC Text!
 - Document library with import, text-safe unknown file ingestion, reindexing, tags, delete, and document details.
 - Durable ingestion jobs with live SSE progress.
 - Explicit GGUF model picker and **Load** action before querying.
 - Vulkan-enabled llama.cpp backend diagnostics and explicit local model loading.
-- Hybrid retrieval without Tantivy: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
-- Jina ONNX embedder and reranker with strict validation and no silent model fallback.
+- Hybrid retrieval: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
+- Jina ONNX embedder and reranker.
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
@@ -58,17 +58,17 @@ Only chat-capable `.gguf` files appear in the model picker. GGUF files whose nam
 
 ```powershell
 npm install
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\scripts\setup_local_python.ps1
 ```
+
+The setup script uses `python` or `py -3` from PATH, disables user-site package leakage with `PYTHONNOUSERSITE=1`, installs the latest stable packages allowed by the requirements files, force-rebuilds `llama-cpp-python` with Vulkan enabled, and runs the runtime preflight.
 
 Export ONNX models only when missing or intentionally replacing them:
 
 ```powershell
-python -m venv .venv-export
-.\.venv-export\Scripts\python.exe -m pip install -r requirements-export.txt
-.\.venv-export\Scripts\python.exe export_onnx.py
-.\.venv\Scripts\python.exe scripts\validate_onnx_models.py --mark
+python -m pip install --upgrade -r requirements-export.txt
+python export_onnx.py
+python scripts\validate_onnx_models.py --mark
 ```
 
 ## Run
@@ -76,7 +76,7 @@ python -m venv .venv-export
 Backend only:
 
 ```powershell
-.\.venv\Scripts\python.exe python\main.py
+python python\main.py
 ```
 
 Desktop development app:
@@ -93,12 +93,13 @@ npm run dev
 
 In the app, select a chat GGUF model and press **Load** before running a query.
 
-The development runtime expects the workspace `.venv` `llama-cpp-python` package to include `ggml-vulkan.dll`. Rebuild it when needed:
+The selected Python environment must contain a Vulkan-enabled `llama-cpp-python` package with `ggml-vulkan.dll`. Rebuild it when needed:
 
 ```powershell
 $env:CMAKE_ARGS="-DGGML_VULKAN=on"
 $env:FORCE_CMAKE="1"
-.\.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python==0.3.23
+python -m pip install --upgrade --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
+python scripts\preflight_runtime.py
 ```
 
 ## Build
@@ -112,7 +113,7 @@ npm.cmd run build
 Backend sidecar:
 
 ```powershell
-.\.venv\Scripts\python.exe build_backend.py
+python build_backend.py
 ```
 
 Tauri package:
@@ -126,8 +127,6 @@ Full Windows release pipeline:
 ```powershell
 .\scripts\build_release.ps1
 ```
-
-Generated folders such as `.venv`, `.venv-export`, `dist`, `build`, `src-tauri/target`, `src-tauri/backend`, and local data directories should not be committed.
 
 ## Configuration
 

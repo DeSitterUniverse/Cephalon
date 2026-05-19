@@ -147,6 +147,8 @@ export type HealthResponse = {
   active_model?: string | null;
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
+  last_model_load_error?: string | null;
+  onnx_warmup?: { ready?: boolean; warmup_ms?: number } | null;
   llama_backend?: {
     vulkan_available?: boolean;
     vulkan_required?: boolean;

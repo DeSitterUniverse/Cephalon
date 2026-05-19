@@ -59,7 +59,7 @@ def no_answer_diagnostics(sources: list[SourceChunk], thresholds: dict[str, Any]
     bm25_scores = [source.lexical_score for source in sources if source.lexical_score is not None]
     final_scores = [source.score for source in sources]
     top_rerank = max(rerank_scores) if rerank_scores else max(final_scores)
-    top_vector = max(vector_scores) if vector_scores else 0.0
+    top_vector = max(vector_scores) if vector_scores else None
     top_bm25 = min(bm25_scores) if bm25_scores else None
     ranked = sorted(final_scores, reverse=True)
     score_gap = ranked[0] - ranked[1] if len(ranked) > 1 else ranked[0]
@@ -68,7 +68,10 @@ def no_answer_diagnostics(sources: list[SourceChunk], thresholds: dict[str, Any]
 
     confidence = 0.25
     confidence += min(max(top_rerank, 0.0), 1.5) * 0.22
-    confidence += min(max(top_vector, 0.0), 1.0) * 0.18
+    if top_vector is not None:
+        confidence += min(max(top_vector, 0.0), 1.0) * 0.18
+    elif top_rerank >= float(active["min_rerank_score"]):
+        confidence += 0.08
     confidence += min(max(score_gap, 0.0), 1.0) * 0.12
     confidence += min(source_diversity, 3) * 0.06
     if hybrid_overlap:
@@ -80,14 +83,15 @@ def no_answer_diagnostics(sources: list[SourceChunk], thresholds: dict[str, Any]
         reasons.append("too_few_sources")
     if top_rerank < float(active["min_rerank_score"]):
         reasons.append("low_rerank_score")
-    if top_vector < float(active["min_vector_score"]):
+    if top_vector is not None and top_vector < float(active["min_vector_score"]) and top_rerank < float(active["min_rerank_score"]):
         reasons.append("low_vector_score")
-    if not hybrid_overlap and len(sources) > 1:
+    if not hybrid_overlap and len(sources) > 1 and confidence < 0.55 and top_rerank < float(active["min_rerank_score"]):
         reasons.append("low_vector_bm25_agreement")
     if confidence < float(active["min_confidence"]):
         reasons.append("low_confidence")
 
-    no_answer = bool(reasons)
+    blocking_reasons = {"no_sources", "too_few_sources", "low_confidence"}
+    no_answer = any(reason in blocking_reasons for reason in reasons)
     return {
         "confidence": confidence,
         "uncertainty": "high" if confidence < 0.45 else "medium" if confidence < 0.7 else "low",
@@ -98,7 +102,7 @@ def no_answer_diagnostics(sources: list[SourceChunk], thresholds: dict[str, Any]
         "agreement": {"hybrid_overlap": hybrid_overlap, "source_diversity": source_diversity},
         "top_scores": {
             "rerank": round(float(top_rerank), 6),
-            "vector": round(float(top_vector), 6),
+            "vector": round(float(top_vector), 6) if top_vector is not None else None,
             "bm25": round(float(top_bm25), 6) if top_bm25 is not None else None,
             "score_gap": round(float(score_gap), 6),
         },

@@ -9,6 +9,11 @@ use tauri::Manager;
 
 pub struct BackendProcess(pub Mutex<Option<Child>>);
 
+struct PythonCommand {
+    program: PathBuf,
+    prefix_args: Vec<String>,
+}
+
 fn backend_addr() -> SocketAddr {
     let host = env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string());
@@ -76,7 +81,12 @@ fn prepend_path(existing: Option<String>, paths: &[PathBuf]) -> String {
         .to_string()
 }
 
-fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_internal: Option<&Path>) {
+fn apply_backend_env(
+    command: &mut Command,
+    repo_root: Option<&Path>,
+    sidecar_internal: Option<&Path>,
+    dev_llama_lib: Option<&Path>,
+) {
     let data_dir = default_data_dir();
     let model_dir = default_model_dir(&data_dir);
 
@@ -86,19 +96,13 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
     command.env("CEPHALON_PORT", env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()));
     command.env("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,https://tauri.localhost");
     command.env("CEPHALON_LLAMA_VERBOSE", "0");
+    command.env("PYTHONNOUSERSITE", "1");
 
-    if let Some(root) = repo_root {
-        let venv_llama_lib = if cfg!(target_os = "windows") {
-            root.join(".venv").join("Lib").join("site-packages").join("llama_cpp").join("lib")
-        } else {
-            root.join(".venv").join("lib").join("python").join("site-packages").join("llama_cpp").join("lib")
-        };
-        if venv_llama_lib.exists() {
-            command.env("CEPHALON_LLAMA_DLL_DIR", &venv_llama_lib);
-            command.env("LLAMA_CPP_LIB_PATH", &venv_llama_lib);
-            let path = prepend_path(env::var("PATH").ok(), &[venv_llama_lib]);
-            command.env("PATH", path);
-        }
+    if let Some(llama_lib) = dev_llama_lib {
+        command.env("CEPHALON_LLAMA_DLL_DIR", llama_lib);
+        command.env("LLAMA_CPP_LIB_PATH", llama_lib);
+        let path = prepend_path(env::var("PATH").ok(), &[llama_lib.to_path_buf()]);
+        command.env("PATH", path);
     }
 
     if let Some(internal) = sidecar_internal {
@@ -116,19 +120,90 @@ fn apply_backend_env(command: &mut Command, repo_root: Option<&Path>, sidecar_in
     }
 }
 
+fn python_candidates() -> Vec<PythonCommand> {
+    let mut candidates = vec![PythonCommand {
+        program: PathBuf::from("python"),
+        prefix_args: vec![],
+    }];
+    if cfg!(target_os = "windows") {
+        candidates.push(PythonCommand {
+            program: PathBuf::from("py"),
+            prefix_args: vec!["-3".to_string()],
+        });
+    }
+    candidates
+}
+
+fn python_runs(candidate: &PythonCommand) -> bool {
+    let mut command = Command::new(&candidate.program);
+    for arg in &candidate.prefix_args {
+        command.arg(arg);
+    }
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().map(|status| status.success()).unwrap_or(false)
+}
+
+fn resolve_python_command() -> Option<PythonCommand> {
+    for candidate in python_candidates() {
+        if python_runs(&candidate) {
+            return Some(candidate);
+        }
+    }
+    eprintln!(
+        "Cephalon could not find Python on PATH. Enable the Windows Python app execution alias or add python.exe/py.exe to PATH, then rerun npm run tauri dev."
+    );
+    None
+}
+
+fn discover_dev_llama_lib(python: &PythonCommand) -> Option<PathBuf> {
+    let mut command = Command::new(&python.program);
+    for arg in &python.prefix_args {
+        command.arg(arg);
+    }
+    command
+        .arg("-c")
+        .arg("import pathlib, llama_cpp; p = pathlib.Path(llama_cpp.__file__).resolve().parent / 'lib'; v = p / 'ggml-vulkan.dll'; print(p if v.exists() else '')")
+        .stdin(Stdio::null());
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("Failed to inspect local Python llama_cpp package: {error}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "Local Python can start, but llama_cpp is not importable. Install the Vulkan-enabled llama-cpp-python wheel before running Tauri dev."
+        );
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        eprintln!(
+            "Local Python has llama_cpp, but ggml-vulkan.dll was not found. Rebuild llama-cpp-python with CMAKE_ARGS=-DGGML_VULKAN=on."
+        );
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 fn spawn_dev_backend() -> Option<Child> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("src-tauri has a parent repository")
         .to_path_buf();
 
-    let python = if cfg!(target_os = "windows") {
-        repo_root.join(".venv").join("Scripts").join("python.exe")
-    } else {
-        repo_root.join(".venv").join("bin").join("python")
-    };
-    let python = if python.exists() { python } else { PathBuf::from("python") };
-    let mut command = Command::new(python);
+    let python = resolve_python_command()?;
+    let dev_llama_lib = discover_dev_llama_lib(&python)?;
+    let mut command = Command::new(&python.program);
+    for arg in &python.prefix_args {
+        command.arg(arg);
+    }
     command
         .arg(repo_root.join("python").join("main.py"))
         .current_dir(&repo_root)
@@ -139,6 +214,7 @@ fn spawn_dev_backend() -> Option<Child> {
         &mut command,
         Some(&repo_root),
         None,
+        Some(dev_llama_lib.as_path()),
     );
 
     match command.spawn() {
@@ -167,7 +243,12 @@ fn spawn_release_backend(app: &tauri::App) -> Option<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    apply_backend_env(&mut command, None, sidecar_internal.exists().then_some(sidecar_internal.as_path()));
+    apply_backend_env(
+        &mut command,
+        None,
+        sidecar_internal.exists().then_some(sidecar_internal.as_path()),
+        None,
+    );
 
     match command.spawn() {
         Ok(child) => Some(child),

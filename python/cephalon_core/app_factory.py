@@ -3,7 +3,9 @@ import shutil
 import sys
 import json
 from contextlib import asynccontextmanager
+import time
 
+import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,9 +82,43 @@ def load_onnx_engines(app_state) -> str | None:
         app_state.embedding_fixed_sequence_length = embed_meta.get("fixed_sequence_length")
         app_state.reranker_model_id = reranker_meta.get("model_id") or RERANKER_MODEL_ID
         app_state.reranker_score_mode = reranker_meta.get("score_mode", "auto")
+        app_state.onnx_warmup = _warm_onnx_engines(app_state)
         return None
     except Exception as exc:
         return f"Failed to load ONNX engines: {exc}"
+
+
+def _warm_onnx_engines(app_state) -> dict:
+    started = time.perf_counter()
+    embed_kwargs = {"truncation": True, "return_tensors": "np"}
+    fixed_length = getattr(app_state, "embedding_fixed_sequence_length", None)
+    if fixed_length:
+        embed_kwargs.update({"padding": "max_length", "max_length": int(fixed_length)})
+    else:
+        embed_kwargs["padding"] = True
+    embed_inputs = app_state.embed_tokenizer("Cephalon warmup text", **embed_kwargs)
+    embed_ort = {
+        "input_ids": embed_inputs["input_ids"].astype(np.int64),
+        "attention_mask": embed_inputs["attention_mask"].astype(np.int64),
+    }
+    if "token_type_ids" in embed_inputs:
+        embed_ort["token_type_ids"] = embed_inputs["token_type_ids"].astype(np.int64)
+    app_state.embedder.run(None, embed_ort)
+
+    rerank_inputs = app_state.tokenizer(
+        [["warmup query", "warmup document"]],
+        padding=True,
+        truncation=True,
+        return_tensors="np",
+    )
+    rerank_ort = {
+        "input_ids": rerank_inputs["input_ids"].astype(np.int64),
+        "attention_mask": rerank_inputs["attention_mask"].astype(np.int64),
+    }
+    if "token_type_ids" in rerank_inputs:
+        rerank_ort["token_type_ids"] = rerank_inputs["token_type_ids"].astype(np.int64)
+    app_state.reranker.run(None, rerank_ort)
+    return {"ready": True, "warmup_ms": round((time.perf_counter() - started) * 1000, 2)}
 
 
 def _reranker_export_validated(model_dir: str) -> bool:

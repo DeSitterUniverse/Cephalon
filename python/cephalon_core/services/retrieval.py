@@ -3,6 +3,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,9 @@ from . import observability
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
+EMBEDDING_CACHE_LIMIT = 128
+RERANK_CACHE_LIMIT = 96
+RERANK_TEXT_LIMIT = 700
 QUERY_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "best", "for", "from", "how", "i", "in", "is", "it",
     "amount", "day", "me", "my", "of", "on", "or", "show", "the", "to", "what", "when", "which", "with",
@@ -89,6 +93,16 @@ async def get_embedding(app_state, text: str) -> list[float]:
     if getattr(app_state, "embedder", None) is None:
         raise RuntimeError("Embedding engine is not ready.")
 
+    normalized = " ".join(text.strip().split())
+    cache_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    cache: OrderedDict[str, list[float]] = getattr(app_state, "embedding_cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        app_state.embedding_cache = cache
+    if cache_key in cache:
+        cache.move_to_end(cache_key)
+        return list(cache[cache_key])
+
     fixed_length = getattr(app_state, "embedding_fixed_sequence_length", None)
     tokenizer_kwargs = {"truncation": True, "return_tensors": "np"}
     if fixed_length:
@@ -122,7 +136,12 @@ async def get_embedding(app_state, text: str) -> list[float]:
     expected_dim = getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)
     if len(vec) != expected_dim:
         raise RuntimeError(f"Embedding dimension mismatch: got {len(vec)}, expected {expected_dim}. Re-export ONNX models and rebuild the index.")
-    return vec.tolist()
+    vector = vec.tolist()
+    cache[cache_key] = vector
+    cache.move_to_end(cache_key)
+    while len(cache) > EMBEDDING_CACHE_LIMIT:
+        cache.popitem(last=False)
+    return list(vector)
 
 
 async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]) -> None:
@@ -148,21 +167,51 @@ async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]
 def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
     if not results:
         return []
-    pairs = [[prompt, res["text"]] for res in results]
-    inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
-    ort_inputs = {
-        "input_ids": inputs["input_ids"].astype(np.int64),
-        "attention_mask": inputs["attention_mask"].astype(np.int64),
-    }
-    if "token_type_ids" in inputs:
-        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
-    raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
-    scores = _reranker_scores(app_state, raw_scores)
+    cache_key = _rerank_cache_key(prompt, results)
+    cache: OrderedDict[str, list[float]] = getattr(app_state, "rerank_cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        app_state.rerank_cache = cache
+    cached_scores = cache.get(cache_key)
+    if cached_scores is not None and len(cached_scores) == len(results):
+        cache.move_to_end(cache_key)
+        scores = np.asarray(cached_scores, dtype=float)
+    else:
+        pairs = [[prompt, _rerank_text(res.get("text", ""))] for res in results]
+        inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
+        ort_inputs = {
+            "input_ids": inputs["input_ids"].astype(np.int64),
+            "attention_mask": inputs["attention_mask"].astype(np.int64),
+        }
+        if "token_type_ids" in inputs:
+            ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
+        raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
+        scores = _reranker_scores(app_state, raw_scores)
+        cache[cache_key] = [float(score) for score in scores]
+        cache.move_to_end(cache_key)
+        while len(cache) > RERANK_CACHE_LIMIT:
+            cache.popitem(last=False)
     for idx, res in enumerate(results):
         res["rerank_score"] = float(scores[idx])
         res["retrieval_prior_score"] = _retrieval_prior_score(prompt, res)
         res["score"] = _final_retrieval_score(prompt, res, float(scores[idx]))
     return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+def _rerank_text(text: str) -> str:
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= RERANK_TEXT_LIMIT:
+        return cleaned
+    return cleaned[:RERANK_TEXT_LIMIT]
+
+
+def _rerank_cache_key(prompt: str, results: list[dict]) -> str:
+    candidate_key = "|".join(f"{res.get('id')}:{hashlib.sha256(str(res.get('text', '')).encode('utf-8')).hexdigest()[:16]}" for res in results)
+    return hashlib.sha256(f"{prompt.strip().lower()}::{candidate_key}".encode("utf-8")).hexdigest()
+
+
+def _rerank_candidate_limit(settings: RagSettings) -> int:
+    return max(settings.rerank_top_n + 2, settings.rerank_top_n * 2)
 
 
 def _reranker_scores(app_state, raw_scores: np.ndarray) -> np.ndarray:
@@ -579,7 +628,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             for key in ("vector_ms", "bm25_ms", "fusion_ms"):
                 trace["latency"][key] = round(trace["latency"].get(key, 0) + stage_trace.get("latency", {}).get(key, 0), 2)
             rerank_started = time.perf_counter()
-            all_ranked = rerank(app_state, subquery["text"], results)
+            rerank_candidates = results[:_rerank_candidate_limit(settings)]
+            skipped_rerank = results[len(rerank_candidates):]
+            all_ranked = rerank(app_state, subquery["text"], rerank_candidates)
             trace["latency"]["rerank_ms"] = round(trace["latency"].get("rerank_ms", 0) + ((time.perf_counter() - rerank_started) * 1000), 2)
             reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
             selected_ids = {item["id"] for item in reranked}
@@ -588,6 +639,10 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                 {**_trace_candidate(row, rank), "reason": "below final context cutoff"}
                 for rank, row in enumerate(all_ranked, start=1)
                 if row["id"] not in selected_ids
+            ][: max(settings.top_k, 10)])
+            trace["unused_candidates"].extend([
+                {**_trace_candidate(row, rank + len(rerank_candidates)), "reason": "below rerank candidate cutoff"}
+                for rank, row in enumerate(skipped_rerank, start=1)
             ][: max(settings.top_k, 10)])
             sources = hydrate_sources(app_state, reranked, subquery["id"])
             all_sources.extend(sources)

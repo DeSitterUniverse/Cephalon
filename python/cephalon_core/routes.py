@@ -56,6 +56,9 @@ def health(request: Request):
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
+        "last_model_load_error": getattr(app_state, "last_model_load_error", None),
+        "onnx_warmup": getattr(app_state, "onnx_warmup", None),
+        "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
         "generated_index_backup": getattr(app_state, "generated_index_backup", None),
@@ -79,6 +82,7 @@ def get_models(request: Request):
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
+        "last_model_load_error": getattr(app_state, "last_model_load_error", None),
         "llama_backend": models.llama_backend_info(),
     }
 
@@ -117,6 +121,7 @@ def load_model(request: Request, req: LoadModelRequest):
         "active_model": getattr(app_state, "active_model_name", None),
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
+        "last_model_load_error": getattr(app_state, "last_model_load_error", None),
         "llama_backend": models.llama_backend_info(),
     }
 

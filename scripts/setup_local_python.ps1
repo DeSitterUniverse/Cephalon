@@ -1,6 +1,5 @@
 param(
-  [string]$Version = "1.4.0",
-  [switch]$SkipModelExport
+  [switch]$WithExportTools
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,25 +28,15 @@ function Invoke-LocalPython {
   & $script:PythonExe @script:PythonArgs @Args
 }
 
+Invoke-LocalPython -m pip install --upgrade pip
 Invoke-LocalPython -m pip install --upgrade -r requirements.txt
+
 $env:CMAKE_ARGS = "-DGGML_VULKAN=on"
 $env:FORCE_CMAKE = "1"
 Invoke-LocalPython -m pip install --upgrade --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
-if (-not $SkipModelExport) {
+
+if ($WithExportTools) {
   Invoke-LocalPython -m pip install --upgrade -r requirements-export.txt
-  Invoke-LocalPython export_onnx.py
 }
+
 Invoke-LocalPython scripts\preflight_runtime.py
-Invoke-LocalPython scripts\validate_onnx_models.py --mark
-
-Invoke-LocalPython -m py_compile python\main.py python\test_ingest_query.py python\test_query_only.py
-Invoke-LocalPython -m pytest
-npm.cmd ci
-npm.cmd run build
-Push-Location src-tauri
-cargo check
-Pop-Location
-Invoke-LocalPython build_backend.py
-npm.cmd run tauri build
-
-Write-Host "Cephalon $Version release build completed."

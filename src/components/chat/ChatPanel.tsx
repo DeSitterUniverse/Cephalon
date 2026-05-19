@@ -78,7 +78,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
 
     try {
       const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, reasoningMode);
-      await consumeQueryStream(body, setSelectedSources, chunk => {
+      const completedConversationId = await consumeQueryStream(body, setSelectedSources, chunk => {
         setMessages(prev => {
           const next = [...prev];
           const target = next.findIndex(message => message.id === assistantDraftId);
@@ -94,8 +94,6 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
           next[target] = { ...next[target], sources };
           return next;
         });
-      }, conversationId => {
-        if (conversationId) onConversationSelected?.(conversationId);
       }, meta => {
         if (meta?.support) {
           setMessages(prev => {
@@ -106,19 +104,8 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
             return next;
           });
         }
-        if (meta?.no_answer) {
-          setMessages(prev => {
-            const next = [...prev];
-            const target = next.findIndex(message => message.id === assistantDraftId);
-            if (target === -1) return next;
-            next[target] = {
-              ...next[target],
-              content: `${next[target].content}\n\n_Confidence is low. Closest retrieved matches are shown in Sources._`,
-            };
-            return next;
-          });
-        }
       });
+      if (completedConversationId) onConversationSelected?.(completedConversationId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error connecting to local service.";
       setMessages(prev => {
@@ -201,13 +188,13 @@ async function consumeQueryStream(
   onSources: (sources: SourceChunk[]) => void,
   onChunk: (chunk: string) => void,
   onMessageSources: (sources: SourceChunk[]) => void,
-  onConversation: (conversationId: string | null) => void,
   onMeta: (meta: Record<string, unknown>) => void,
-) {
+): Promise<string | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   const sources: SourceChunk[] = [];
+  let conversationId: string | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -217,10 +204,12 @@ async function consumeQueryStream(
     while (boundary !== -1) {
       const packet = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
-      handleSsePacket(packet, sources, onSources, onChunk, onMessageSources, onConversation, onMeta);
+      const result = handleSsePacket(packet, sources, onSources, onChunk, onMessageSources, onMeta);
+      if (result.conversationId) conversationId = result.conversationId;
       boundary = buffer.indexOf("\n\n");
     }
   }
+  return conversationId;
 }
 
 function handleSsePacket(
@@ -229,9 +218,8 @@ function handleSsePacket(
   onSources: (sources: SourceChunk[]) => void,
   onChunk: (chunk: string) => void,
   onMessageSources: (sources: SourceChunk[]) => void,
-  onConversation: (conversationId: string | null) => void,
   onMeta: (meta: Record<string, unknown>) => void,
-) {
+): { conversationId?: string | null } {
   const eventType = packet.split("\n").find(line => line.startsWith("event: "))?.slice(7).trim() || "message";
   const data = packet.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
   let payload: Record<string, unknown> = {};
@@ -249,12 +237,13 @@ function handleSsePacket(
   } else if (eventType === "token") {
     onChunk(typeof payload.text === "string" ? payload.text : "");
   } else if (eventType === "conversation") {
-    onConversation(typeof payload.conversation_id === "string" ? payload.conversation_id : null);
+    return { conversationId: typeof payload.conversation_id === "string" ? payload.conversation_id : null };
   } else if (eventType === "answer_meta") {
     onMeta(payload);
   } else if (eventType === "error") {
     throw new Error(typeof payload.message === "string" ? payload.message : "Query stream failed.");
   }
+  return {};
 }
 
 function renderSourceTags(content: string) {

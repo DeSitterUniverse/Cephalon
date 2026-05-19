@@ -54,7 +54,6 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
               <img src={logoUrl} alt="" />
               <div>
                 <div className="brand">Cephalon</div>
-                <div className="subtle">Local document search</div>
               </div>
             </div>
             <div className="topbar-actions">

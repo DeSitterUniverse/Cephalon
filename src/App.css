@@ -1,6 +1,6 @@
 :root {
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  color: #ededed;
+  color: #FFE5CC;
   background: #000;
   --bg: #000;
   --panel: #020202;
@@ -8,7 +8,7 @@
   --panel-3: #0d0d0d;
   --line: #242424;
   --line-strong: #3a3a3a;
-  --text: #ededed;
+  --text: #FFE5CC;
   --muted: #9b9b9b;
   --faint: #666;
   --accent: #fafafa;
@@ -277,6 +277,10 @@ select, option { background: #050505; color: var(--text); }
 }
 .icon-button:hover, .icon-button.active { border-color: var(--line-strong); color: var(--text); background: #111; }
 .icon-button:active { background: #181008; }
+.compact-actions .icon-button {
+  width: 36px;
+  height: 36px;
+}
 .panel-menu {
   position: relative;
   flex: 0 0 auto;
@@ -398,16 +402,27 @@ select, option { background: #050505; color: var(--text); }
   width: 100%;
   min-height: 72px;
   text-align: left;
-  display: grid;
-  gap: 6px;
-  padding: 8px;
+  padding: 0;
   margin-bottom: 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #050505;
+}
+.document-row:hover { border-color: #303030; }
+.document-row.active { border-color: rgba(255, 154, 46, 0.45); }
+.document-select {
+  width: 100%;
+  min-height: 70px;
+  display: grid;
+  gap: 6px;
+  padding: 8px 68px 8px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
   cursor: pointer;
 }
-.document-row:hover, .document-row.active { border-color: var(--line-strong); background: #0b0b0b; }
+.document-select:hover { background: #090909; }
+.document-select:active { background: #0d0a06; }
 .document-main { display: grid; gap: 3px; padding-right: 54px; }
 .document-main strong { font-size: 0.82rem; overflow-wrap: anywhere; }
 .document-main span, .job-meta { color: var(--muted); font-size: 0.73rem; }
@@ -425,20 +440,29 @@ select, option { background: #050505; color: var(--text); }
 }
 .row-actions {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 9px;
+  right: 9px;
   display: flex;
-  gap: 4px;
+  gap: 6px;
 }
 .row-actions button {
   display: grid;
   place-items: center;
-  width: 23px;
-  height: 23px;
+  width: 30px;
+  height: 30px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel);
   cursor: pointer;
+}
+.row-actions button:hover {
+  color: var(--text);
+  border-color: rgba(255, 154, 46, 0.55);
+  background: #15100a;
+}
+.row-actions button:active {
+  color: #ffbd6b;
+  background: #1c1208;
 }
 
 .chat-shell {
@@ -513,7 +537,7 @@ select, option { background: #050505; color: var(--text); }
 }
 .message-inspector summary {
   cursor: pointer;
-  color: #d2d2d2;
+  color: var(--text);
   font-size: 0.74rem;
 }
 .source-link-row {

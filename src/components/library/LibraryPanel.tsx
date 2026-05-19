@@ -58,19 +58,21 @@ export function LibraryPanel({ documents, search, setSearch, statusFilter, setSt
 
       <div className="document-list">
         {filtered.map(doc => (
-          <button key={doc.id} className={selectedDocumentId === doc.id ? "document-row active" : "document-row"} onClick={() => setSelectedDocumentId(doc.id)}>
-            <div className="document-main">
-              <strong>{doc.name}</strong>
-              <span>{doc.status} / {doc.chunks} chunks</span>
-            </div>
-            <div className="document-tags">
-              {(doc.tags || []).slice(0, 3).map(tag => <span key={tag}><Tag size={11} />{tag}</span>)}
-            </div>
+          <article key={doc.id} className={selectedDocumentId === doc.id ? "document-row active" : "document-row"}>
+            <button className="document-select" type="button" onClick={() => setSelectedDocumentId(doc.id)}>
+              <div className="document-main">
+                <strong>{doc.name}</strong>
+                <span>{doc.status} / {doc.chunks} chunks</span>
+              </div>
+              <div className="document-tags">
+                {(doc.tags || []).slice(0, 3).map(tag => <span key={tag}><Tag size={11} />{tag}</span>)}
+              </div>
+            </button>
             <div className="row-actions" onClick={event => event.stopPropagation()}>
-              <button title="Reindex" onClick={() => onReindex(doc)}><RefreshCw size={13} /></button>
-              <button title="Delete" onClick={() => onDelete(doc)}><Trash2 size={13} /></button>
+              <button title="Reindex" type="button" onClick={() => onReindex(doc)}><RefreshCw size={16} /></button>
+              <button title="Delete" type="button" onClick={() => onDelete(doc)}><Trash2 size={16} /></button>
             </div>
-          </button>
+          </article>
         ))}
         {filtered.length === 0 && <div className="empty-state">No matching documents.</div>}
       </div>
