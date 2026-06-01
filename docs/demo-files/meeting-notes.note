@@ -1,0 +1,5 @@
+Meeting notes
+
+The demo should show an empty workspace screenshot and an active-use screenshot. The active-use view should include imported documents, a chat answer, and visible source cards.
+
+The README should stay practical: what the app does, how it runs, and how the local model setup works.

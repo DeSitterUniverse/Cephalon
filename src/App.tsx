@@ -20,23 +20,19 @@ import {
   getIndexHealth,
   getModels,
   getOnnxSetupStatus,
-  getObsidianVault,
   getEvalRuns,
   getRetrievalTrace,
   getRetrievalTraces,
   getSettings,
   ingestPath,
-  ingestObsidianVault,
   installLocalOnnxModel,
   loadModel,
   reindexDocument,
   runEval,
   updateDocument,
-  updateSettings,
   type Document,
   type HealthResponse,
   type OnnxModelKind,
-  type RagSettings,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { AnswerSupportPanel } from "./components/diagnostics/AnswerSupportPanel";
@@ -95,7 +91,6 @@ export default function App() {
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
   const onnxStatusQuery = useQuery({ queryKey: ["onnx-setup"], queryFn: getOnnxSetupStatus, enabled: bootReady && rightPanel === "settings" });
-  const obsidianVaultQuery = useQuery({ queryKey: ["obsidian-vault"], queryFn: getObsidianVault, enabled: bootReady });
   const tracesQuery = useQuery({ queryKey: ["retrieval-traces"], queryFn: getRetrievalTraces, enabled: bootReady && rightPanel === "trace" });
   const traceQuery = useQuery({
     queryKey: ["retrieval-trace", selectedTraceId],
@@ -142,11 +137,6 @@ export default function App() {
     },
   });
 
-  const settingsMutation = useMutation({
-    mutationFn: updateSettings,
-    onSuccess: data => queryClient.setQueryData(["settings"], data),
-  });
-
   const loadModelMutation = useMutation({
     mutationFn: (model: string) => loadModel(model),
     onMutate: () => setToast("Loading model into llama.cpp..."),
@@ -182,16 +172,6 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["health"] });
     },
     onError: error => setToast(error instanceof Error ? error.message : "Failed to install ONNX model folder."),
-  });
-
-  const obsidianMutation = useMutation({
-    mutationFn: ingestObsidianVault,
-    onSuccess: data => {
-      setToast(data.message || `Obsidian vault queued: ${data.path}`);
-      setRightPanel("jobs");
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
-    },
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to queue Obsidian vault."),
   });
 
   const newConversationMutation = useMutation({
@@ -261,6 +241,11 @@ export default function App() {
   }, [modelsQuery.data, selectedModel, setSelectedModel]);
 
   useEffect(() => {
+    const firstConversation = conversationsQuery.data?.conversations?.[0];
+    if (!selectedConversationId && firstConversation?.id) setSelectedConversationId(firstConversation.id);
+  }, [conversationsQuery.data, selectedConversationId, setSelectedConversationId]);
+
+  useEffect(() => {
     const unlistenFileDrop = isTauriRuntime()
       ? listen<FileDropPayload>("tauri://file-drop", event => {
         if (Array.isArray(event.payload) && event.payload[0]) ingestMutation.mutate(event.payload[0]);
@@ -322,24 +307,14 @@ export default function App() {
     if (window.confirm(`Delete ${doc.name} from the library?`)) deleteMutation.mutate(doc);
   }
 
-  function importObsidianVault() {
-    if (!obsidianVaultQuery.data?.exists) {
-      setToast(`Obsidian vault not found: ${obsidianVaultQuery.data?.path || "configured path unavailable"}`);
-      return;
-    }
-    obsidianMutation.mutate();
-  }
-
   const right = rightPanel === "settings"
     ? (
       <SettingsPanel
         models={modelsQuery.data?.models || []}
         selectedModel={selectedModel}
         setSelectedModel={setSelectedModel}
-        settings={settingsQuery.data}
         onnxStatus={onnxStatusQuery.data}
         isDownloadingModels={onnxDownloadMutation.isPending || onnxInstallMutation.isPending}
-        updateSettings={(value: RagSettings) => settingsMutation.mutate(value)}
         onDownloadOnnx={(kind) => onnxDownloadMutation.mutate(kind)}
         onBrowseOnnx={browseOnnxFolder}
         onExportMetrics={() => metricsMutation.mutate()}
@@ -423,7 +398,6 @@ export default function App() {
             setStatusFilter={setStatusFilter}
             onImportFolder={importFolder}
             onImportText={importTextFile}
-            onImportVault={importObsidianVault}
             onDelete={removeDocument}
             onReindex={(doc) => reindexMutation.mutate(doc)}
           />

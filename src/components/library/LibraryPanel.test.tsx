@@ -24,7 +24,6 @@ describe("LibraryPanel", () => {
         setStatusFilter={setStatusFilter}
         onImportFolder={vi.fn()}
         onImportText={vi.fn()}
-        onImportVault={vi.fn()}
         onDelete={vi.fn()}
         onReindex={vi.fn()}
       />,

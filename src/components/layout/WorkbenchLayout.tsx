@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode } from "react";
-import { BarChart3, Circle, FileText, ListChecks, Maximize2, MessageSquareText, Minus, MoreHorizontal, SearchCode, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { BarChart3, FileText, ListChecks, Maximize2, MessageSquareText, Minus, MoreHorizontal, SearchCode, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import logoUrl from "../../assets/cephalon.svg";
@@ -17,13 +17,6 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
   const rightPanel = useUiStore(state => state.rightPanel);
   const theme = useUiStore(state => state.theme);
   const setRightPanel = useUiStore(state => state.setRightPanel);
-  const eventStatus = useUiStore(state => state.eventStatus);
-  const liveLabel = eventStatus === "connected" ? "Live" : eventStatus === "offline" ? "Offline" : "Reconnecting";
-  const liveTitle = eventStatus === "connected"
-    ? "Live updates are connected."
-    : eventStatus === "offline"
-      ? "The local event stream is offline; cached data will refresh when the backend returns."
-    : "Connecting to live updates; cached data refreshes periodically while reconnecting.";
   const selectPanel = (panel: Parameters<typeof setRightPanel>[0]) => {
     setRightPanel(panel);
     setPanelMenuOpen(false);
@@ -84,10 +77,6 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
                   </div>
                 )}
               </div>
-              <span className={eventStatus === "connected" ? "status-pill ok" : eventStatus === "offline" ? "status-pill danger" : "status-pill warn"} title={liveTitle}>
-                <Circle size={9} fill="currentColor" />
-                {liveLabel}
-              </span>
             </div>
           </header>
           {center}

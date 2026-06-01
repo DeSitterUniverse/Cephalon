@@ -23,20 +23,16 @@ def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
 
 
 def _settings_for_reasoning_mode(settings: RagSettings, mode: str) -> RagSettings:
-    clean = (mode or "balanced").lower()
-    if clean == "fast":
+    clean = (mode or "medium").lower()
+    if clean in {"low", "fast"}:
         return settings.model_copy(update={
             "top_k": min(settings.top_k, 12),
             "rerank_top_n": min(settings.rerank_top_n, 3),
-            "max_tokens": min(settings.max_tokens, 512),
-            "temperature": min(settings.temperature, 0.35),
         })
-    if clean == "deep":
+    if clean in {"high", "deep"}:
         return settings.model_copy(update={
             "top_k": max(settings.top_k, 28),
             "rerank_top_n": max(settings.rerank_top_n, 6),
-            "max_tokens": max(settings.max_tokens, 1024),
-            "temperature": max(settings.temperature, 0.55),
         })
     return settings
 

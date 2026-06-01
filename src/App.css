@@ -94,7 +94,7 @@ select, option { background: #050505; color: var(--text); }
 .theme-graphite .inline-field,
 .theme-graphite .field input[type="text"],
 .theme-graphite .composer input,
-.theme-graphite .reasoning-select {
+.theme-graphite .scope-select {
   background: #202020;
 }
 .app-titlebar {
@@ -363,6 +363,12 @@ select, option { background: #050505; color: var(--text); }
 .status-pill.ok { color: var(--ok); border-color: rgba(66, 211, 146, 0.45); }
 .status-pill.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.45); }
 .status-pill.danger { color: var(--danger); border-color: rgba(248, 113, 113, 0.5); }
+.status-pill.compact {
+  min-height: 22px;
+  padding: 0 7px;
+  font-size: 0.68rem;
+  border-radius: 6px;
+}
 
 .library, .side-section {
   height: 100%;
@@ -383,6 +389,11 @@ select, option { background: #050505; color: var(--text); }
   letter-spacing: 0.02em;
 }
 .panel-header span { color: var(--muted); font-size: 0.74rem; }
+.library-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 .search-box {
   margin: 10px;
@@ -610,7 +621,7 @@ select, option { background: #050505; color: var(--text); }
 }
 .composer {
   display: grid;
-  grid-template-columns: 108px minmax(0, 1fr) 92px;
+  grid-template-columns: 154px minmax(0, 1fr) 92px;
   gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
@@ -623,7 +634,7 @@ select, option { background: #050505; color: var(--text); }
   border-radius: var(--radius);
   background: var(--panel);
 }
-.reasoning-select {
+.scope-select {
   height: 38px;
   min-width: 0;
   padding: 0 8px;
@@ -631,6 +642,7 @@ select, option { background: #050505; color: var(--text); }
   border-radius: var(--radius);
   background: var(--panel);
   color: var(--text);
+  font-size: 0.78rem;
 }
 .composer button, .action-row button {
   display: inline-flex;

@@ -178,15 +178,7 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
         scores = np.asarray(cached_scores, dtype=float)
     else:
         pairs = [[prompt, _rerank_text(res.get("text", ""))] for res in results]
-        inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
-        ort_inputs = {
-            "input_ids": inputs["input_ids"].astype(np.int64),
-            "attention_mask": inputs["attention_mask"].astype(np.int64),
-        }
-        if "token_type_ids" in inputs:
-            ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
-        raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
-        scores = _reranker_scores(app_state, raw_scores)
+        scores = np.asarray([_score_rerank_pair(app_state, pair) for pair in pairs], dtype=float)
         cache[cache_key] = [float(score) for score in scores]
         cache.move_to_end(cache_key)
         while len(cache) > RERANK_CACHE_LIMIT:
@@ -203,6 +195,23 @@ def _rerank_text(text: str) -> str:
     if len(cleaned) <= RERANK_TEXT_LIMIT:
         return cleaned
     return cleaned[:RERANK_TEXT_LIMIT]
+
+
+def _score_rerank_pair(app_state, pair: list[str]) -> float:
+    inputs = app_state.tokenizer([pair], padding=True, truncation=True, return_tensors="np")
+    accepted_inputs = {item.name for item in app_state.reranker.get_inputs()} if hasattr(app_state.reranker, "get_inputs") else set()
+    ort_inputs = {}
+    if not accepted_inputs or "input_ids" in accepted_inputs:
+        ort_inputs["input_ids"] = inputs["input_ids"].astype(np.int64)
+    if not accepted_inputs or "attention_mask" in accepted_inputs:
+        ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
+    if "token_type_ids" in inputs and (not accepted_inputs or "token_type_ids" in accepted_inputs):
+        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
+    raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
+    scores = _reranker_scores(app_state, raw_scores)
+    if scores.size == 0:
+        raise RuntimeError("Reranker ONNX returned no score for a candidate pair.")
+    return float(scores.reshape(-1)[0])
 
 
 def _rerank_cache_key(prompt: str, results: list[dict]) -> str:

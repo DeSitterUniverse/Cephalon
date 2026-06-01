@@ -22,7 +22,7 @@ describe("api client", () => {
     vi.restoreAllMocks();
   });
 
-  it("sends conversation id and reasoning mode with query streams", async () => {
+  it("sends conversation id and retrieval scope with query streams", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("event: done\ndata: {\"ok\":true}\n\n", { status: 200 }),
     );
@@ -33,7 +33,7 @@ describe("api client", () => {
       [{ role: "user", content: "previous" }],
       settings,
       "conversation-1",
-      "deep",
+      "high",
     );
 
     expect(body).toBeTruthy();
@@ -42,7 +42,7 @@ describe("api client", () => {
       prompt: "summarize this",
       model: "local.gguf",
       conversation_id: "conversation-1",
-      reasoning_mode: "deep",
+      reasoning_mode: "high",
     });
   });
 });

@@ -1,4 +1,4 @@
-import { BookOpen, FileText, FolderPlus, RefreshCw, Search, Tag, Trash2 } from "lucide-react";
+import { Circle, FileText, FolderPlus, RefreshCw, Search, Tag, Trash2 } from "lucide-react";
 import type { Document } from "../../api";
 import { useUiStore } from "../../store";
 
@@ -10,14 +10,20 @@ type Props = {
   setStatusFilter: (value: string) => void;
   onImportFolder: () => void;
   onImportText: () => void;
-  onImportVault: () => void;
   onDelete: (doc: Document) => void;
   onReindex: (doc: Document) => void;
 };
 
-export function LibraryPanel({ documents, search, setSearch, statusFilter, setStatusFilter, onImportFolder, onImportText, onImportVault, onDelete, onReindex }: Props) {
+export function LibraryPanel({ documents, search, setSearch, statusFilter, setStatusFilter, onImportFolder, onImportText, onDelete, onReindex }: Props) {
   const selectedDocumentId = useUiStore(state => state.selectedDocumentId);
   const setSelectedDocumentId = useUiStore(state => state.setSelectedDocumentId);
+  const eventStatus = useUiStore(state => state.eventStatus);
+  const liveLabel = eventStatus === "connected" ? "Live" : eventStatus === "offline" ? "Offline" : "Reconnecting";
+  const liveTitle = eventStatus === "connected"
+    ? "Library updates are connected."
+    : eventStatus === "offline"
+      ? "The local event stream is offline; the library will refresh when the backend returns."
+      : "Connecting to library updates; cached data refreshes periodically while reconnecting.";
 
   const filtered = documents.filter(doc => {
     const query = search.toLowerCase();
@@ -33,13 +39,18 @@ export function LibraryPanel({ documents, search, setSearch, statusFilter, setSt
     <div className="library">
       <div className="panel-header">
         <div>
-          <h2>Library</h2>
+          <div className="library-title-row">
+            <h2>Library</h2>
+            <span className={eventStatus === "connected" ? "status-pill ok compact" : eventStatus === "offline" ? "status-pill danger compact" : "status-pill warn compact"} title={liveTitle}>
+              <Circle size={8} fill="currentColor" />
+              {liveLabel}
+            </span>
+          </div>
           <span>{documents.length} documents</span>
         </div>
         <div className="action-row compact-actions">
           <button className="icon-button" onClick={onImportText} title="Import file as text"><FileText size={16} /></button>
           <button className="icon-button" onClick={onImportFolder} title="Import folder"><FolderPlus size={16} /></button>
-          <button className="icon-button" onClick={onImportVault} title="Import Obsidian vault"><BookOpen size={16} /></button>
         </div>
       </div>
 

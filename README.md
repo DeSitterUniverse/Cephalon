@@ -2,6 +2,7 @@
 
 Cephalon is a local-first desktop RAG workbench for indexing files, asking questions over them and getting cited answers when needed, and running local GGUF chat models through Vulkan-enabled llama.cpp. The app is built for offline use: metadata stays in SQLite, dense vectors stay in LanceDB, embedding/reranking runs through ONNX Runtime, and generation runs through an explicitly loaded local model.
 
+
 ## Features
 
 - Lightweight OLED friendly Tauri v2 desktop app with a default #000000 background and #FFE5CC text. Optional Graphite theme uses a #171717 dark background with #FFFFFF text.
@@ -13,6 +14,7 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking quest
 - Jina ONNX embedder and reranker setup from Settings.
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
+- Low/Medium/High retrieval scope control for narrowing or broadening source review without changing model intelligence.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
 - Retrieval Trace panel for inspecting vector, BM25, fused, reranked, unused, and final context candidates.
 - Index Health panel for chunk counts, stale state, duplicate rates, retrieval counts, and embedding distribution.
@@ -38,7 +40,6 @@ Default paths:
 ~/cephalon-data
 ~/cephalon-data/models
 ~/Documents/Cephalon Metrics
-~/Documents/Obsidian Vault
 ```
 
 Expected model layout:
@@ -158,7 +159,6 @@ Common runtime variables:
 $env:CEPHALON_DATA_DIR="C:\path\to\data"
 $env:CEPHALON_MODEL_DIR="C:\path\to\models"
 $env:CEPHALON_METRICS_DIR="$HOME\Documents\Cephalon Metrics"
-$env:CEPHALON_OBSIDIAN_VAULT_DIR="$HOME\Documents\Obsidian Vault"
 $env:CEPHALON_HOST="127.0.0.1"
 $env:CEPHALON_PORT="8765"
 $env:CEPHALON_LLAMA_VERBOSE="0"
@@ -187,9 +187,7 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `POST /models/onnx/download`: download configured prepared ONNX artifacts into the model directory.
 - `POST /models/onnx/install-local`: install a local exported ONNX folder for the embedder or reranker.
 - `GET/PUT /settings`: RAG and generation defaults.
-- `POST /ingest`: queue file/folder ingestion.
-- `GET /vaults/obsidian`: configured Obsidian vault path and existence check.
-- `POST /vaults/obsidian/ingest`: queue the configured Obsidian vault, skipping `.obsidian` and other internal folders.
+- `POST /ingest`: queue file/folder ingestion, including note vaults imported as normal folders.
 - `GET /jobs`: recent ingestion jobs.
 - `GET /retrieval/traces`: recent retrieval traces.
 - `GET /retrieval/traces/{query_id}`: full retrieval trace with candidate stages, scores, context, and latency.

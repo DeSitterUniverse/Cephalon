@@ -43,7 +43,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [reasoningMode, setReasoningMode] = useState("balanced");
+  const [retrievalScope, setRetrievalScope] = useState("medium");
   const setSelectedSources = useUiStore(state => state.setSelectedSources);
   const setSelectedSupport = useUiStore(state => state.setSelectedSupport);
   const endRef = useRef<HTMLDivElement>(null);
@@ -77,7 +77,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
     setMessages(prev => [...prev, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "" }]);
 
     try {
-      const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, reasoningMode);
+      const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, retrievalScope);
       const completedConversationId = await consumeQueryStream(body, setSelectedSources, chunk => {
         setMessages(prev => {
           const next = [...prev];
@@ -161,15 +161,16 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
       </div>
       <form className="composer" onSubmit={handleSend}>
         <select
-          className="reasoning-select"
-          value={reasoningMode}
-          onChange={event => setReasoningMode(event.target.value)}
+          className="scope-select"
+          value={retrievalScope}
+          onChange={event => setRetrievalScope(event.target.value)}
           disabled={isTyping}
-          title="Reasoning depth"
+          title="Retrieval scope"
+          aria-label="Retrieval scope"
         >
-          <option value="fast">Top 12 / Rerank 3 / 512</option>
-          <option value="balanced">Current settings</option>
-          <option value="deep">Top 28 / Rerank 6 / 1024</option>
+          <option value="low">Low retrieval</option>
+          <option value="medium">Medium retrieval</option>
+          <option value="high">High retrieval</option>
         </select>
         <input
           value={input}

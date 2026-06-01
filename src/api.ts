@@ -446,7 +446,7 @@ export async function queryModel(
   history: Message[],
   settings?: RagSettings,
   conversation_id?: string | null,
-  reasoning_mode = "balanced",
+  reasoning_mode = "medium",
 ): Promise<ReadableStream<Uint8Array>> {
   const res = await fetch(`${API_BASE_URL}/query`, {
     method: "POST",

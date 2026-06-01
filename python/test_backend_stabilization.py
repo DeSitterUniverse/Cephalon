@@ -1,14 +1,17 @@
 import asyncio
 import os
 import sqlite3
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 from fastapi import HTTPException
 
 from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
 from cephalon_core.schemas import RagSettings
+from cephalon_core.routes import _settings_for_reasoning_mode
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
@@ -99,6 +102,20 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.port == 9999
     assert settings.max_tokens == 64
     assert settings.cors_origins == ["http://localhost:1420", "http://tauri.localhost"]
+
+
+def test_scope_modes_change_retrieval_not_model_style():
+    base = RagSettings(top_k=20, rerank_top_n=4, max_tokens=777, temperature=0.72)
+
+    low = _settings_for_reasoning_mode(base, "low")
+    medium = _settings_for_reasoning_mode(base, "medium")
+    high = _settings_for_reasoning_mode(base, "high")
+
+    assert (low.top_k, low.rerank_top_n) == (12, 3)
+    assert (medium.top_k, medium.rerank_top_n) == (20, 4)
+    assert (high.top_k, high.rerank_top_n) == (28, 6)
+    assert low.temperature == medium.temperature == high.temperature == 0.72
+    assert low.max_tokens == medium.max_tokens == high.max_tokens == 777
 
 
 def test_validate_model_filename_blocks_paths(tmp_path):
@@ -427,6 +444,47 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert sources[0].fusion_score is not None
     assert "sqlite_fts5" in meta["search_modes"][0]
     assert "Cephalon retrieval fixture" in context
+
+
+def test_reranker_scores_fixed_batch_onnx_one_pair_at_a_time():
+    class BatchOneTokenizer:
+        def __call__(self, pairs, **_kwargs):
+            assert len(pairs) == 1
+            return {
+                "input_ids": np.ones((1, 8), dtype=np.int64),
+                "attention_mask": np.ones((1, 8), dtype=np.int64),
+            }
+
+    class BatchOneSession:
+        def __init__(self):
+            self.calls = 0
+
+        def get_inputs(self):
+            return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
+
+        def run(self, _output_names, ort_inputs):
+            assert ort_inputs["input_ids"].shape[0] == 1
+            self.calls += 1
+            return [np.asarray([[2.0 + self.calls, 0.5]], dtype=np.float32)]
+
+    session = BatchOneSession()
+    state = SimpleNamespace(
+        tokenizer=BatchOneTokenizer(),
+        reranker=session,
+        reranker_score_mode="logit_margin_0_minus_1",
+        rerank_cache=OrderedDict(),
+    )
+    results = [
+        {"id": "a", "text": "first candidate", "score": 0.0},
+        {"id": "b", "text": "second candidate", "score": 0.0},
+        {"id": "c", "text": "third candidate", "score": 0.0},
+    ]
+
+    ranked = retrieval.rerank(state, "query", results)
+
+    assert session.calls == 3
+    assert all("rerank_score" in item for item in ranked)
+    assert ranked[0]["rerank_score"] > ranked[-1]["rerank_score"]
 
 
 def test_context_compressor_keeps_relevant_cited_sentences():

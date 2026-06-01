@@ -35,6 +35,8 @@ __pycache__/
 build/
 *.spec
 .pytest-tmp*/
+.smoke-data*/
+.shot-data*/
 .codex-working-context.md
 .codex-changelog*.html
 

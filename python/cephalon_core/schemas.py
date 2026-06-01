@@ -94,7 +94,7 @@ class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
     conversation_id: str | None = None
-    reasoning_mode: str = "balanced"
+    reasoning_mode: str = "medium"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None
 

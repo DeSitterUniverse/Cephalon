@@ -74,7 +74,6 @@ Tauri desktop shell
       <tr><td><code>~/cephalon-data</code></td><td>Primary local app data</td><td>SQLite database, LanceDB directory, temporary downloads, and model directory live here by default.</td></tr>
       <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td>Chat GGUF files plus <code>embedder</code> and <code>reranker</code> ONNX Runtime folders.</td></tr>
       <tr><td><code>~/Documents/Cephalon Metrics</code></td><td>Analysis exports</td><td>Numeric-first JSONL/CSV files intended for spreadsheet or data-tool ingestion.</td></tr>
-      <tr><td><code>~/Documents/Obsidian Vault</code></td><td>Optional import source</td><td>The vault path is configurable and imported through the normal ingestion job path.</td></tr>
     </tbody>
   </table>
 
@@ -103,7 +102,7 @@ Tauri desktop shell
 
   <h2>Ingestion Pipeline</h2>
   <div class="flow">
-    <div class="step"><strong>1. Queue.</strong> Files, folders, and the configured Obsidian vault enter the durable job queue. The UI receives job/document updates through SSE.</div>
+    <div class="step"><strong>1. Queue.</strong> Files and folders enter the durable job queue. Note vaults are imported through the same folder path. The UI receives job/document updates through SSE.</div>
     <div class="step"><strong>2. Extract.</strong> Known formats use format-specific parsers. Unknown text-like files are imported with encoding sniffing and binary guards. Extraction warnings and failures are stored instead of disappearing.</div>
     <div class="step"><strong>3. Fingerprint.</strong> Documents and chunks receive content hashes, parser version, chunking profile, embedding model id, embedding dimension, and timestamps for stale detection.</div>
     <div class="step"><strong>4. Chunk.</strong> The backend creates parent chunks for generation context, smaller child chunks for precise retrieval, and summary nodes for high-level steering.</div>
@@ -161,7 +160,7 @@ question
       <tr><td>Library</td><td><code>/documents</code></td><td>Search, filter, import, reindex, delete, and select documents.</td></tr>
       <tr><td>Chat</td><td><code>/query</code>, conversations APIs</td><td>Ask questions, stream answers, save chat history, and attach per-message sources.</td></tr>
       <tr><td>Sources</td><td>query stream/message sources</td><td>Inspect source scores, snippets, ranks, and document references.</td></tr>
-      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, GGUF selection, ONNX engine setup, generation/retrieval controls, metrics export.</td></tr>
+      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, GGUF selection, ONNX engine setup, and metrics export. Retrieval scope is selected from the chat composer.</td></tr>
       <tr><td>Diagnostics</td><td>trace, health, eval, support APIs</td><td>Debug retrieval quality and index state without leaving the app.</td></tr>
     </tbody>
   </table>

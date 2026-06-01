@@ -1,46 +1,38 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SettingsPanel } from "./SettingsPanel";
-import type { RagSettings } from "../../api";
-
-const settings: RagSettings = {
-  top_k: 20,
-  rerank_top_n: 3,
-  max_tokens: 512,
-  temperature: 0.4,
-  chunk_size: 1500,
-  chunk_overlap: 150,
-  context_tokens: 32768,
-  full_context: false,
-  trace_persistence: true,
-  no_answer_min_confidence: 0.35,
-  no_answer_min_rerank_score: 0.15,
-  no_answer_min_vector_score: 0.05,
-  no_answer_min_source_count: 1,
-};
 
 describe("SettingsPanel", () => {
-  it("updates selected model and retrieval settings", async () => {
+  it("keeps settings focused on model setup and appearance", async () => {
     const user = userEvent.setup();
     const setSelectedModel = vi.fn();
-    const updateSettings = vi.fn();
 
     render(
       <SettingsPanel
         models={["small.gguf", "large.gguf"]}
         selectedModel="small.gguf"
         setSelectedModel={setSelectedModel}
-        settings={settings}
-        updateSettings={updateSettings}
+        onnxStatus={{
+          model_dir: "C:\\models",
+          engines_ready: false,
+          download_sources: {
+            embedder: { repo_id: "example/embedder" },
+            reranker: { repo_id: "example/reranker" },
+          },
+          embedder: { kind: "embedder", ok: true, path: "C:\\models\\embedder", missing: [], runtime_loaded: false },
+          reranker: { kind: "reranker", ok: true, path: "C:\\models\\reranker", missing: [], runtime_loaded: false },
+        }}
       />,
     );
 
     await user.selectOptions(screen.getByLabelText("Model"), "large.gguf");
     expect(setSelectedModel).toHaveBeenCalledWith("large.gguf");
-
-    fireEvent.change(screen.getByDisplayValue("512"), { target: { value: "1024" } });
-    expect(updateSettings).toHaveBeenCalledWith({ ...settings, max_tokens: 1024 });
-    expect(screen.getByText("Top K")).toBeInTheDocument();
+    expect(screen.getByText("Appearance")).toBeInTheDocument();
+    expect(screen.getByText("Embedding and reranking")).toBeInTheDocument();
+    expect(screen.getByText("C:\\models\\embedder")).toBeInTheDocument();
+    expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Temperature")).not.toBeInTheDocument();
+    expect(screen.queryByText("Top K")).not.toBeInTheDocument();
   });
 });

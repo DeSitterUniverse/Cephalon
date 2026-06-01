@@ -84,10 +84,12 @@ describe("ChatPanel", () => {
     expect(useUiStore.getState().rightPanel).toBe("sources");
   });
 
-  it("shows reasoning mode control next to the composer", () => {
+  it("shows retrieval scope control next to the composer", () => {
     render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} />);
 
-    expect(screen.getByTitle("Reasoning depth")).toHaveValue("balanced");
+    expect(screen.getByLabelText("Retrieval scope")).toHaveValue("medium");
+    expect(screen.getByText("Low retrieval")).toBeInTheDocument();
+    expect(screen.getByText("High retrieval")).toBeInTheDocument();
   });
 
   it("keeps the first streamed answer visible after the conversation event", async () => {
