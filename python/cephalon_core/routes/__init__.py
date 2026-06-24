@@ -1,16 +1,22 @@
+import asyncio
 import json
 import os
 import time
+from collections.abc import Iterator
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from . import storage
-from .schemas import DocumentUpdateRequest, EvalRunRequest, IngestRequest, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings, TagRequest
-from .services import evaluation, generation, ingestion, metrics, models, observability, onnx_setup, retrieval, support
-from .validators import normalize_existing_path, validate_document_id, validate_tag
+from .. import storage
+from ..schemas import EvalRunRequest, IngestRequest, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
+from ..services import evaluation, generation, metrics, models, observability, onnx_setup, retrieval, support
+from ..validators import normalize_existing_path
+from .conversations import router as conversations_router
+from .documents import delete_document, get_documents, router as documents_router
 
 
 router = APIRouter()
+router.include_router(documents_router)
+router.include_router(conversations_router)
 
 
 def state(request: Request):
@@ -22,8 +28,8 @@ def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
         raise HTTPException(status_code=409, detail="Load the selected GGUF model before querying.")
 
 
-def _settings_for_reasoning_mode(settings: RagSettings, mode: str) -> RagSettings:
-    clean = (mode or "medium").lower()
+def _settings_for_retrieval_scope(settings: RagSettings, scope: str) -> RagSettings:
+    clean = (scope or "medium").lower()
     if clean in {"low", "fast"}:
         return settings.model_copy(update={
             "top_k": min(settings.top_k, 12),
@@ -41,6 +47,8 @@ def _settings_for_reasoning_mode(settings: RagSettings, mode: str) -> RagSetting
 def health(request: Request):
     app_state = state(request)
     return {
+        "service": "cephalon",
+        "api_version": 1,
         "status": "degraded" if app_state.startup_error else "ok",
         "startup_error": app_state.startup_error,
         "engines_ready": app_state.startup_error is None,
@@ -168,96 +176,6 @@ async def put_settings(request: Request, rag_settings: RagSettings):
     return saved
 
 
-@router.get("/documents")
-def get_documents(request: Request):
-    rows = storage.fetchall(
-        state(request).sqlite,
-        "SELECT * FROM documents WHERE type = 'file' ORDER BY ingested_at DESC",
-    )
-    return {"documents": [storage.document_payload(state(request).sqlite, row) for row in rows]}
-
-
-@router.get("/documents/{doc_id}")
-def get_document(request: Request, doc_id: str):
-    doc_id = validate_document_id(doc_id)
-    row = storage.fetchone(state(request).sqlite, "SELECT * FROM documents WHERE id = ? AND type = 'file'", (doc_id,))
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    chunks = storage.fetchall(state(request).sqlite, "SELECT * FROM chunks WHERE doc_id = ? ORDER BY chunk_index", (doc_id,))
-    payload = storage.document_payload(state(request).sqlite, row)
-    payload["chunk_preview"] = [
-        {
-            "id": c["id"],
-            "index": c["chunk_index"],
-            "text": c["text"][:500],
-            "block_type": c["block_type"] if "block_type" in c.keys() else None,
-            "token_count": c["token_count"] if "token_count" in c.keys() else None,
-            "char_count": c["char_count"] if "char_count" in c.keys() else None,
-            "chunking_profile": c["chunking_profile"] if "chunking_profile" in c.keys() else None,
-            "embedding_status": c["embedding_status"] if "embedding_status" in c.keys() else None,
-        }
-        for c in chunks[:20]
-    ]
-    return payload
-
-
-@router.patch("/documents/{doc_id}")
-async def patch_document(request: Request, doc_id: str, body: DocumentUpdateRequest):
-    doc_id = validate_document_id(doc_id)
-    if body.display_name is None or not body.display_name.strip():
-        raise HTTPException(status_code=400, detail="display_name is required.")
-    storage.execute(state(request).sqlite, "UPDATE documents SET display_name = ? WHERE id = ? AND type = 'file'", (body.display_name.strip(), doc_id))
-    await state(request).event_bus.publish("document", {"id": doc_id, "status": "updated"})
-    return get_document(request, doc_id)
-
-
-@router.post("/documents/{doc_id}/tags")
-async def add_tag(request: Request, doc_id: str, body: TagRequest):
-    doc_id = validate_document_id(doc_id)
-    tag = validate_tag(body.tag)
-    if not storage.fetchone(state(request).sqlite, "SELECT id FROM documents WHERE id = ? AND type = 'file'", (doc_id,)):
-        raise HTTPException(status_code=404, detail="Document not found.")
-    storage.execute(state(request).sqlite, "INSERT OR IGNORE INTO document_tags (doc_id, tag) VALUES (?, ?)", (doc_id, tag))
-    await state(request).event_bus.publish("document", {"id": doc_id, "status": "tagged", "tag": tag})
-    return {"status": "success", "tag": tag}
-
-
-@router.delete("/documents/{doc_id}/tags/{tag}")
-async def delete_tag(request: Request, doc_id: str, tag: str):
-    doc_id = validate_document_id(doc_id)
-    tag = validate_tag(tag)
-    storage.execute(state(request).sqlite, "DELETE FROM document_tags WHERE doc_id = ? AND tag = ?", (doc_id, tag))
-    await state(request).event_bus.publish("document", {"id": doc_id, "status": "untagged", "tag": tag})
-    return {"status": "success"}
-
-
-@router.post("/documents/{doc_id}/reindex")
-async def reindex_document(request: Request, doc_id: str):
-    doc_id = validate_document_id(doc_id)
-    row = storage.fetchone(state(request).sqlite, "SELECT path, extraction_mode FROM documents WHERE id = ? AND type = 'file'", (doc_id,))
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    storage.execute(state(request).sqlite, "UPDATE documents SET status = 'queued', last_error = NULL WHERE id = ?", (doc_id,))
-    job = await state(request).job_manager.enqueue_ingest(
-        row["path"],
-        kind="reindex",
-        target_doc_id=doc_id,
-        force_text=row["extraction_mode"] == "text",
-    )
-    return {"job_id": job["id"], "status": job["status"], "message": "Document queued for reindexing."}
-
-
-@router.delete("/documents/{doc_id}")
-async def delete_document(request: Request, doc_id: str):
-    doc_id = validate_document_id(doc_id)
-    if not storage.fetchone(state(request).sqlite, "SELECT id FROM documents WHERE id = ? AND type = 'file'", (doc_id,)):
-        raise HTTPException(status_code=404, detail="Document not found.")
-    ingestion.delete_document_vectors(state(request), doc_id)
-    ingestion.delete_document_rows(state(request), doc_id)
-    await state(request).event_bus.publish("document", {"id": doc_id, "status": "deleted"})
-    return {"status": "success"}
-
-
 @router.post("/ingest")
 async def ingest_endpoint(request: Request, req: IngestRequest):
     target_path = normalize_existing_path(req.path)
@@ -268,6 +186,24 @@ async def ingest_endpoint(request: Request, req: IngestRequest):
 @router.get("/jobs")
 def list_jobs(request: Request):
     return {"jobs": state(request).job_manager.list_jobs()}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(request: Request, job_id: str):
+    try:
+        return await state(request).job_manager.cancel_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job not found.") from exc
+
+
+@router.post("/jobs/{job_id}/retry")
+async def retry_job(request: Request, job_id: str):
+    try:
+        return await state(request).job_manager.retry_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/retrieval/traces")
@@ -345,40 +281,6 @@ def save_feedback(request: Request, body: dict):
     return {"status": "success"}
 
 
-@router.get("/conversations")
-def list_conversations(request: Request):
-    return {"conversations": storage.list_conversations(state(request).sqlite)}
-
-
-@router.post("/conversations")
-def create_conversation(request: Request):
-    return storage.create_conversation(state(request).sqlite)
-
-
-@router.get("/conversations/{conversation_id}")
-def get_conversation(request: Request, conversation_id: str):
-    payload = storage.get_conversation(state(request).sqlite, conversation_id)
-    if not payload:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return payload
-
-
-@router.patch("/conversations/{conversation_id}")
-async def rename_conversation(request: Request, conversation_id: str, body: dict):
-    payload = storage.rename_conversation(state(request).sqlite, conversation_id, str(body.get("title", "")))
-    if not payload:
-        raise HTTPException(status_code=400, detail="Conversation title is required.")
-    await state(request).event_bus.publish("conversation", {"id": conversation_id, "status": "renamed"})
-    return payload
-
-
-@router.delete("/conversations/{conversation_id}")
-async def delete_conversation(request: Request, conversation_id: str):
-    storage.archive_conversation(state(request).sqlite, conversation_id)
-    await state(request).event_bus.publish("conversation", {"id": conversation_id, "status": "deleted"})
-    return {"status": "success"}
-
-
 @router.get("/events")
 async def events(request: Request):
     return StreamingResponse(state(request).event_bus.stream(), media_type="text/event-stream")
@@ -404,12 +306,13 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     if not req.model.strip():
         raise HTTPException(status_code=400, detail="Select a local GGUF model before querying.")
 
-    rag_settings = _settings_for_reasoning_mode(req.settings or storage.get_rag_settings(app_state.sqlite), req.reasoning_mode)
+    rag_settings = _settings_for_retrieval_scope(req.settings or storage.get_rag_settings(app_state.sqlite), req.retrieval_scope)
     _ensure_query_model_loaded(app_state, req.model)
 
     query_vector = await retrieval.get_embedding(app_state, req.prompt)
     context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
-    query_meta["reasoning_mode"] = req.reasoning_mode
+    query_meta["retrieval_scope"] = req.retrieval_scope
+    query_meta["response_effort"] = req.response_effort
     if rag_settings.trace_persistence and query_meta.get("trace"):
         storage.save_retrieval_trace(app_state.sqlite, query_meta["trace"])
     conversation_id = req.conversation_id
@@ -422,10 +325,14 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         "user",
         req.prompt,
         model=req.model,
-        settings={**rag_settings.model_dump(), "reasoning_mode": req.reasoning_mode},
+        settings={
+            **rag_settings.model_dump(),
+            "retrieval_scope": req.retrieval_scope,
+            "response_effort": req.response_effort,
+        },
     )
 
-    def response_stream():
+    async def response_stream():
         answer_parts: list[str] = []
         for subquery in query_meta["subqueries"]:
             yield _sse("subquery", subquery)
@@ -435,9 +342,23 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         yield _sse("answer_meta", {key: value for key, value in query_meta.items() if key not in {"subqueries", "trace"}})
         try:
             generation_started = time.perf_counter()
-            for token in generation.stream_llama(app_state, req.prompt, context, req.history, rag_settings, query_meta):
-                answer_parts.append(token)
-                yield _sse("token", {"text": token})
+            generation_events = generation.stream_response_events(
+                app_state,
+                req.prompt,
+                context,
+                req.history,
+                rag_settings,
+                query_meta,
+                response_effort=req.response_effort,
+            )
+            async for event_type, value in _cancel_on_disconnect(request, generation_events):
+                if event_type == "phase":
+                    yield _sse("phase", {"phase": value})
+                else:
+                    answer_parts.append(value)
+                    yield _sse("token", {"text": value})
+            if await request.is_disconnected():
+                return
             answer_text = "".join(answer_parts)
             generation_ms = round((time.perf_counter() - generation_started) * 1000, 2)
             quality = metrics.estimate_answer_quality(req.prompt, answer_text, context)
@@ -461,7 +382,11 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                 "assistant",
                 answer_text,
                 model=req.model,
-                settings={**rag_settings.model_dump(), "reasoning_mode": req.reasoning_mode},
+                settings={
+                    **rag_settings.model_dump(),
+                    "retrieval_scope": req.retrieval_scope,
+                    "response_effort": req.response_effort,
+                },
                 meta=query_meta,
             )
             storage.save_message_sources(app_state.sqlite, assistant_message["id"], [source.model_dump() for source in sources])
@@ -478,6 +403,8 @@ async def chat_and_remember(request: Request, req: QueryRequest):
             })
             yield _sse("message", {"conversation_id": conversation_id, "assistant_message_id": assistant_message["id"]})
             yield _sse("done", {"ok": True})
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             yield _sse("error", {"message": str(exc)})
 
@@ -486,3 +413,26 @@ async def chat_and_remember(request: Request, req: QueryRequest):
 
 def _sse(event_type: str, payload: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
+_END_OF_EVENTS = object()
+
+
+async def _cancel_on_disconnect(request: Request, events: Iterator[tuple[str, str]]):
+    try:
+        while not await request.is_disconnected():
+            event = await asyncio.to_thread(_next_event, events)
+            if event is _END_OF_EVENTS:
+                return
+            yield event
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
+
+
+def _next_event(events: Iterator[tuple[str, str]]):
+    try:
+        return next(events)
+    except StopIteration:
+        return _END_OF_EVENTS

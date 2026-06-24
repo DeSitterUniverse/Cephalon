@@ -1,12 +1,15 @@
+import asyncio
 import os
 import re
 import time
+import uuid
+from collections.abc import Awaitable, Callable
 
 from .. import storage
 from ..schemas import RagSettings
 from . import documents
 from . import observability
-from .retrieval import ensure_vector_table, get_embedding, vector_table_name
+from .retrieval import ensure_vector_table, get_embedding, get_embeddings, vector_table_name
 
 PARENT_TARGET_TOKENS = 520
 PARENT_MAX_TOKENS = 650
@@ -16,22 +19,34 @@ PARSER_VERSION = "cephalon-basic-2026-05"
 CHUNKING_PROFILE = "semantic_parent_child_v1"
 
 
-async def process_single_file(app_state, file_path: str, rag_settings: RagSettings, *, force_text: bool = False, existing_doc_id: str | None = None) -> dict:
+ProgressCallback = Callable[[str, int], Awaitable[None]]
+
+
+async def process_single_file(
+    app_state,
+    file_path: str,
+    rag_settings: RagSettings,
+    *,
+    force_text: bool = False,
+    existing_doc_id: str | None = None,
+    progress: ProgressCallback | None = None,
+) -> dict:
     if not os.path.isfile(file_path):
         return {"status": "failed", "path": file_path, "error": "Path is not a file."}
     if not documents.collect_supported_files(file_path, force_text=force_text):
         return {"status": "failed", "path": file_path, "error": "Unsupported file type."}
 
-    doc_id = None
+    doc_id = existing_doc_id or str(uuid.uuid4())
+    persistence_started = False
     try:
-        content_hash = documents.get_file_hash(file_path)
+        content_hash = await asyncio.to_thread(documents.get_file_hash, file_path)
         existing = documents.find_existing_doc_by_hash(app_state.sqlite, content_hash)
         if existing and existing_doc_id != existing["id"]:
             return {"status": "skipped", "path": file_path, "doc_id": existing["id"], "reason": "duplicate"}
 
-        raw_text, extraction_mode = documents.extract_text(file_path, force_text=force_text)
+        await _report_progress(progress, "extracting", 10)
+        raw_text, extraction_mode = await asyncio.to_thread(documents.extract_text, file_path, force_text=force_text)
         metadata = storage.active_embedding_metadata(app_state)
-        doc_id = documents.register_ingesting_document(app_state.sqlite, file_path, content_hash, extraction_mode, existing_doc_id, metadata)
         chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, {
             "parent_target_tokens": PARENT_TARGET_TOKENS,
             "parent_max_tokens": PARENT_MAX_TOKENS,
@@ -39,60 +54,31 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
             "child_max_tokens": CHILD_MAX_TOKENS,
         })
         text_hash = observability.text_hash(raw_text)
-        storage.execute(
-            app_state.sqlite,
-            """
-            UPDATE documents
-            SET text_hash = ?, parser_version = ?, chunking_profile = ?,
-                chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = NULL
-            WHERE id = ?
-            """,
-            (
-                text_hash,
-                PARSER_VERSION,
-                CHUNKING_PROFILE,
-                chunking_hash,
-                f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
-                doc_id,
-            ),
-        )
-        storage.delete_document_fts(app_state.sqlite, doc_id)
-        storage.delete_document_hierarchy(app_state.sqlite, doc_id)
-        storage.execute(app_state.sqlite, "DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         if not raw_text.strip():
             raise ValueError("No extractable text found.")
 
+        await _report_progress(progress, "chunking", 35)
         parents = build_parent_chunks(raw_text)
         if not parents:
             raise ValueError("No text chunks produced.")
 
         lance_data = []
+        vector_texts = []
+        parent_rows = []
+        summary_rows = []
+        chunk_rows = []
+        fts_rows = []
         child_count = 0
         now = int(time.time())
         for parent_index, parent_text in enumerate(parents):
             parent_id = f"{doc_id}_p{parent_index}"
             summary = summarize_parent(parent_text)
             summary_id = f"{parent_id}_s"
-            storage.execute(
-                app_state.sqlite,
-                """
-                INSERT INTO parent_chunks (id, doc_id, parent_index, text, summary, token_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (parent_id, doc_id, parent_index, parent_text, summary, estimate_tokens(parent_text), now),
-            )
-            storage.execute(
-                app_state.sqlite,
-                """
-                INSERT INTO summary_nodes (id, doc_id, parent_id, chunk_index, summary, token_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (summary_id, doc_id, parent_id, parent_index, summary, estimate_tokens(summary), now),
-            )
+            parent_rows.append((parent_id, doc_id, parent_index, parent_text, summary, estimate_tokens(parent_text), now))
+            summary_rows.append((summary_id, doc_id, parent_id, parent_index, summary, estimate_tokens(summary), now))
 
-            summary_vector = await get_embedding(app_state, summary)
+            vector_texts.append(summary)
             lance_data.append({
-                "vector": summary_vector,
                 "id": summary_id,
                 "doc_id": doc_id,
                 "text": summary,
@@ -106,48 +92,35 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
             child_chunks = await build_semantic_child_chunks(app_state, parent_text)
             for child_text in child_chunks:
                 chunk_id = f"{doc_id}_{child_count}"
-                vector = await get_embedding(app_state, child_text)
                 token_count = estimate_tokens(child_text)
                 child_hash = observability.text_hash(child_text)
                 contextual_text = contextualize_chunk(child_text, os.path.basename(file_path), None, "paragraph")
-                storage.execute(
-                    app_state.sqlite,
-                    """
-                    INSERT INTO chunks (
-                        id, doc_id, chunk_index, text, parent_id, summary_id, token_count,
-                        semantic_role, chunk_length, embedding_model_id, embedding_dim,
-                        block_type, char_count, text_hash, raw_text_hash, contextual_text_hash,
-                        chunking_profile, chunking_config_hash, parser_version, embedded_at, embedding_status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        chunk_id,
-                        doc_id,
-                        child_count,
-                        child_text,
-                        parent_id,
-                        summary_id,
-                        token_count,
-                        "child",
-                        len(child_text),
-                        metadata["embedding_model_id"],
-                        metadata["embedding_dim"],
-                        "paragraph",
-                        len(child_text),
-                        child_hash,
-                        child_hash,
-                        observability.text_hash(contextual_text),
-                        CHUNKING_PROFILE,
-                        chunking_hash,
-                        PARSER_VERSION,
-                        now,
-                        "embedded",
-                    ),
-                )
-                storage.upsert_chunk_fts(app_state.sqlite, chunk_id, doc_id, child_text)
+                chunk_rows.append((
+                    chunk_id,
+                    doc_id,
+                    child_count,
+                    child_text,
+                    parent_id,
+                    summary_id,
+                    token_count,
+                    "child",
+                    len(child_text),
+                    metadata["embedding_model_id"],
+                    metadata["embedding_dim"],
+                    "paragraph",
+                    len(child_text),
+                    child_hash,
+                    child_hash,
+                    observability.text_hash(contextual_text),
+                    CHUNKING_PROFILE,
+                    chunking_hash,
+                    PARSER_VERSION,
+                    now,
+                    "embedded",
+                ))
+                fts_rows.append((chunk_id, doc_id, child_text))
+                vector_texts.append(child_text)
                 lance_data.append({
-                    "vector": vector,
                     "id": chunk_id,
                     "doc_id": doc_id,
                     "text": child_text,
@@ -162,14 +135,164 @@ async def process_single_file(app_state, file_path: str, rag_settings: RagSettin
         if child_count == 0:
             raise ValueError("No text chunks produced.")
 
-        ensure_vector_table(app_state, lance_data)
+        await _report_progress(progress, "embedding", 65)
+        vectors = await _embed_many(app_state, vector_texts)
+        for row, vector in zip(lance_data, vectors, strict=True):
+            row["vector"] = vector
+
+        await _report_progress(progress, "persisting", 90)
+        previous_vectors = None
+        if existing_doc_id:
+            previous_vectors = await asyncio.to_thread(_replace_document_vectors, app_state, doc_id, lance_data)
+        else:
+            await asyncio.to_thread(ensure_vector_table, app_state, lance_data)
+
+        persistence_started = True
+        try:
+            documents.register_ingesting_document(app_state.sqlite, file_path, content_hash, extraction_mode, doc_id, metadata)
+            _replace_document_rows(
+                app_state.sqlite,
+                doc_id,
+                parent_rows,
+                summary_rows,
+                chunk_rows,
+                fts_rows,
+                text_hash=text_hash,
+                chunking_hash=chunking_hash,
+                embedding_config_hash=f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
+            )
+        except Exception:
+            if existing_doc_id:
+                await asyncio.to_thread(_restore_document_vectors, app_state, doc_id, previous_vectors or [])
+            else:
+                await asyncio.to_thread(delete_document_vectors, app_state, doc_id)
+            raise
 
         documents.mark_document_ready(app_state.sqlite, doc_id, child_count)
+        await _report_progress(progress, "complete", 100)
         return {"status": "ready", "path": file_path, "doc_id": doc_id, "chunks": child_count, "extraction_mode": extraction_mode}
     except Exception as exc:
-        if doc_id:
+        if existing_doc_id:
+            previous_count = storage.fetchone(app_state.sqlite, "SELECT COUNT(*) AS count FROM chunks WHERE doc_id = ?", (doc_id,))
+            storage.execute(
+                app_state.sqlite,
+                "UPDATE documents SET status = 'ready', chunk_count = ?, last_error = ? WHERE id = ?",
+                (previous_count["count"] if previous_count else 0, str(exc), doc_id),
+            )
+        elif persistence_started:
             documents.mark_document_failed(app_state.sqlite, doc_id, str(exc))
         return {"status": "failed", "path": file_path, "doc_id": doc_id, "error": str(exc)}
+
+
+def _replace_document_rows(
+    sqlite_conn,
+    doc_id: str,
+    parent_rows: list[tuple],
+    summary_rows: list[tuple],
+    chunk_rows: list[tuple],
+    fts_rows: list[tuple],
+    *,
+    text_hash: str,
+    chunking_hash: str,
+    embedding_config_hash: str,
+) -> None:
+    with storage.SQLITE_LOCK:
+        cursor = sqlite_conn.cursor()
+        try:
+            cursor.execute("BEGIN")
+            cursor.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM summary_nodes WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
+            cursor.executemany(
+                """
+                INSERT INTO parent_chunks (id, doc_id, parent_index, text, summary, token_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                parent_rows,
+            )
+            cursor.executemany(
+                """
+                INSERT INTO summary_nodes (id, doc_id, parent_id, chunk_index, summary, token_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                summary_rows,
+            )
+            cursor.executemany(
+                """
+                INSERT INTO chunks (
+                    id, doc_id, chunk_index, text, parent_id, summary_id, token_count,
+                    semantic_role, chunk_length, embedding_model_id, embedding_dim,
+                    block_type, char_count, text_hash, raw_text_hash, contextual_text_hash,
+                    chunking_profile, chunking_config_hash, parser_version, embedded_at, embedding_status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                chunk_rows,
+            )
+            cursor.executemany(
+                "INSERT INTO chunks_fts (chunk_id, doc_id, text) VALUES (?, ?, ?)",
+                fts_rows,
+            )
+            cursor.execute(
+                """
+                UPDATE documents
+                SET text_hash = ?, parser_version = ?, chunking_profile = ?,
+                    chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = NULL
+                WHERE id = ?
+                """,
+                (text_hash, PARSER_VERSION, CHUNKING_PROFILE, chunking_hash, embedding_config_hash, doc_id),
+            )
+            sqlite_conn.commit()
+        except Exception:
+            sqlite_conn.rollback()
+            raise
+
+
+async def _embed_many(app_state, texts: list[str]) -> list[list[float]]:
+    if getattr(app_state, "embedder", None) is None:
+        return [await get_embedding(app_state, text) for text in texts]
+    return await get_embeddings(app_state, texts)
+
+
+async def _report_progress(progress: ProgressCallback | None, stage: str, percent: int) -> None:
+    if progress is not None:
+        await progress(stage, percent)
+
+
+def _replace_document_vectors(app_state, doc_id: str, rows: list[dict]) -> list[dict]:
+    table_name = vector_table_name(app_state)
+    if table_name not in app_state.lance.table_names():
+        ensure_vector_table(app_state, rows)
+        return []
+
+    table = app_state.lance.open_table(table_name)
+    previous_rows = _document_vector_rows(table, doc_id)
+    table.delete(f"doc_id = {quote_lance_string(doc_id)}")
+    try:
+        table.add(rows)
+    except Exception:
+        if previous_rows:
+            table.add(previous_rows)
+        raise
+    return previous_rows
+
+
+def _restore_document_vectors(app_state, doc_id: str, rows: list[dict]) -> None:
+    delete_document_vectors(app_state, doc_id)
+    if rows:
+        ensure_vector_table(app_state, rows)
+
+
+def _document_vector_rows(table, doc_id: str) -> list[dict]:
+    if hasattr(table, "rows"):
+        return [dict(row) for row in table.rows if row.get("doc_id") == doc_id]
+    return (
+        table.search()
+        .where(f"doc_id = {quote_lance_string(doc_id)}")
+        .limit(100_000)
+        .to_list()
+    )
 
 
 def estimate_tokens(text: str) -> int:

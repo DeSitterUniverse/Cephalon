@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -94,7 +96,8 @@ class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
     conversation_id: str | None = None
-    reasoning_mode: str = "medium"
+    retrieval_scope: Literal["low", "medium", "high"] = "medium"
+    response_effort: Literal["quick", "balanced", "thorough"] = "balanced"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None
 

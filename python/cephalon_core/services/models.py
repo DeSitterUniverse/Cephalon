@@ -167,6 +167,14 @@ def _context_attempts(requested_context: int, configured_context: int) -> list[i
 
 
 def load_llm(app_state, model_filename: str) -> None:
+    runtime = getattr(app_state, "model_runtime", None)
+    if runtime is not None:
+        with runtime.exclusive():
+            return _load_llm_unlocked(app_state, model_filename)
+    return _load_llm_unlocked(app_state, model_filename)
+
+
+def _load_llm_unlocked(app_state, model_filename: str) -> None:
     if not _looks_like_chat_model(model_filename):
         raise HTTPException(status_code=400, detail="Selected GGUF is an embedding/reranker asset, not a chat model.")
     model_path = validate_model_filename(model_filename, app_state.settings.model_dir)

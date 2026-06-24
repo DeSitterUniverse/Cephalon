@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { X } from "lucide-react";
 import {
   addDocumentTag,
+  cancelJob,
   createConversation,
   deleteConversation,
   deleteDocument,
@@ -28,6 +28,8 @@ import {
   installLocalOnnxModel,
   loadModel,
   reindexDocument,
+  renameConversation,
+  retryJob,
   runEval,
   updateDocument,
   type Document,
@@ -35,6 +37,8 @@ import {
   type OnnxModelKind,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
+import { ConfirmDialog } from "./components/feedback/ConfirmDialog";
+import { NotificationCenter } from "./components/feedback/NotificationCenter";
 import { AnswerSupportPanel } from "./components/diagnostics/AnswerSupportPanel";
 import { EvaluationPanel } from "./components/diagnostics/EvaluationPanel";
 import { IndexHealthPanel } from "./components/diagnostics/IndexHealthPanel";
@@ -48,6 +52,7 @@ import { ModelPicker } from "./components/model/ModelPicker";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { SourcesPanel } from "./components/sources/SourcesPanel";
 import { useEventStream } from "./hooks/useEventStream";
+import { useNotifications } from "./hooks/useNotifications";
 import { useUiStore } from "./store";
 import "./App.css";
 
@@ -65,10 +70,11 @@ export default function App() {
   const [bootHealth, setBootHealth] = useState<HealthResponse | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [toast, setToast] = useState<string | null>(null);
+  const { notify, confirm } = useNotifications();
   const selectedModel = useUiStore(state => state.selectedModel);
   const setSelectedModel = useUiStore(state => state.setSelectedModel);
   const selectedDocumentId = useUiStore(state => state.selectedDocumentId);
+  const setSelectedDocumentId = useUiStore(state => state.setSelectedDocumentId);
   const selectedConversationId = useUiStore(state => state.selectedConversationId);
   const setSelectedConversationId = useUiStore(state => state.setSelectedConversationId);
   const selectedSources = useUiStore(state => state.selectedSources);
@@ -78,12 +84,6 @@ export default function App() {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   useEventStream();
-
-  useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 4200);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady });
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
@@ -113,11 +113,11 @@ export default function App() {
   const ingestMutation = useMutation({
     mutationFn: (path: string) => ingestPath(path),
     onSuccess: data => {
-      setToast(data.message || "Ingestion queued.");
+      notify(data.message || "Ingestion queued.", "success");
       setRightPanel("jobs");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to queue ingestion."),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to queue ingestion.", "error"),
   });
 
   const deleteMutation = useMutation({
@@ -131,7 +131,7 @@ export default function App() {
   const reindexMutation = useMutation({
     mutationFn: (doc: Document) => reindexDocument(doc.id),
     onSuccess: data => {
-      setToast(data.message || "Reindex queued.");
+      notify(data.message || "Reindex queued.", "success");
       setRightPanel("jobs");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
@@ -139,39 +139,42 @@ export default function App() {
 
   const loadModelMutation = useMutation({
     mutationFn: (model: string) => loadModel(model),
-    onMutate: () => setToast("Loading model into llama.cpp..."),
+    onMutate: () => notify("Loading model into llama.cpp..."),
     onSuccess: data => {
-      setToast(data.active_model ? `Loaded ${data.active_model}` : "Model loaded.");
+      notify(data.active_model ? `Loaded ${data.active_model}` : "Model loaded.", "success");
       queryClient.invalidateQueries({ queryKey: ["models"] });
     },
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to load model."),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to load model.", "error"),
   });
 
   const metricsMutation = useMutation({
     mutationFn: exportMetrics,
-    onSuccess: data => setToast(data.status === "success" && data.path ? `Metrics exported: ${data.path}` : `Metrics export failed: ${data.error || "metrics directory is unavailable"}`),
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to export metrics."),
+    onSuccess: data => notify(
+      data.status === "success" && data.path ? `Metrics exported: ${data.path}` : `Metrics export failed: ${data.error || "metrics directory is unavailable"}`,
+      data.status === "success" ? "success" : "error",
+    ),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to export metrics.", "error"),
   });
 
   const onnxDownloadMutation = useMutation({
     mutationFn: (kind: OnnxModelKind) => downloadOnnxModels(kind),
-    onMutate: (kind) => setToast(kind === "all" ? "Downloading ONNX engines..." : `Downloading ${kind} ONNX engine...`),
+    onMutate: (kind) => notify(kind === "all" ? "Downloading ONNX engines..." : `Downloading ${kind} ONNX engine...`),
     onSuccess: () => {
-      setToast("ONNX model setup finished. Restart the backend to load the new engines.");
+      notify("ONNX model setup finished. Restart the backend to load the new engines.", "success");
       queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
       queryClient.invalidateQueries({ queryKey: ["health"] });
     },
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to set up ONNX models."),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to set up ONNX models.", "error"),
   });
 
   const onnxInstallMutation = useMutation({
     mutationFn: ({ kind, path }: { kind: "embedder" | "reranker"; path: string }) => installLocalOnnxModel(kind, path),
     onSuccess: () => {
-      setToast("ONNX model folder installed. Restart the backend to load the new engine.");
+      notify("ONNX model folder installed. Restart the backend to load the new engine.", "success");
       queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
       queryClient.invalidateQueries({ queryKey: ["health"] });
     },
-    onError: error => setToast(error instanceof Error ? error.message : "Failed to install ONNX model folder."),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to install ONNX model folder.", "error"),
   });
 
   const newConversationMutation = useMutation({
@@ -189,10 +192,10 @@ export default function App() {
       expected_doc_ids: [expectedDoc],
     }]),
     onSuccess: () => {
-      setToast("Eval run saved.");
+      notify("Eval run saved.", "success");
       queryClient.invalidateQueries({ queryKey: ["eval-runs"] });
     },
-    onError: error => setToast(error instanceof Error ? error.message : "Eval run failed."),
+    onError: error => notify(error instanceof Error ? error.message : "Eval run failed.", "error"),
   });
 
   const deleteConversationMutation = useMutation({
@@ -201,6 +204,18 @@ export default function App() {
       if (selectedConversationId === id) setSelectedConversationId(null);
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
     },
+  });
+
+  const cancelJobMutation = useMutation({
+    mutationFn: cancelJob,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to cancel job.", "error"),
+  });
+
+  const retryJobMutation = useMutation({
+    mutationFn: retryJob,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to retry job.", "error"),
   });
 
   useEffect(() => {
@@ -215,7 +230,7 @@ export default function App() {
           setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and local model inventory.");
           if (!health.engines_ready || health.onnx_setup?.startup_error) {
             setRightPanel("settings");
-            setToast("Embedding and reranking setup needed.");
+            notify("Embedding and reranking setup needed.", "error");
           }
           setBootReady(true);
           return;
@@ -233,7 +248,7 @@ export default function App() {
     };
     poll();
     return () => { active = false; };
-  }, [setRightPanel]);
+  }, [notify, setRightPanel]);
 
   useEffect(() => {
     const names = modelsQuery.data?.models || [];
@@ -271,7 +286,7 @@ export default function App() {
 
   async function importFolder() {
     if (!isTauriRuntime()) {
-      setToast("Folder import is available in the Tauri app. Use drag/drop or the API in browser dev mode.");
+      notify("Folder import is available in the Tauri app. Use drag/drop or the API in browser dev mode.");
       return;
     }
     const selectedPath = await openDialog({ directory: true, multiple: false });
@@ -280,22 +295,22 @@ export default function App() {
 
   async function importTextFile() {
     if (!isTauriRuntime()) {
-      setToast("Text import is available in the Tauri app. Use the API in browser dev mode.");
+      notify("Text import is available in the Tauri app. Use the API in browser dev mode.");
       return;
     }
     const selectedPath = await openDialog({ directory: false, multiple: false });
     if (selectedPath && typeof selectedPath === "string") ingestPath(selectedPath, true)
       .then(data => {
-        setToast(data.message || "Text ingestion queued.");
+        notify(data.message || "Text ingestion queued.", "success");
         setRightPanel("jobs");
         queryClient.invalidateQueries({ queryKey: ["jobs"] });
       })
-      .catch(error => setToast(error instanceof Error ? error.message : "Failed to queue text import."));
+      .catch(error => notify(error instanceof Error ? error.message : "Failed to queue text import.", "error"));
   }
 
   async function browseOnnxFolder(kind: "embedder" | "reranker") {
     if (!isTauriRuntime()) {
-      setToast("Model folder browsing is available in the Tauri app.");
+      notify("Model folder browsing is available in the Tauri app.");
       return;
     }
     const defaultPath = onnxStatusQuery.data?.[kind]?.path || onnxStatusQuery.data?.model_dir;
@@ -304,7 +319,12 @@ export default function App() {
   }
 
   function removeDocument(doc: Document) {
-    if (window.confirm(`Delete ${doc.name} from the library?`)) deleteMutation.mutate(doc);
+    confirm({
+      title: "Delete document?",
+      message: `Delete ${doc.name} from the library and remove its indexed content?`,
+      confirmLabel: "Delete",
+      onConfirm: () => deleteMutation.mutate(doc),
+    });
   }
 
   const right = rightPanel === "settings"
@@ -321,7 +341,7 @@ export default function App() {
       />
     )
     : rightPanel === "sources"
-      ? <SourcesPanel sources={selectedSources} />
+      ? <SourcesPanel sources={selectedSources} onOpenDocument={setSelectedDocumentId} />
       : rightPanel === "trace"
         ? (
           <RetrievalTracePanel
@@ -344,7 +364,19 @@ export default function App() {
             selectedId={selectedConversationId}
             onSelect={setSelectedConversationId}
             onNew={() => newConversationMutation.mutate()}
-            onDelete={(id) => deleteConversationMutation.mutate(id)}
+            onRename={(id, title) => renameConversation(id, title).then(() => {
+              queryClient.invalidateQueries({ queryKey: ["conversations"] });
+              queryClient.invalidateQueries({ queryKey: ["conversation", id] });
+            })}
+            onDelete={(id) => {
+              const conversation = conversationsQuery.data?.conversations.find(item => item.id === id);
+              confirm({
+                title: "Delete chat?",
+                message: `Delete ${conversation?.title || "this chat"} and its saved messages?`,
+                confirmLabel: "Delete",
+                onConfirm: () => deleteConversationMutation.mutate(id),
+              });
+            }}
           />
         )
       : rightPanel === "document"
@@ -367,7 +399,13 @@ export default function App() {
             onDelete={() => documentQuery.data && removeDocument(documentQuery.data)}
           />
         )
-        : <JobsPanel jobs={jobsQuery.data?.jobs || []} />;
+        : (
+          <JobsPanel
+            jobs={jobsQuery.data?.jobs || []}
+            onCancel={id => cancelJobMutation.mutate(id)}
+            onRetry={id => retryJobMutation.mutate(id)}
+          />
+        );
 
   if (!bootReady) {
     return (
@@ -413,6 +451,18 @@ export default function App() {
               setSelectedConversationId(id);
               queryClient.invalidateQueries({ queryKey: ["conversations"] });
             }}
+            onLoadOlder={() => {
+              const current = conversationQuery.data;
+              if (!selectedConversationId || !current?.next_before) return;
+              getConversation(selectedConversationId, 100, current.next_before).then(page => {
+                queryClient.setQueryData(["conversation", selectedConversationId], {
+                  ...current,
+                  messages: [...(page.messages || []), ...(current.messages || [])],
+                  has_more: page.has_more,
+                  next_before: page.next_before,
+                });
+              }).catch(error => notify(error instanceof Error ? error.message : "Failed to load older messages.", "error"));
+            }}
           />
         )}
         modelControl={(
@@ -431,14 +481,8 @@ export default function App() {
         )}
         right={right}
       />
-      {toast && (
-        <div className="toast" role="status">
-          <span>{toast}</span>
-          <button type="button" onClick={() => setToast(null)} aria-label="Dismiss notification">
-            <X size={14} />
-          </button>
-        </div>
-      )}
+      <NotificationCenter />
+      <ConfirmDialog />
     </>
   );
 }

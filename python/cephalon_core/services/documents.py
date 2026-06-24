@@ -25,7 +25,8 @@ SKIPPED_DIRECTORY_NAMES = {
 def get_file_hash(path: str) -> str:
     hasher = hashlib.sha256()
     with open(path, "rb") as f:
-        hasher.update(f.read())
+        while chunk := f.read(1024 * 1024):
+            hasher.update(chunk)
     return hasher.hexdigest()
 
 
@@ -73,7 +74,12 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
         return read_text_fallback(path), "text"
 
     if ext == ".pdf":
-        return "\n".join([page.extract_text() for page in PdfReader(path).pages if page.extract_text()]), "native"
+        text_runs = []
+        for page in PdfReader(path).pages:
+            text = page.extract_text()
+            if text:
+                text_runs.append(text)
+        return "\n".join(text_runs), "native"
     if ext == ".docx":
         doc = docx.Document(path)
         return "\n".join([para.text for para in doc.paragraphs]), "native"
@@ -86,7 +92,7 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
                     text_runs.append(shape.text)
         return "\n".join(text_runs), "native"
     if ext == ".xlsx":
-        wb = openpyxl.load_workbook(path, data_only=True)
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
         text_runs = []
         for sheet in wb.worksheets:
             text_runs.append(f"--- Sheet: {sheet.title} ---")

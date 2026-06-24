@@ -2,9 +2,10 @@ import type { SourceChunk } from "../../api";
 
 type Props = {
   sources: SourceChunk[];
+  onOpenDocument?: (id: string) => void;
 };
 
-export function SourcesPanel({ sources }: Props) {
+export function SourcesPanel({ sources, onOpenDocument }: Props) {
   return (
     <section className="side-section">
       <div className="panel-header">
@@ -27,6 +28,11 @@ export function SourcesPanel({ sources }: Props) {
               {source.rerank_score != null && <span>rerank {source.rerank_score.toFixed(3)}</span>}
             </div>
             <p>{source.snippet}</p>
+            {onOpenDocument && (
+              <button className="source-document-link" type="button" onClick={() => onOpenDocument(source.doc_id)}>
+                Open document
+              </button>
+            )}
           </article>
         ))}
         {sources.length === 0 && <div className="empty-state">Run a query to inspect matched sources.</div>}

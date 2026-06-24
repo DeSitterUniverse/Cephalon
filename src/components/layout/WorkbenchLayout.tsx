@@ -1,9 +1,11 @@
-import type { MouseEvent, ReactNode } from "react";
-import { BarChart3, FileText, ListChecks, Maximize2, MessageSquareText, Minus, MoreHorizontal, SearchCode, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
-import { useState } from "react";
+import type { CSSProperties, MouseEvent, ReactNode } from "react";
+import { useEffect } from "react";
+import { Maximize2, Minus, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
+import { RightPanel } from "./RightPanel";
+import { WorkbenchNav } from "./WorkbenchNav";
 
 type Props = {
   left: ReactNode;
@@ -13,14 +15,23 @@ type Props = {
 };
 
 export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
-  const [panelMenuOpen, setPanelMenuOpen] = useState(false);
   const rightPanel = useUiStore(state => state.rightPanel);
   const theme = useUiStore(state => state.theme);
-  const setRightPanel = useUiStore(state => state.setRightPanel);
-  const selectPanel = (panel: Parameters<typeof setRightPanel>[0]) => {
-    setRightPanel(panel);
-    setPanelMenuOpen(false);
-  };
+  const leftPanelOpen = useUiStore(state => state.leftPanelOpen);
+  const rightPanelOpen = useUiStore(state => state.rightPanelOpen);
+  const leftPanelWidth = useUiStore(state => state.leftPanelWidth);
+  const rightPanelWidth = useUiStore(state => state.rightPanelWidth);
+  const setLeftPanelOpen = useUiStore(state => state.setLeftPanelOpen);
+  const setRightPanelOpen = useUiStore(state => state.setRightPanelOpen);
+
+  useEffect(() => {
+    const closeDetails = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRightPanelOpen(false);
+    };
+    window.addEventListener("keydown", closeDetails);
+    return () => window.removeEventListener("keydown", closeDetails);
+  }, [setRightPanelOpen]);
+
   const stopWindowDrag = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
   };
@@ -40,8 +51,15 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
           <button type="button" onMouseDown={stopWindowDrag} onClick={() => windowCommand("close_window")} title="Close"><X size={15} /></button>
         </div>
       </div>
-      <div className={`workbench panel-${rightPanel}`}>
-        <aside className="panel panel-left">{left}</aside>
+      <div
+        className={`workbench panel-${rightPanel} ${leftPanelOpen ? "left-open" : "left-closed"} ${rightPanelOpen ? "right-open" : "right-closed"}`}
+        style={{
+          "--left-panel-width": `${leftPanelWidth}px`,
+          "--right-panel-width": `${rightPanelWidth}px`,
+        } as CSSProperties}
+      >
+        <aside className="panel panel-left" aria-label="Library">{left}</aside>
+        <WorkbenchNav />
         <main className="workspace">
           <header className="topbar">
             <div className="brand-block">
@@ -52,36 +70,26 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
             </div>
             <div className="topbar-actions">
               {modelControl}
-              <button type="button" className={rightPanel === "jobs" ? "icon-button active" : "icon-button"} onClick={() => selectPanel("jobs")} title="Jobs">
-                <ListChecks size={16} />
+              <button
+                type="button"
+                className="topbar-panel-toggle"
+                onClick={() => setLeftPanelOpen(!leftPanelOpen)}
+                aria-label={leftPanelOpen ? "Hide library" : "Show library"}
+                title={leftPanelOpen ? "Hide library" : "Show library"}
+              >
+                {leftPanelOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
               </button>
-              <button type="button" className={rightPanel === "history" ? "icon-button active" : "icon-button"} onClick={() => selectPanel("history")} title="Chat history">
-                <MessageSquareText size={16} />
-              </button>
-              <button type="button" className={rightPanel === "document" ? "icon-button active" : "icon-button"} onClick={() => selectPanel("document")} title="Document details">
-                <FileText size={16} />
-              </button>
-              <button type="button" className={rightPanel === "settings" ? "icon-button active" : "icon-button"} onClick={() => selectPanel("settings")} title="Search and model controls">
-                <SlidersHorizontal size={16} />
-              </button>
-              <div className="panel-menu">
-                <button type="button" className={["trace", "health", "eval", "support"].includes(rightPanel) ? "icon-button active" : "icon-button"} onClick={() => setPanelMenuOpen(value => !value)} title="Diagnostics">
-                  <MoreHorizontal size={16} />
-                </button>
-                {panelMenuOpen && (
-                  <div className="panel-menu-list">
-                    <button type="button" className={rightPanel === "trace" ? "active" : ""} onClick={() => selectPanel("trace")}><SearchCode size={15} />Retrieval trace</button>
-                    <button type="button" className={rightPanel === "health" ? "active" : ""} onClick={() => selectPanel("health")}><BarChart3 size={15} />Index health</button>
-                    <button type="button" className={rightPanel === "eval" ? "active" : ""} onClick={() => selectPanel("eval")}><ListChecks size={15} />Evaluation</button>
-                    <button type="button" className={rightPanel === "support" ? "active" : ""} onClick={() => selectPanel("support")}><ShieldCheck size={15} />Answer support</button>
-                  </div>
-                )}
-              </div>
             </div>
           </header>
           {center}
         </main>
-        <aside className="panel panel-right">{right}</aside>
+        <RightPanel
+          open={rightPanelOpen}
+          panel={rightPanel}
+          onClose={() => setRightPanelOpen(false)}
+        >
+          {right}
+        </RightPanel>
       </div>
     </div>
   );

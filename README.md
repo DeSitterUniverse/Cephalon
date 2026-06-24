@@ -7,7 +7,8 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking quest
 
 - Lightweight OLED friendly Tauri v2 desktop app with a default #000000 background and #FFE5CC text. Optional Graphite theme uses a #171717 dark background with #FFFFFF text.
 - Document library with import, text-safe unknown file ingestion, reindexing, tags, delete, and document details.
-- Durable ingestion jobs with live SSE progress.
+- Durable ingestion jobs with live SSE and stage-level extraction, chunking, embedding, and persistence progress.
+- Recoverable ingestion jobs with cancel/retry controls and interrupted-job recovery after restart.
 - Explicit GGUF model picker and **Load** action before querying.
 - Vulkan-enabled llama.cpp backend diagnostics and explicit local model loading.
 - Hybrid retrieval: SQLite FTS5 BM25 + LanceDB dense vectors + reciprocal rank fusion.
@@ -15,12 +16,15 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking quest
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
 - Low/Medium/High retrieval scope control for narrowing or broadening source review without changing model intelligence.
+- Quick/Balanced/Thorough response effort, including a hidden draft-and-refine pass for Thorough responses.
+- Labeled workbench navigation, collapsible panels, keyboard dismissal, and a narrow-window details drawer.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
 - Retrieval Trace panel for inspecting vector, BM25, fused, reranked, unused, and final context candidates.
 - Index Health panel for chunk counts, stale state, duplicate rates, retrieval counts, and embedding distribution.
 - Minimal local eval runner with Recall@k and MRR.
 - Answer Support panel with deterministic citation trust labels.
 - Persistent chat history stored in SQLite.
+- Searchable and renameable chat history with paginated older-message loading.
 - Numeric-first metrics under the user Documents metrics directory.
 
 ## Architecture
@@ -189,6 +193,7 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `GET/PUT /settings`: RAG and generation defaults.
 - `POST /ingest`: queue file/folder ingestion, including note vaults imported as normal folders.
 - `GET /jobs`: recent ingestion jobs.
+- `POST /jobs/{id}/cancel` and `POST /jobs/{id}/retry`: control recoverable ingestion jobs.
 - `GET /retrieval/traces`: recent retrieval traces.
 - `GET /retrieval/traces/{query_id}`: full retrieval trace with candidate stages, scores, context, and latency.
 - `GET /observability/index-health`: document/chunk/index health summary.

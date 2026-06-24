@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import re
@@ -90,26 +91,67 @@ def _vector_table_has_current_schema(table) -> bool:
 
 
 async def get_embedding(app_state, text: str) -> list[float]:
+    return await asyncio.to_thread(_get_embedding_sync, app_state, text)
+
+
+async def get_embeddings(app_state, texts: list[str]) -> list[list[float]]:
+    return await asyncio.to_thread(_get_embeddings_sync, app_state, texts)
+
+
+def _get_embedding_sync(app_state, text: str) -> list[float]:
+    return _get_embeddings_sync(app_state, [text])[0]
+
+
+def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
     if getattr(app_state, "embedder", None) is None:
         raise RuntimeError("Embedding engine is not ready.")
+    if not texts:
+        return []
 
-    normalized = " ".join(text.strip().split())
-    cache_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     cache: OrderedDict[str, list[float]] = getattr(app_state, "embedding_cache", None)
     if cache is None:
         cache = OrderedDict()
         app_state.embedding_cache = cache
-    if cache_key in cache:
-        cache.move_to_end(cache_key)
-        return list(cache[cache_key])
 
+    normalized_texts = [" ".join(text.strip().split()) for text in texts]
+    cache_keys = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in normalized_texts]
+    vectors: list[list[float] | None] = [None] * len(texts)
+    missing_indices: list[int] = []
+    missing_texts: list[str] = []
+    for index, cache_key in enumerate(cache_keys):
+        if cache_key in cache:
+            cache.move_to_end(cache_key)
+            vectors[index] = list(cache[cache_key])
+        else:
+            missing_indices.append(index)
+            missing_texts.append(normalized_texts[index])
+
+    if missing_texts:
+        try:
+            embedded = _run_embedding_batch(app_state, missing_texts)
+        except Exception:
+            if len(missing_texts) == 1:
+                raise
+            embedded = [_run_embedding_batch(app_state, [text])[0] for text in missing_texts]
+        for index, vector in zip(missing_indices, embedded, strict=True):
+            cache_key = cache_keys[index]
+            cache[cache_key] = vector
+            cache.move_to_end(cache_key)
+            vectors[index] = list(vector)
+        while len(cache) > EMBEDDING_CACHE_LIMIT:
+            cache.popitem(last=False)
+
+    return [list(vector) for vector in vectors if vector is not None]
+
+
+def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
     fixed_length = getattr(app_state, "embedding_fixed_sequence_length", None)
     tokenizer_kwargs = {"truncation": True, "return_tensors": "np"}
     if fixed_length:
         tokenizer_kwargs.update({"padding": "max_length", "max_length": int(fixed_length)})
     else:
         tokenizer_kwargs["padding"] = True
-    inputs = app_state.embed_tokenizer(text, **tokenizer_kwargs)
+    inputs = app_state.embed_tokenizer(texts, **tokenizer_kwargs)
     ort_inputs = {
         "input_ids": inputs["input_ids"].astype(np.int64),
         "attention_mask": inputs["attention_mask"].astype(np.int64),
@@ -120,28 +162,32 @@ async def get_embedding(app_state, text: str) -> list[float]:
     outs = app_state.embedder.run(None, ort_inputs)
     output = np.asarray(outs[0])
     if output.ndim == 2:
-        vec = output[0]
+        batch_vectors = output
     elif output.ndim == 3:
         pooling = getattr(app_state, "embedding_pooling", "cls")
-        hidden = output[0]
+        batch_vectors = []
         if pooling == "last_token":
-            seq_len = int(ort_inputs["attention_mask"][0].sum()) - 1
-            vec = hidden[max(seq_len, 0)]
+            for index, hidden in enumerate(output):
+                seq_len = int(ort_inputs["attention_mask"][index].sum()) - 1
+                batch_vectors.append(hidden[max(seq_len, 0)])
         else:
-            vec = hidden[0]
-        norm = np.linalg.norm(vec)
-        vec = vec / norm if norm else vec
+            batch_vectors = [hidden[0] for hidden in output]
+        batch_vectors = np.asarray([
+            vector / norm if (norm := np.linalg.norm(vector)) else vector
+            for vector in batch_vectors
+        ])
     else:
         raise RuntimeError(f"Unsupported embedding output rank: {output.ndim}")
+
+    if len(batch_vectors) != len(texts):
+        raise RuntimeError(f"Embedding ONNX returned {len(batch_vectors)} vectors for {len(texts)} texts.")
     expected_dim = getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)
-    if len(vec) != expected_dim:
-        raise RuntimeError(f"Embedding dimension mismatch: got {len(vec)}, expected {expected_dim}. Re-export ONNX models and rebuild the index.")
-    vector = vec.tolist()
-    cache[cache_key] = vector
-    cache.move_to_end(cache_key)
-    while len(cache) > EMBEDDING_CACHE_LIMIT:
-        cache.popitem(last=False)
-    return list(vector)
+    vectors = []
+    for vector in batch_vectors:
+        if len(vector) != expected_dim:
+            raise RuntimeError(f"Embedding dimension mismatch: got {len(vector)}, expected {expected_dim}. Re-export ONNX models and rebuild the index.")
+        vectors.append(vector.tolist())
+    return vectors
 
 
 async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]) -> None:
@@ -178,7 +224,7 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
         scores = np.asarray(cached_scores, dtype=float)
     else:
         pairs = [[prompt, _rerank_text(res.get("text", ""))] for res in results]
-        scores = np.asarray([_score_rerank_pair(app_state, pair) for pair in pairs], dtype=float)
+        scores = _score_rerank_pairs(app_state, pairs)
         cache[cache_key] = [float(score) for score in scores]
         cache.move_to_end(cache_key)
         while len(cache) > RERANK_CACHE_LIMIT:
@@ -198,7 +244,22 @@ def _rerank_text(text: str) -> str:
 
 
 def _score_rerank_pair(app_state, pair: list[str]) -> float:
-    inputs = app_state.tokenizer([pair], padding=True, truncation=True, return_tensors="np")
+    return float(_score_rerank_pairs(app_state, [pair])[0])
+
+
+def _score_rerank_pairs(app_state, pairs: list[list[str]]) -> np.ndarray:
+    if not pairs:
+        return np.asarray([], dtype=float)
+    try:
+        return _run_reranker_batch(app_state, pairs)
+    except Exception:
+        if len(pairs) == 1:
+            raise
+        return np.asarray([_run_reranker_batch(app_state, [pair])[0] for pair in pairs], dtype=float)
+
+
+def _run_reranker_batch(app_state, pairs: list[list[str]]) -> np.ndarray:
+    inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
     accepted_inputs = {item.name for item in app_state.reranker.get_inputs()} if hasattr(app_state.reranker, "get_inputs") else set()
     ort_inputs = {}
     if not accepted_inputs or "input_ids" in accepted_inputs:
@@ -211,7 +272,10 @@ def _score_rerank_pair(app_state, pair: list[str]) -> float:
     scores = _reranker_scores(app_state, raw_scores)
     if scores.size == 0:
         raise RuntimeError("Reranker ONNX returned no score for a candidate pair.")
-    return float(scores.reshape(-1)[0])
+    flattened = scores.reshape(-1)
+    if flattened.size != len(pairs):
+        raise RuntimeError(f"Reranker ONNX returned {flattened.size} scores for {len(pairs)} candidate pairs.")
+    return flattened.astype(float)
 
 
 def _rerank_cache_key(prompt: str, results: list[dict]) -> str:
@@ -639,7 +703,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             rerank_started = time.perf_counter()
             rerank_candidates = results[:_rerank_candidate_limit(settings)]
             skipped_rerank = results[len(rerank_candidates):]
-            all_ranked = rerank(app_state, subquery["text"], rerank_candidates)
+            all_ranked = await asyncio.to_thread(rerank, app_state, subquery["text"], rerank_candidates)
             trace["latency"]["rerank_ms"] = round(trace["latency"].get("rerank_ms", 0) + ((time.perf_counter() - rerank_started) * 1000), 2)
             reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
             selected_ids = {item["id"] for item in reranked}

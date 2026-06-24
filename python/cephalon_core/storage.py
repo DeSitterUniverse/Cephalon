@@ -400,6 +400,11 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "007_rag_observability")
 
+    if not migration_applied(conn, "008_job_progress"):
+        add_column_if_missing(conn, "jobs", "stage", "TEXT")
+        add_column_if_missing(conn, "jobs", "stage_progress", "INTEGER DEFAULT 0")
+        mark_migration(conn, "008_job_progress")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -516,7 +521,7 @@ def get_document_tags(conn: sqlite3.Connection, doc_id: str) -> list[str]:
     return [row["tag"] for row in rows]
 
 
-def document_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def document_payload(conn: sqlite3.Connection, row: sqlite3.Row, tags: list[str] | None = None) -> dict[str, Any]:
     display_name = row["display_name"] or os.path.basename(row["path"])
     return {
         "id": row["id"],
@@ -535,8 +540,50 @@ def document_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         "extraction_mode": row["extraction_mode"] if "extraction_mode" in row.keys() else None,
         "last_retrieved_at": row["last_retrieved_at"] if "last_retrieved_at" in row.keys() else None,
         "retrieval_count": row["retrieval_count"] if "retrieval_count" in row.keys() else 0,
-        "tags": get_document_tags(conn, row["id"]),
+        "tags": tags if tags is not None else get_document_tags(conn, row["id"]),
     }
+
+
+def list_document_payloads(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = fetchall(conn, "SELECT * FROM documents WHERE type = 'file' ORDER BY ingested_at DESC")
+    tag_rows = fetchall(conn, "SELECT doc_id, tag FROM document_tags ORDER BY doc_id, tag")
+    tags_by_document: dict[str, list[str]] = {}
+    for tag_row in tag_rows:
+        tags_by_document.setdefault(tag_row["doc_id"], []).append(tag_row["tag"])
+    return [document_payload(conn, row, tags_by_document.get(row["id"], [])) for row in rows]
+
+
+def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: int = 20) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM documents WHERE id = ? AND type = 'file'", (doc_id,))
+    if not row:
+        return None
+    tags = get_document_tags(conn, doc_id)
+    chunks = fetchall(
+        conn,
+        """
+        SELECT id, chunk_index, text, block_type, token_count, char_count, chunking_profile, embedding_status
+        FROM chunks
+        WHERE doc_id = ?
+        ORDER BY chunk_index
+        LIMIT ?
+        """,
+        (doc_id, preview_limit),
+    )
+    payload = document_payload(conn, row, tags)
+    payload["chunk_preview"] = [
+        {
+            "id": chunk["id"],
+            "index": chunk["chunk_index"],
+            "text": chunk["text"][:500],
+            "block_type": chunk["block_type"],
+            "token_count": chunk["token_count"],
+            "char_count": chunk["char_count"],
+            "chunking_profile": chunk["chunking_profile"],
+            "embedding_status": chunk["embedding_status"],
+        }
+        for chunk in chunks
+    ]
+    return payload
 
 
 def active_vector_table_name(app_state=None) -> str:
@@ -635,18 +682,50 @@ def save_message_sources(conn: sqlite3.Connection, message_id: str, sources: lis
         conn.commit()
 
 
-def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any] | None:
+def get_conversation(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    message_limit: int = 100,
+    before: int | None = None,
+) -> dict[str, Any] | None:
     conversation = fetchone(conn, "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ? AND archived = 0", (conversation_id,))
     if not conversation:
         return None
+    message_limit = max(1, min(int(message_limit), 200))
+    before_clause = "AND rowid < ?" if before is not None else ""
+    params = (conversation_id, before, message_limit + 1) if before is not None else (conversation_id, message_limit + 1)
     message_rows = fetchall(
         conn,
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid",
-        (conversation_id,),
+        f"""
+        SELECT rowid AS cursor_rowid, * FROM messages
+        WHERE conversation_id = ? {before_clause}
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+        """,
+        params,
     )
+    has_more = len(message_rows) > message_limit
+    message_rows = list(reversed(message_rows[:message_limit]))
+    message_ids = [row["id"] for row in message_rows]
+    source_rows = []
+    if message_ids:
+        placeholders = ",".join("?" for _ in message_ids)
+        source_rows = fetchall(
+            conn,
+            f"""
+            SELECT message_id, source_json
+            FROM message_sources
+            WHERE message_id IN ({placeholders})
+            ORDER BY message_id, source_rank
+            """,
+            tuple(message_ids),
+        )
+    sources_by_message: dict[str, list[dict[str, Any]]] = {}
+    for source in source_rows:
+        sources_by_message.setdefault(source["message_id"], []).append(json.loads(source["source_json"]))
     messages = []
     for row in message_rows:
-        source_rows = fetchall(conn, "SELECT source_json FROM message_sources WHERE message_id = ? ORDER BY source_rank", (row["id"],))
         messages.append({
             "id": row["id"],
             "role": row["role"],
@@ -655,10 +734,12 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> dict[str
             "settings": json.loads(row["settings_json"] or "{}"),
             "meta": json.loads(row["meta_json"] or "{}"),
             "created_at": row["created_at"],
-            "sources": [json.loads(source["source_json"]) for source in source_rows],
+            "sources": sources_by_message.get(row["id"], []),
         })
     payload = row_to_dict(conversation)
     payload["messages"] = messages
+    payload["has_more"] = has_more
+    payload["next_before"] = message_rows[0]["cursor_rowid"] if has_more and message_rows else None
     return payload
 
 

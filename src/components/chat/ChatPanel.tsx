@@ -1,10 +1,11 @@
-import { Send } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AnswerSupport, Conversation, Message, RagSettings, SourceChunk } from "../../api";
 import { queryModel } from "../../api";
 import { useUiStore } from "../../store";
+import { Composer } from "./Composer";
+import { MessageActions } from "./MessageActions";
 
 function parseThinking(content: string): { thinking: string; response: string } {
   const closeTag = "</think>";
@@ -31,28 +32,36 @@ type Props = {
   conversation?: Conversation;
   selectedConversationId?: string | null;
   onConversationSelected?: (id: string) => void;
+  onLoadOlder?: () => void;
 };
 
 type ChatMessage = Message & {
   id?: string;
   sources?: SourceChunk[];
   support?: AnswerSupport | null;
+  status?: "complete" | "streaming" | "error" | "stopped";
 };
 
-export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected }: Props) {
+export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected, onLoadOlder }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [retrievalScope, setRetrievalScope] = useState("medium");
+  const [responseEffort, setResponseEffort] = useState("balanced");
+  const [responsePhase, setResponsePhase] = useState("");
   const setSelectedSources = useUiStore(state => state.setSelectedSources);
   const setSelectedSupport = useUiStore(state => state.setSelectedSupport);
+  const setRightPanel = useUiStore(state => state.setRightPanel);
+  const feedRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const followOutputRef = useRef(true);
 
   useEffect(() => {
-    if (typeof endRef.current?.scrollIntoView === "function") {
-      endRef.current.scrollIntoView({ behavior: "smooth" });
+    if (followOutputRef.current && typeof endRef.current?.scrollIntoView === "function") {
+      endRef.current.scrollIntoView({ behavior: isTyping ? "auto" : "smooth" });
     }
-  }, [messages]);
+  }, [isTyping, messages]);
 
   useEffect(() => {
     if (!conversation?.messages) return;
@@ -62,22 +71,32 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
       content: message.content,
       sources: message.sources || [],
       support: (message.meta?.support as AnswerSupport | undefined) || null,
+      status: "complete",
     })) as ChatMessage[]);
   }, [conversation?.id, conversation?.messages]);
 
-  async function handleSend(event: FormEvent) {
-    event.preventDefault();
-    if (!input.trim() || isTyping || !selectedModel || !modelReady || !settings) return;
-
-    const userMsg = input.trim();
-    const historyPayload = messages.slice(-6).map(message => ({ role: message.role, content: message.content }));
+  async function runRequest(userMsg: string, baseMessages: ChatMessage[]) {
+    if (isTyping || !selectedModel || !modelReady || !settings) return;
+    const historyPayload = baseMessages.map(message => ({ role: message.role, content: message.content }));
     const assistantDraftId = `draft-${Date.now()}`;
-    setInput("");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    followOutputRef.current = true;
     setIsTyping(true);
-    setMessages(prev => [...prev, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "" }]);
+    setResponsePhase("retrieving");
+    setMessages([...baseMessages, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "", status: "streaming" }]);
 
     try {
-      const body = await queryModel(userMsg, selectedModel, historyPayload, settings, selectedConversationId, retrievalScope);
+      const body = await queryModel(
+        userMsg,
+        selectedModel,
+        historyPayload,
+        settings,
+        selectedConversationId,
+        retrievalScope,
+        responseEffort,
+        controller.signal,
+      );
       const completedConversationId = await consumeQueryStream(body, setSelectedSources, chunk => {
         setMessages(prev => {
           const next = [...prev];
@@ -104,24 +123,60 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
             return next;
           });
         }
-      });
+      }, setResponsePhase);
+      setMessages(prev => prev.map(message => message.id === assistantDraftId ? { ...message, status: "complete" } : message));
       if (completedConversationId) onConversationSelected?.(completedConversationId);
     } catch (error) {
+      const stopped = controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError");
+      if (stopped) {
+        setMessages(prev => prev.map(message => message.id === assistantDraftId ? { ...message, status: "stopped" } : message));
+        return;
+      }
       const message = error instanceof Error ? error.message : "Error connecting to local service.";
       setMessages(prev => {
         const next = [...prev];
         const target = next.findIndex(item => item.id === assistantDraftId);
-        if (target !== -1) next[target] = { id: assistantDraftId, role: "assistant", content: message };
+        if (target !== -1) next[target] = { id: assistantDraftId, role: "assistant", content: message, status: "error" };
         return next;
       });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setIsTyping(false);
+      setResponsePhase("");
     }
   }
 
+  function handleSend() {
+    const userMsg = input.trim();
+    if (!userMsg) return;
+    setInput("");
+    void runRequest(userMsg, messages);
+  }
+
+  function regenerate(messageIndex: number) {
+    const userIndex = findPreviousUserMessage(messages, messageIndex);
+    if (userIndex === -1) return;
+    const prompt = messages[userIndex].content;
+    void runRequest(prompt, messages.slice(0, userIndex));
+  }
+
+  function openSources(sources: SourceChunk[]) {
+    setSelectedSources(sources);
+    setRightPanel("sources");
+  }
+
+  const handleFeedScroll = () => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    followOutputRef.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 96;
+  };
+
   return (
     <section className="chat-shell">
-      <div className="message-feed">
+      <div className="message-feed" ref={feedRef} onScroll={handleFeedScroll}>
+        {conversation?.has_more && onLoadOlder && (
+          <button type="button" className="load-older" onClick={onLoadOlder}>Load older messages</button>
+        )}
         {messages.length === 0 && (
           <div className="chat-empty">
             <h2>Search your documents</h2>
@@ -132,54 +187,71 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
           const parsed = message.role === "assistant" ? parseThinking(message.content) : { thinking: "", response: message.content };
           const response = parsed.response || (!message.content.includes("</think>") ? message.content : "");
           return (
-            <article key={index} className={`message ${message.role}`}>
+            <article key={message.id || `${message.role}-${index}`} className={`message ${message.role}`}>
               <div className="message-body">
-                {response ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderSourceTags(response)}</ReactMarkdown> : <span className="subtle">Working...</span>}
-                {message.role === "assistant" && (parsed.thinking || (message as ChatMessage).sources?.length || (message as ChatMessage).support) ? (
-                  <details className="message-inspector">
-                    <summary>Details</summary>
-                    {parsed.thinking && <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.thinking}</ReactMarkdown>}
-                    {(message as ChatMessage).sources?.length ? (
-                      <div className="message-actions">
-                        <button className="source-link-row" type="button" onClick={() => setSelectedSources((message as ChatMessage).sources || [])}>
-                          {(message as ChatMessage).sources?.length} sources
-                        </button>
-                        {(message as ChatMessage).support && (
-                          <button className="source-link-row" type="button" onClick={() => setSelectedSupport((message as ChatMessage).support || null)}>
-                            support: {(message as ChatMessage).support?.status}
+                {response ? (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ href, children }) => href?.startsWith("#source-")
+                        ? (
+                          <button
+                            type="button"
+                            className="inline-citation"
+                            onClick={() => {
+                              const sourceId = href.slice("#source-".length);
+                              const source = message.sources?.find(item => item.source_id === sourceId);
+                              if (source) openSources([source]);
+                            }}
+                          >
+                            {children}
                           </button>
-                        )}
-                      </div>
-                    ) : null}
+                        )
+                        : <a href={href}>{children}</a>,
+                    }}
+                  >
+                    {renderSourceTags(response)}
+                  </ReactMarkdown>
+                ) : <span className="subtle">{phaseLabel(responsePhase)}</span>}
+                {message.role === "assistant" && (parsed.thinking || message.sources?.length || message.support) ? (
+                  <details className="message-inspector">
+                    <summary>Answer details</summary>
+                    <p>{message.sources?.length ? `Generated from ${message.sources.length} retrieved source${message.sources.length === 1 ? "" : "s"}.` : "Generated without retrieved sources."}</p>
                   </details>
                 ) : null}
+                {message.role === "assistant" && message.content && message.status !== "streaming" && (
+                  <MessageActions
+                    content={message.content}
+                    sources={message.sources}
+                    support={message.support}
+                    isError={message.status === "error"}
+                    onOpenSources={() => openSources(message.sources || [])}
+                    onOpenSupport={() => {
+                      setSelectedSupport(message.support || null);
+                      setRightPanel("support");
+                    }}
+                    onRegenerate={() => regenerate(index)}
+                  />
+                )}
               </div>
             </article>
           );
         })}
         <div ref={endRef} />
       </div>
-      <form className="composer" onSubmit={handleSend}>
-        <select
-          className="scope-select"
-          value={retrievalScope}
-          onChange={event => setRetrievalScope(event.target.value)}
-          disabled={isTyping}
-          title="Retrieval scope"
-          aria-label="Retrieval scope"
-        >
-          <option value="low">Low retrieval</option>
-          <option value="medium">Medium retrieval</option>
-          <option value="high">High retrieval</option>
-        </select>
-        <input
-          value={input}
-          onChange={event => setInput(event.target.value)}
-          disabled={isTyping || !selectedModel || !modelReady}
-          placeholder={!selectedModel ? "Select a local model." : !modelReady ? "Load the selected model first." : "Search, compare, summarize..."}
-        />
-        <button disabled={isTyping || !input.trim() || !selectedModel || !modelReady || !settings}><Send size={16} />Run</button>
-      </form>
+      <Composer
+        value={input}
+        onChange={setInput}
+        onSubmit={handleSend}
+        onStop={() => abortRef.current?.abort()}
+        isRunning={isTyping}
+        disabled={isTyping || !selectedModel || !modelReady || !settings}
+        placeholder={!selectedModel ? "Select a local model." : !modelReady ? "Load the selected model first." : "Search, compare, summarize..."}
+        retrievalScope={retrievalScope}
+        responseEffort={responseEffort}
+        onRetrievalScopeChange={setRetrievalScope}
+        onResponseEffortChange={setResponseEffort}
+      />
     </section>
   );
 }
@@ -190,6 +262,7 @@ async function consumeQueryStream(
   onChunk: (chunk: string) => void,
   onMessageSources: (sources: SourceChunk[]) => void,
   onMeta: (meta: Record<string, unknown>) => void,
+  onPhase: (phase: string) => void,
 ): Promise<string | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -205,7 +278,7 @@ async function consumeQueryStream(
     while (boundary !== -1) {
       const packet = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
-      const result = handleSsePacket(packet, sources, onSources, onChunk, onMessageSources, onMeta);
+      const result = handleSsePacket(packet, sources, onSources, onChunk, onMessageSources, onMeta, onPhase);
       if (result.conversationId) conversationId = result.conversationId;
       boundary = buffer.indexOf("\n\n");
     }
@@ -220,6 +293,7 @@ function handleSsePacket(
   onChunk: (chunk: string) => void,
   onMessageSources: (sources: SourceChunk[]) => void,
   onMeta: (meta: Record<string, unknown>) => void,
+  onPhase: (phase: string) => void,
 ): { conversationId?: string | null } {
   const eventType = packet.split("\n").find(line => line.startsWith("event: "))?.slice(7).trim() || "message";
   const data = packet.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
@@ -241,6 +315,8 @@ function handleSsePacket(
     return { conversationId: typeof payload.conversation_id === "string" ? payload.conversation_id : null };
   } else if (eventType === "answer_meta") {
     onMeta(payload);
+  } else if (eventType === "phase") {
+    onPhase(typeof payload.phase === "string" ? payload.phase : "answering");
   } else if (eventType === "error") {
     throw new Error(typeof payload.message === "string" ? payload.message : "Query stream failed.");
   }
@@ -248,5 +324,19 @@ function handleSsePacket(
 }
 
 function renderSourceTags(content: string) {
-  return content.replace(/\[\[src:(S\d+)\]\]/g, "`$1`");
+  return content.replace(/\[\[src:(S\d+)\]\]/g, "[$1](#source-$1)");
+}
+
+function phaseLabel(phase: string) {
+  if (phase === "drafting") return "Drafting an answer...";
+  if (phase === "refining") return "Refining the answer...";
+  if (phase === "answering") return "Writing the answer...";
+  return "Retrieving relevant context...";
+}
+
+function findPreviousUserMessage(messages: ChatMessage[], startIndex: number) {
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") return index;
+  }
+  return -1;
 }

@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 from . import storage
 from .config import EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, RERANKER_MODEL_ID, Settings, settings
 from .events import EventBus
+from .runtime import ModelRuntime
 from .routes import router
 from .services.jobs import JobManager
 from .services import onnx_setup, retrieval
@@ -170,6 +171,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.settings = active_settings
         app.state.architecture_context = load_architecture_context()
         app.state.llm = None
+        app.state.model_runtime = ModelRuntime()
         app.state.active_model_name = None
         app.state.sqlite = storage.connect_sqlite(active_settings)
         app.state.lance = storage.connect_lance(active_settings)

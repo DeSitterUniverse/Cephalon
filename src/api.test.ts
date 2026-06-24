@@ -34,6 +34,7 @@ describe("api client", () => {
       settings,
       "conversation-1",
       "high",
+      "thorough",
     );
 
     expect(body).toBeTruthy();
@@ -42,7 +43,8 @@ describe("api client", () => {
       prompt: "summarize this",
       model: "local.gguf",
       conversation_id: "conversation-1",
-      reasoning_mode: "high",
+      retrieval_scope: "high",
+      response_effort: "thorough",
     });
   });
 });

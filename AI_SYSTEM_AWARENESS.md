@@ -4,7 +4,7 @@ You are Cephalon, a local document search and answer system. Use retrieved local
 
 ## Runtime
 
-- Shell/UI: Tauri + React workbench with library, chat, source drawer, jobs, settings, document details, chat history, retrieval trace, index health, eval, answer support panels, and Obsidian vault import.
+- Shell/UI: Tauri + React workbench with labeled navigation, collapsible library/details panels, responsive details drawer, multiline chat composer, source drawer, recoverable jobs, settings, document details, searchable chat history, retrieval trace, index health, eval, answer support panels, and Obsidian vault import.
 - Backend: FastAPI package `cephalon_core` with config, routes, storage, ingestion, retrieval, generation, jobs, metrics, documents, models, observability, evaluation, and citation support services.
 - Storage: SQLite is the source of truth for metadata, jobs, events, settings, tags, conversations, messages, parent chunks, summary nodes, child chunks, FTS5 lexical rows, retrieval traces, eval runs, answer records, citations, and feedback. LanceDB stores dense vectors.
 - Models: ONNX Runtime runs embedding/reranking. Packaged installers do not bundle ONNX artifacts; Settings can install configured ONNX folders or select local exported folders. Development uses the PATH Python runtime with user-site packages disabled, and llama.cpp loads one explicitly selected GGUF chat model after the user presses Load.
@@ -29,6 +29,9 @@ Query flow:
 6. Reconstruct parent context, compress redundant sentences, and preserve source tags.
 7. Stream typed events: `subquery`, `conversation`, `source`, `answer_meta`, `token`, `message`, `error`, and `done`.
 8. Persist retrieval traces when enabled so vector, BM25, fused, reranked, unused, and final context candidates can be inspected later.
+9. Apply prompt budgets against the loaded context window, retaining the first user intent and the most recent turns.
+
+Response effort is independent from retrieval scope. Quick and Balanced use one generation pass with different output limits. Thorough creates a hidden candidate answer and streams a refined final answer; hidden reasoning is never shown.
 
 ## Observability
 

@@ -10,13 +10,16 @@ from fastapi import HTTPException
 
 from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
-from cephalon_core.schemas import RagSettings
-from cephalon_core.routes import _settings_for_reasoning_mode
+from cephalon_core.schemas import Message, QueryRequest, RagSettings
+from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import metrics, retrieval
+from cephalon_core.services import generation, metrics, retrieval
 from cephalon_core.services import models
+from cephalon_core.services import documents
+from cephalon_core.services.prompt_budget import budget_prompt
+from cephalon_core.runtime import ModelRuntime
 from cephalon_core.services.documents import collect_obsidian_files
 from cephalon_core.services.ingestion import delete_document_rows, delete_document_vectors, process_single_file
 from cephalon_core.services.jobs import JobManager
@@ -35,6 +38,9 @@ class FakeTable:
 
     def delete(self, filter_expr: str) -> None:
         self.deleted_filters.append(filter_expr)
+        if filter_expr.startswith("doc_id = "):
+            doc_id = filter_expr.split("=", 1)[1].strip().strip("'")
+            self.rows = [row for row in self.rows if row.get("doc_id") != doc_id]
 
     def search(self, *_args, **_kwargs):
         return FakeSearch(self.rows)
@@ -107,15 +113,105 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
 def test_scope_modes_change_retrieval_not_model_style():
     base = RagSettings(top_k=20, rerank_top_n=4, max_tokens=777, temperature=0.72)
 
-    low = _settings_for_reasoning_mode(base, "low")
-    medium = _settings_for_reasoning_mode(base, "medium")
-    high = _settings_for_reasoning_mode(base, "high")
+    low = _settings_for_retrieval_scope(base, "low")
+    medium = _settings_for_retrieval_scope(base, "medium")
+    high = _settings_for_retrieval_scope(base, "high")
 
     assert (low.top_k, low.rerank_top_n) == (12, 3)
     assert (medium.top_k, medium.rerank_top_n) == (20, 4)
     assert (high.top_k, high.rerank_top_n) == (28, 6)
     assert low.temperature == medium.temperature == high.temperature == 0.72
     assert low.max_tokens == medium.max_tokens == high.max_tokens == 777
+
+
+def test_query_request_separates_retrieval_scope_and_response_effort():
+    request = QueryRequest(
+        prompt="Compare the documents carefully.",
+        retrieval_scope="high",
+        response_effort="thorough",
+    )
+
+    assert request.retrieval_scope == "high"
+    assert request.response_effort == "thorough"
+
+
+def test_thorough_response_effort_drafts_then_refines():
+    calls = []
+
+    class FakeLlm:
+        def __call__(self, prompt, **kwargs):
+            calls.append({"prompt": prompt, **kwargs})
+            if kwargs["stream"]:
+                return iter([
+                    {"choices": [{"text": "Final "}]},
+                    {"choices": [{"text": "answer"}]},
+                ])
+            return {"choices": [{"text": "Draft answer with one gap."}]}
+
+    state = SimpleNamespace(
+        llm=FakeLlm(),
+        architecture_context="",
+    )
+
+    tokens = list(generation.stream_response(
+        state,
+        "What changed?",
+        "[[src:S1]] The release changed.",
+        [Message(role="user", content="Earlier context")],
+        RagSettings(max_tokens=512),
+        {"confidence": 0.9},
+        response_effort="thorough",
+    ))
+
+    assert tokens == ["Final ", "answer"]
+    assert len(calls) == 2
+    assert calls[0]["stream"] is False
+    assert calls[1]["stream"] is True
+    assert "Draft answer with one gap." in calls[1]["prompt"]
+
+
+def test_prompt_budget_preserves_first_intent_and_recent_messages():
+    history = [Message(role="user", content="Original intent: compare release behavior.")]
+    history.extend(
+        Message(role="assistant" if index % 2 else "user", content=(f"message {index} " * 80))
+        for index in range(12)
+    )
+    bounded_history, bounded_context = budget_prompt(
+        history,
+        "evidence " * 5000,
+        context_window=1200,
+        output_tokens=200,
+    )
+
+    assert bounded_history[0].content.startswith("Original intent")
+    assert bounded_history[-1].content.startswith("message 11")
+    assert len(bounded_history) < len(history)
+    assert len(bounded_context) < len("evidence " * 5000)
+
+
+def test_model_runtime_serializes_model_access():
+    runtime = ModelRuntime()
+    entered = []
+
+    def worker(name):
+        with runtime.exclusive():
+            entered.append(f"{name}-start")
+            import time as _time
+            _time.sleep(0.02)
+            entered.append(f"{name}-end")
+
+    import threading
+    first = threading.Thread(target=worker, args=("first",))
+    second = threading.Thread(target=worker, args=("second",))
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+
+    assert entered in [
+        ["first-start", "first-end", "second-start", "second-end"],
+        ["second-start", "second-end", "first-start", "first-end"],
+    ]
 
 
 def test_validate_model_filename_blocks_paths(tmp_path):
@@ -264,6 +360,71 @@ def test_conversation_persistence_roundtrip():
     assert loaded["messages"][1]["sources"][0]["source_id"] == "S1"
 
 
+def test_document_payloads_batch_tags_and_limit_previews():
+    state = build_memory_state()
+    for index in range(3):
+        doc_id = f"doc-{index}"
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, 'ready', 'file')",
+            (doc_id, f"/tmp/{doc_id}.md", doc_id, f"hash-{index}", 30),
+        )
+        storage.execute(state.sqlite, "INSERT INTO document_tags (doc_id, tag) VALUES (?, ?)", (doc_id, "test"))
+        for chunk_index in range(30):
+            storage.execute(
+                state.sqlite,
+                "INSERT INTO chunks (id, doc_id, chunk_index, text) VALUES (?, ?, ?, ?)",
+                (f"{doc_id}-{chunk_index}", doc_id, chunk_index, f"chunk {chunk_index}"),
+            )
+
+    statements = []
+    state.sqlite.set_trace_callback(statements.append)
+    documents = storage.list_document_payloads(state.sqlite)
+    detail = storage.get_document_payload(state.sqlite, "doc-0", preview_limit=20)
+    state.sqlite.set_trace_callback(None)
+
+    assert len(documents) == 3
+    assert all(document["tags"] == ["test"] for document in documents)
+    assert len(detail["chunk_preview"]) == 20
+    assert sum("FROM document_tags" in statement for statement in statements) == 2
+    assert any("LIMIT 20" in statement for statement in statements)
+
+
+def test_conversation_sources_are_loaded_in_one_query():
+    state = build_memory_state()
+    conversation = storage.create_conversation(state.sqlite, "Batch sources")
+    for index in range(4):
+        message = storage.append_message(state.sqlite, conversation["id"], "assistant", f"answer {index}")
+        storage.save_message_sources(state.sqlite, message["id"], [{"source_id": f"S{index + 1}"}])
+
+    statements = []
+    state.sqlite.set_trace_callback(statements.append)
+    loaded = storage.get_conversation(state.sqlite, conversation["id"])
+    state.sqlite.set_trace_callback(None)
+
+    assert len(loaded["messages"]) == 4
+    assert sum("FROM message_sources" in statement for statement in statements) == 1
+
+
+def test_conversation_messages_are_paginated_from_the_newest():
+    state = build_memory_state()
+    conversation = storage.create_conversation(state.sqlite, "Long chat")
+    for index in range(5):
+        storage.append_message(state.sqlite, conversation["id"], "user", f"message {index}")
+
+    newest = storage.get_conversation(state.sqlite, conversation["id"], message_limit=2)
+    older = storage.get_conversation(
+        state.sqlite,
+        conversation["id"],
+        message_limit=2,
+        before=newest["next_before"],
+    )
+
+    assert [message["content"] for message in newest["messages"]] == ["message 3", "message 4"]
+    assert newest["has_more"] is True
+    assert [message["content"] for message in older["messages"]] == ["message 1", "message 2"]
+
+
 def test_process_single_file_skips_duplicate_hash(monkeypatch, tmp_path):
     state = build_memory_state()
     file_path = tmp_path / "note.md"
@@ -288,6 +449,50 @@ def test_process_single_file_skips_duplicate_hash(monkeypatch, tmp_path):
     assert state.lance.table is not None
     assert len(state.lance.table.rows) == 2
     assert {row["source_kind"] for row in state.lance.table.rows} == {"summary", "child"}
+
+
+def test_document_readers_stream_hash_and_avoid_duplicate_extraction(monkeypatch, tmp_path):
+    file_path = tmp_path / "large.bin"
+    file_path.write_bytes(b"x" * (1024 * 1024 + 17))
+    read_sizes = []
+    original_open = open
+
+    class TrackingFile:
+        def __init__(self, file_obj):
+            self.file_obj = file_obj
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file_obj.close()
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self.file_obj.read(size)
+
+    monkeypatch.setattr("builtins.open", lambda path, mode="r", *args, **kwargs: TrackingFile(original_open(path, mode, *args, **kwargs)))
+    documents.get_file_hash(str(file_path))
+    assert read_sizes
+    assert -1 not in read_sizes
+
+    calls = []
+
+    class FakePage:
+        def extract_text(self):
+            calls.append("extract")
+            return "page text"
+
+    monkeypatch.setattr(documents, "PdfReader", lambda _path: SimpleNamespace(pages=[FakePage(), FakePage()]))
+    text, _mode = documents.extract_text("fixture.pdf")
+    assert text == "page text\npage text"
+    assert len(calls) == 2
+
+    workbook = SimpleNamespace(worksheets=[])
+    load_workbook = lambda *_args, **kwargs: (calls.append(kwargs), workbook)[1]
+    monkeypatch.setattr(documents.openpyxl, "load_workbook", load_workbook)
+    documents.extract_text("fixture.xlsx")
+    assert calls[-1]["read_only"] is True
 
 
 def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
@@ -334,6 +539,64 @@ def test_process_single_file_creates_parent_child_summary_metadata(monkeypatch, 
     assert summaries
     assert all(row["parent_id"] for row in chunks)
     assert {row["semantic_role"] for row in chunks} == {"child"}
+
+
+def test_process_single_file_batches_final_embeddings(monkeypatch, tmp_path):
+    state = build_memory_state()
+    state.embedder = object()
+    file_path = tmp_path / "batch.md"
+    file_path.write_text("Batch final summary and child embeddings together.", encoding="utf-8")
+    batch_sizes = []
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    async def fake_embeddings(_app_state, texts: list[str]):
+        batch_sizes.append(len(texts))
+        return [
+            [float(index)] * storage.active_embedding_metadata()["embedding_dim"]
+            for index, _text in enumerate(texts)
+        ]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embeddings", fake_embeddings)
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+
+    assert result["status"] == "ready"
+    assert batch_sizes == [2]
+
+
+def test_process_single_file_reports_stage_progress(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "progress.md"
+    file_path.write_text("Report extraction, chunking, embedding, and persistence.", encoding="utf-8")
+    progress = []
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    async def report(stage: str, percent: int):
+        progress.append((stage, percent))
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    result = asyncio.run(
+        process_single_file(
+            state,
+            str(file_path),
+            RagSettings(),
+            progress=report,
+        )
+    )
+
+    assert result["status"] == "ready"
+    assert progress == [
+        ("extracting", 10),
+        ("chunking", 35),
+        ("embedding", 65),
+        ("persisting", 90),
+        ("complete", 100),
+    ]
 
 
 def test_unknown_text_file_imports_without_force_text(monkeypatch, tmp_path):
@@ -412,6 +675,41 @@ def test_query_accepts_loaded_model():
     routes._ensure_query_model_loaded(app_state, "loaded.gguf")
 
 
+def test_generation_event_stream_stops_after_client_disconnect():
+    class FakeRequest:
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    class ClosableEvents:
+        def __init__(self):
+            self.closed = False
+            self.events = iter([("token", "first"), ("token", "second")])
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.events)
+
+        def close(self):
+            self.closed = True
+
+    async def collect():
+        request = FakeRequest()
+        events = ClosableEvents()
+        received = [event async for event in routes._cancel_on_disconnect(request, events)]
+        return received, events.closed
+
+    received, closed = asyncio.run(collect())
+
+    assert received == [("token", "first")]
+    assert closed is True
+
+
 def test_model_metadata_reader_rejects_non_object_json(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -446,16 +744,15 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert "Cephalon retrieval fixture" in context
 
 
-def test_reranker_scores_fixed_batch_onnx_one_pair_at_a_time():
-    class BatchOneTokenizer:
+def test_reranker_scores_candidates_in_one_onnx_batch():
+    class BatchTokenizer:
         def __call__(self, pairs, **_kwargs):
-            assert len(pairs) == 1
             return {
-                "input_ids": np.ones((1, 8), dtype=np.int64),
-                "attention_mask": np.ones((1, 8), dtype=np.int64),
+                "input_ids": np.ones((len(pairs), 8), dtype=np.int64),
+                "attention_mask": np.ones((len(pairs), 8), dtype=np.int64),
             }
 
-    class BatchOneSession:
+    class BatchSession:
         def __init__(self):
             self.calls = 0
 
@@ -463,13 +760,13 @@ def test_reranker_scores_fixed_batch_onnx_one_pair_at_a_time():
             return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
 
         def run(self, _output_names, ort_inputs):
-            assert ort_inputs["input_ids"].shape[0] == 1
             self.calls += 1
-            return [np.asarray([[2.0 + self.calls, 0.5]], dtype=np.float32)]
+            batch_size = ort_inputs["input_ids"].shape[0]
+            return [np.asarray([[2.0 + index, 0.5] for index in range(batch_size)], dtype=np.float32)]
 
-    session = BatchOneSession()
+    session = BatchSession()
     state = SimpleNamespace(
-        tokenizer=BatchOneTokenizer(),
+        tokenizer=BatchTokenizer(),
         reranker=session,
         reranker_score_mode="logit_margin_0_minus_1",
         rerank_cache=OrderedDict(),
@@ -482,9 +779,43 @@ def test_reranker_scores_fixed_batch_onnx_one_pair_at_a_time():
 
     ranked = retrieval.rerank(state, "query", results)
 
-    assert session.calls == 3
+    assert session.calls == 1
     assert all("rerank_score" in item for item in ranked)
     assert ranked[0]["rerank_score"] > ranked[-1]["rerank_score"]
+
+
+def test_embedder_scores_texts_in_one_onnx_batch():
+    state = build_memory_state()
+    state.embedding_dim = storage.active_embedding_metadata()["embedding_dim"]
+    state.embedding_fixed_sequence_length = None
+    state.embedding_pooling = "embedding"
+    calls = []
+
+    class BatchTokenizer:
+        def __call__(self, texts, **_kwargs):
+            count = len(texts)
+            return {
+                "input_ids": np.ones((count, 3), dtype=np.int64),
+                "attention_mask": np.ones((count, 3), dtype=np.int64),
+            }
+
+    class BatchEmbedder:
+        def run(self, _output_names, ort_inputs):
+            batch_size = ort_inputs["input_ids"].shape[0]
+            calls.append(batch_size)
+            return [np.asarray([
+                [float(index)] * state.embedding_dim
+                for index in range(batch_size)
+            ], dtype=np.float32)]
+
+    state.embed_tokenizer = BatchTokenizer()
+    state.embedder = BatchEmbedder()
+
+    vectors = asyncio.run(retrieval.get_embeddings(state, ["first", "second", "third"]))
+
+    assert calls == [3]
+    assert len(vectors) == 3
+    assert vectors[1][0] == 1.0
 
 
 def test_context_compressor_keeps_relevant_cited_sentences():
@@ -679,6 +1010,42 @@ def test_job_manager_lifecycle_and_events(monkeypatch, tmp_path):
     assert any(row["event_type"] == "job" for row in events)
 
 
+def test_job_manager_recovers_queued_and_marks_interrupted_running_jobs(tmp_path):
+    state = build_memory_state()
+    event_bus = EventBus(state.sqlite)
+    manager = JobManager(state, event_bus)
+    now = 1778755000
+    for job_id, status in (("queued-job", "queued"), ("running-job", "running")):
+        storage.execute(
+            state.sqlite,
+            """
+            INSERT INTO jobs (id, kind, path, status, created_at, updated_at)
+            VALUES (?, 'ingest', ?, ?, ?, ?)
+            """,
+            (job_id, str(tmp_path / f"{job_id}.md"), status, now, now),
+        )
+
+    queued_ids = manager.recover_interrupted_jobs()
+
+    assert queued_ids == ["queued-job"]
+    running = manager.get_job("running-job")
+    assert running["status"] == "failed"
+    assert "interrupted" in running["error"].lower()
+
+
+def test_event_bus_drops_old_refresh_event_for_slow_subscriber():
+    async def exercise():
+        bus = EventBus()
+        queue = asyncio.Queue(maxsize=1)
+        await queue.put({"type": "document", "payload": {"old": True}})
+        bus._subscribers.add(queue)
+        await asyncio.wait_for(bus.publish("document", {"new": True}), timeout=0.1)
+        return await queue.get()
+
+    event = asyncio.run(exercise())
+    assert event["payload"] == {"new": True}
+
+
 def test_reindex_preserves_display_name_and_tags(monkeypatch, tmp_path):
     state = build_memory_state()
     event_bus = EventBus(state.sqlite)
@@ -708,6 +1075,87 @@ def test_reindex_preserves_display_name_and_tags(monkeypatch, tmp_path):
     assert row["display_name"] == "Renamed Fixture"
     assert row["status"] == "ready"
     assert tags == ["rag"]
+
+
+def test_failed_reindex_keeps_previous_searchable_chunks(monkeypatch, tmp_path):
+    state = build_memory_state()
+    event_bus = EventBus(state.sqlite)
+    manager = JobManager(state, event_bus)
+    file_path = tmp_path / "fixture.md"
+    file_path.write_text("Original searchable content.", encoding="utf-8")
+
+    async def good_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", good_embedding)
+    first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    original_chunks = [row["text"] for row in storage.fetchall(state.sqlite, "SELECT text FROM chunks WHERE doc_id = ?", (first["doc_id"],))]
+    file_path.write_text("Replacement content that fails.", encoding="utf-8")
+
+    async def failed_embedding(_app_state, _text: str):
+        raise RuntimeError("embedding failed")
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", failed_embedding)
+
+    async def run_job():
+        job = await manager.enqueue_ingest(str(file_path), kind="reindex", target_doc_id=first["doc_id"])
+        await manager._run_job(job["id"])
+        return manager.get_job(job["id"])
+
+    finished = asyncio.run(run_job())
+    remaining_chunks = [row["text"] for row in storage.fetchall(state.sqlite, "SELECT text FROM chunks WHERE doc_id = ?", (first["doc_id"],))]
+    document = storage.fetchone(state.sqlite, "SELECT status FROM documents WHERE id = ?", (first["doc_id"],))
+
+    assert finished["status"] == "failed"
+    assert remaining_chunks == original_chunks
+    assert document["status"] == "ready"
+
+
+def test_failed_vector_replacement_rolls_back_reindex_rows(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "fixture.md"
+    file_path.write_text("Original searchable content.", encoding="utf-8")
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    original_chunks = [
+        row["text"]
+        for row in storage.fetchall(state.sqlite, "SELECT text FROM chunks WHERE doc_id = ?", (first["doc_id"],))
+    ]
+    file_path.write_text("Replacement content reaches vector persistence.", encoding="utf-8")
+
+    original_add = state.lance.table.add
+
+    def fail_vector_write(rows):
+        if any("Replacement content" in row["text"] for row in rows):
+            raise RuntimeError("vector write failed")
+        original_add(rows)
+
+    monkeypatch.setattr(state.lance.table, "add", fail_vector_write)
+    result = asyncio.run(
+        process_single_file(
+            state,
+            str(file_path),
+            RagSettings(),
+            existing_doc_id=first["doc_id"],
+        )
+    )
+    remaining_chunks = [
+        row["text"]
+        for row in storage.fetchall(state.sqlite, "SELECT text FROM chunks WHERE doc_id = ?", (first["doc_id"],))
+    ]
+    remaining_vectors = [
+        row["text"]
+        for row in state.lance.table.rows
+        if row["doc_id"] == first["doc_id"]
+    ]
+
+    assert result["status"] == "failed"
+    assert remaining_chunks == original_chunks
+    assert set(remaining_vectors) == {"Original searchable content.", "Original searchable content."}
 
 
 def test_metrics_export_writes_numeric_snapshot(tmp_path):

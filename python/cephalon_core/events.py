@@ -20,7 +20,18 @@ class EventBus:
                 (job_id, event_type, json.dumps(payload), event["created_at"]),
             )
         for queue in list(self._subscribers):
-            await queue.put(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
     async def stream(self) -> AsyncIterator[str]:
         queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)

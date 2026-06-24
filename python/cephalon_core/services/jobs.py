@@ -6,7 +6,7 @@ import uuid
 from .. import storage
 from ..events import EventBus
 from .documents import collect_obsidian_files, collect_supported_files
-from .ingestion import delete_document_vectors, process_single_file
+from .ingestion import process_single_file
 
 
 class JobManager:
@@ -16,11 +16,14 @@ class JobManager:
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.worker_task: asyncio.Task | None = None
         self.running = False
+        self.cancelled_jobs: set[str] = set()
 
     async def start(self) -> None:
         if self.running:
             return
         self.running = True
+        for job_id in self.recover_interrupted_jobs():
+            await self.queue.put(job_id)
         self.worker_task = asyncio.create_task(self._worker())
 
     async def stop(self) -> None:
@@ -47,6 +50,47 @@ class JobManager:
         await self.queue.put(job_id)
         return self.get_job(job_id)
 
+    def recover_interrupted_jobs(self) -> list[str]:
+        now = int(time.time())
+        storage.execute(
+            self.app_state.sqlite,
+            """
+            UPDATE jobs
+            SET status = 'failed', error = 'Job interrupted by backend restart.', current_file = NULL, updated_at = ?
+            WHERE status = 'running'
+            """,
+            (now,),
+        )
+        rows = storage.fetchall(
+            self.app_state.sqlite,
+            "SELECT id FROM jobs WHERE status = 'queued' ORDER BY created_at, rowid",
+        )
+        return [row["id"] for row in rows]
+
+    async def cancel_job(self, job_id: str) -> dict:
+        job = self.get_job(job_id)
+        if job["status"] not in {"queued", "running"}:
+            return job
+        self.cancelled_jobs.add(job_id)
+        await self._update_job(job_id, status="cancelled", current_file=None, error=None)
+        return self.get_job(job_id)
+
+    async def retry_job(self, job_id: str) -> dict:
+        job = self.get_job(job_id)
+        if job["status"] not in {"failed", "cancelled"}:
+            raise ValueError("Only failed or cancelled jobs can be retried.")
+        self.cancelled_jobs.discard(job_id)
+        await self._update_job(
+            job_id,
+            status="queued",
+            processed_files=0,
+            skipped_files=0,
+            current_file=None,
+            error=None,
+        )
+        await self.queue.put(job_id)
+        return self.get_job(job_id)
+
     def list_jobs(self) -> list[dict]:
         rows = storage.fetchall(self.app_state.sqlite, "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100")
         return [self._job_payload(row) for row in rows]
@@ -70,6 +114,8 @@ class JobManager:
 
     async def _run_job(self, job_id: str) -> None:
         job = self.get_job(job_id)
+        if job_id in self.cancelled_jobs or job["status"] == "cancelled":
+            return
         path = job["path"]
         force_text = bool(job.get("force_text"))
         files = collect_obsidian_files(path) if job["kind"] == "obsidian" else collect_supported_files(path, force_text=force_text)
@@ -86,18 +132,22 @@ class JobManager:
         rag_settings = storage.get_rag_settings(self.app_state.sqlite)
 
         for file_path in files:
+            if job_id in self.cancelled_jobs:
+                await self._update_job(job_id, status="cancelled", current_file=None)
+                return
             await self._update_job(job_id, current_file=file_path)
             existing_doc_id = job.get("target_doc_id") if job["kind"] == "reindex" and total == 1 else None
-            if existing_doc_id:
-                delete_document_vectors(self.app_state, existing_doc_id)
-                storage.delete_document_fts(self.app_state.sqlite, existing_doc_id)
-                storage.execute(self.app_state.sqlite, "DELETE FROM chunks WHERE doc_id = ?", (existing_doc_id,))
+
+            async def report_progress(stage: str, percent: int) -> None:
+                await self._update_job(job_id, stage=stage, stage_progress=percent)
+
             result = await process_single_file(
                 self.app_state,
                 file_path,
                 rag_settings,
                 force_text=force_text or job["kind"] == "obsidian",
                 existing_doc_id=existing_doc_id,
+                progress=report_progress,
             )
             processed += 1
             if result["status"] == "skipped":
@@ -108,9 +158,22 @@ class JobManager:
             await self.event_bus.publish("document", result, job_id)
 
         if failures:
-            await self._update_job(job_id, status="failed", error="; ".join(failures[:3]), current_file=None)
+            await self._update_job(
+                job_id,
+                status="failed",
+                error="; ".join(failures[:3]),
+                current_file=None,
+                stage="failed",
+                stage_progress=100,
+            )
         else:
-            await self._update_job(job_id, status="succeeded", current_file=None)
+            await self._update_job(
+                job_id,
+                status="succeeded",
+                current_file=None,
+                stage="complete",
+                stage_progress=100,
+            )
 
     async def _update_job(self, job_id: str, **fields) -> None:
         fields["updated_at"] = int(time.time())

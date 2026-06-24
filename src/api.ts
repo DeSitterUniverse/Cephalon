@@ -1,3 +1,7 @@
+import { apiUrl, ApiError, requestJson, responseError } from "./api/client";
+
+export { ApiError } from "./api/client";
+
 export type Message = { role: "user" | "assistant"; content: string };
 export type Document = {
   id: string;
@@ -31,6 +35,8 @@ export type Job = {
   processed_files: number;
   skipped_files: number;
   current_file?: string | null;
+  stage?: string | null;
+  stage_progress?: number;
   error?: string | null;
   created_at: number;
   updated_at: number;
@@ -135,6 +141,8 @@ export type Conversation = {
   created_at: number;
   updated_at: number;
   messages?: StoredMessage[];
+  has_more?: boolean;
+  next_before?: number | null;
 };
 export type HealthResponse = {
   status: string;
@@ -226,57 +234,9 @@ type ObsidianVaultResponse = { path: string; exists: boolean };
 type RetrievalTracesResponse = { traces: RetrievalTraceSummary[] };
 type EvalRunsResponse = { runs: EvalRun[] };
 
-function configuredApiBaseUrl(): string {
-  try {
-    const storageValue = typeof window !== "undefined" && typeof window.localStorage?.getItem === "function"
-      ? window.localStorage.getItem("cephalon.apiBaseUrl")
-      : null;
-    return storageValue || import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
-  } catch {
-    return import.meta.env.VITE_CEPHALON_API_URL || "http://127.0.0.1:8765";
-  }
-}
-
-const API_BASE_URL = configuredApiBaseUrl();
-
-export class ApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-  }
-}
-
-async function parseError(res: Response): Promise<string> {
-  try {
-    const data = await res.json();
-    return data.detail || data.error || res.statusText;
-  } catch {
-    return res.statusText;
-  }
-}
-
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
-
-  if (!res.ok) {
-    throw new ApiError(await parseError(res), res.status);
-  }
-
-  return res.json() as Promise<T>;
-}
-
 export async function healthCheck(): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE_URL}/health`);
+    const res = await fetch(apiUrl("/health"));
     return res.ok;
   } catch {
     return false;
@@ -375,6 +335,14 @@ export function getJobs(): Promise<JobsResponse> {
   return requestJson<JobsResponse>("/jobs");
 }
 
+export function cancelJob(id: string): Promise<Job> {
+  return requestJson<Job>(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+}
+
+export function retryJob(id: string): Promise<Job> {
+  return requestJson<Job>(`/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
+}
+
 export function getConversations(): Promise<ConversationsResponse> {
   return requestJson<ConversationsResponse>("/conversations");
 }
@@ -383,8 +351,10 @@ export function createConversation(): Promise<Conversation> {
   return requestJson<Conversation>("/conversations", { method: "POST" });
 }
 
-export function getConversation(id: string): Promise<Conversation> {
-  return requestJson<Conversation>(`/conversations/${encodeURIComponent(id)}`);
+export function getConversation(id: string, limit = 100, before?: number | null): Promise<Conversation> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before != null) query.set("before", String(before));
+  return requestJson<Conversation>(`/conversations/${encodeURIComponent(id)}?${query}`);
 }
 
 export function renameConversation(id: string, title: string): Promise<Conversation> {
@@ -437,7 +407,7 @@ export function runEval(evals: Array<{ id: string; question: string; expected_do
 }
 
 export function eventsUrl(): string {
-  return `${API_BASE_URL}/events`;
+  return apiUrl("/events");
 }
 
 export async function queryModel(
@@ -446,16 +416,19 @@ export async function queryModel(
   history: Message[],
   settings?: RagSettings,
   conversation_id?: string | null,
-  reasoning_mode = "medium",
+  retrieval_scope = "medium",
+  response_effort = "balanced",
+  signal?: AbortSignal,
 ): Promise<ReadableStream<Uint8Array>> {
-  const res = await fetch(`${API_BASE_URL}/query`, {
+  const res = await fetch(apiUrl("/query"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model, history, settings, conversation_id, reasoning_mode }),
+    body: JSON.stringify({ prompt, model, history, settings, conversation_id, retrieval_scope, response_effort }),
+    signal,
   });
 
   if (!res.ok) {
-    throw new ApiError(await parseError(res), res.status);
+    throw await responseError(res);
   }
   if (!res.body) {
     throw new ApiError("No response body from local service.", res.status);

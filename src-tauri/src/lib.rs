@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -24,9 +25,30 @@ fn backend_is_listening() -> bool {
     TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(250)).is_ok()
 }
 
+fn backend_is_cephalon() -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    let host = backend_addr();
+    let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    backend_health_is_compatible(&response)
+}
+
+fn backend_health_is_compatible(response: &str) -> bool {
+    response.contains("\"service\":\"cephalon\"") && response.contains("\"api_version\":1")
+}
+
 #[tauri::command]
 fn check_backend() -> bool {
-    backend_is_listening()
+    backend_is_cephalon()
 }
 
 #[tauri::command]
@@ -267,9 +289,14 @@ pub fn run() {
             let child = if env::var("CEPHALON_EXTERNAL_BACKEND").ok().as_deref() == Some("1") {
                 println!("Cephalon external backend mode enabled; skipping local backend launch.");
                 None
-            } else if backend_is_listening() {
+            } else if backend_is_cephalon() {
                 println!("Cephalon backend already listening at {}; reusing it.", backend_addr());
                 None
+            } else if backend_is_listening() {
+                return Err(format!(
+                    "Port {} is occupied by a service that is not a compatible Cephalon backend.",
+                    backend_addr()
+                ).into());
             } else if cfg!(debug_assertions) {
                 spawn_dev_backend()
             } else {
@@ -296,4 +323,21 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backend_health_is_compatible;
+
+    #[test]
+    fn accepts_compatible_cephalon_health_response() {
+        let response = "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":1,\"status\":\"ok\"}";
+        assert!(backend_health_is_compatible(response));
+    }
+
+    #[test]
+    fn rejects_unrelated_or_incompatible_services() {
+        assert!(!backend_health_is_compatible("HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}"));
+        assert!(!backend_health_is_compatible("{\"service\":\"cephalon\",\"api_version\":2}"));
+    }
 }
