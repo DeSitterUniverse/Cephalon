@@ -14,7 +14,6 @@ export function useEventStream() {
     let closed = false;
     const refresh = () => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     };
 
     const clearFallback = () => {

@@ -30,6 +30,9 @@ describe("SettingsPanel", () => {
     expect(setSelectedModel).toHaveBeenCalledWith("large.gguf");
     expect(screen.getByText("Appearance")).toBeInTheDocument();
     expect(screen.getByText("Embedding and reranking")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Download default" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Use local folder" })).toHaveLength(2);
+    expect(screen.getByText("Default source: example/embedder")).toBeInTheDocument();
     expect(screen.getByText("C:\\models\\embedder")).toBeInTheDocument();
     expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
     expect(screen.queryByText("Temperature")).not.toBeInTheDocument();

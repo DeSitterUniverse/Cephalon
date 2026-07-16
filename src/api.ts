@@ -26,21 +26,6 @@ export type Document = {
     embedding_status?: string | null;
   }>;
 };
-export type Job = {
-  id: string;
-  kind: string;
-  path: string;
-  status: string;
-  total_files: number;
-  processed_files: number;
-  skipped_files: number;
-  current_file?: string | null;
-  stage?: string | null;
-  stage_progress?: number;
-  error?: string | null;
-  created_at: number;
-  updated_at: number;
-};
 export type RagSettings = {
   top_k: number;
   rerank_top_n: number;
@@ -159,6 +144,11 @@ export type HealthResponse = {
   onnx_warmup?: { ready?: boolean; warmup_ms?: number } | null;
   onnx_setup?: OnnxSetupStatus;
   llama_backend?: {
+    provider?: "external_llama_server";
+    server_url?: string;
+    server_available?: boolean | null;
+    server_error?: string | null;
+    model_name?: string;
     vulkan_available?: boolean;
     vulkan_required?: boolean;
     vulkan_dll?: string | null;
@@ -227,7 +217,6 @@ export type LoadModelResponse = {
   llama_backend?: HealthResponse["llama_backend"];
 };
 type DocumentsResponse = { documents: Document[] };
-type JobsResponse = { jobs: Job[] };
 type ConversationsResponse = { conversations: Conversation[] };
 type IngestResponse = { job_id: string; status: string; message?: string };
 type ObsidianVaultResponse = { path: string; exists: boolean };
@@ -331,17 +320,6 @@ export function deleteDocumentTag(id: string, tag: string): Promise<{ status: st
   });
 }
 
-export function getJobs(): Promise<JobsResponse> {
-  return requestJson<JobsResponse>("/jobs");
-}
-
-export function cancelJob(id: string): Promise<Job> {
-  return requestJson<Job>(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
-}
-
-export function retryJob(id: string): Promise<Job> {
-  return requestJson<Job>(`/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
-}
 
 export function getConversations(): Promise<ConversationsResponse> {
   return requestJson<ConversationsResponse>("/conversations");

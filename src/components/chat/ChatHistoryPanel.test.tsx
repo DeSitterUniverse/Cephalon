@@ -7,7 +7,6 @@ describe("ChatHistoryPanel", () => {
   it("selects, creates, renames, deletes, and filters saved conversations", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
-    const onNew = vi.fn();
     const onDelete = vi.fn();
     const onRename = vi.fn().mockResolvedValue(undefined);
 
@@ -29,7 +28,6 @@ describe("ChatHistoryPanel", () => {
         ]}
         selectedId="conversation-1"
         onSelect={onSelect}
-        onNew={onNew}
         onDelete={onDelete}
         onRename={onRename}
       />,
@@ -41,9 +39,6 @@ describe("ChatHistoryPanel", () => {
 
     await user.click(screen.getByText("Stress notes"));
     expect(onSelect).toHaveBeenCalledWith("conversation-1");
-
-    await user.click(screen.getByTitle("Start new chat"));
-    expect(onNew).toHaveBeenCalled();
 
     await user.click(screen.getByTitle("Delete chat"));
     expect(onDelete).toHaveBeenCalledWith("conversation-1");

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { AnswerSupport, SourceChunk } from "./api";
 
-export type RightPanel = "jobs" | "settings" | "document" | "sources" | "history" | "trace" | "health" | "eval" | "support";
+export type RightPanel = "settings" | "document" | "sources" | "history" | "trace" | "health" | "eval" | "support";
 export type NotificationKind = "info" | "success" | "error";
 export type AppNotification = { id: number; message: string; kind: NotificationKind };
 export type ConfirmationRequest = {
@@ -102,7 +102,7 @@ export const useUiStore = create<UiState>((set) => ({
   selectedConversationId: null,
   selectedSources: [],
   selectedSupport: null,
-  rightPanel: "jobs",
+  rightPanel: "history",
   ...initialLayout,
   notifications: [],
   confirmation: null,

@@ -1,22 +1,78 @@
 from collections.abc import Iterator
 from contextlib import nullcontext
+import json
 from typing import Any, Literal
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from ..schemas import Message, RagSettings
+from . import models
 from .prompt_budget import budget_prompt
 
 
 ResponseEffort = Literal["quick", "balanced", "thorough"]
 
 
-def _format_prompt(system_instruction: str, history: list[Message], prompt: str) -> str:
-    lines = [f"<|im_start|>system\n{system_instruction.strip()}<|im_end|>"]
+def _chat_messages(system_instruction: str, history: list[Message], prompt: str) -> list[dict[str, str]]:
+    messages = [{"role": "system", "content": system_instruction.strip()}]
     for message in history[-8:]:
         role = "assistant" if message.role == "assistant" else "user"
-        lines.append(f"<|im_start|>{role}\n{message.content.strip()}<|im_end|>")
-    lines.append(f"<|im_start|>user\n{prompt.strip()}<|im_end|>")
-    lines.append("<|im_start|>assistant\n")
-    return "\n".join(lines)
+        messages.append({"role": role, "content": message.content.strip()})
+    messages.append({"role": "user", "content": prompt.strip()})
+    return messages
+
+
+def _server_completion(messages: list[dict[str, str]], settings: RagSettings, *, stream: bool) -> Any:
+    payload = json.dumps({
+        "model": models.llama_server_model_name(),
+        "messages": messages,
+        "stream": stream,
+        "temperature": settings.temperature,
+        "max_tokens": settings.max_tokens,
+    }).encode("utf-8")
+    request = Request(
+        f"{models.llama_server_url()}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json"},
+        method="POST",
+    )
+    try:
+        return urlopen(request, timeout=300)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"llama.cpp server returned HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach llama.cpp server at {models.llama_server_url()}: {exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not reach llama.cpp server at {models.llama_server_url()}: {exc}") from exc
+
+
+def _response_content(response: dict[str, Any]) -> str:
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    choice = choices[0]
+    return str((choice.get("message") or {}).get("content") or choice.get("text") or "").strip()
+
+
+def _stream_server_completion(messages: list[dict[str, str]], settings: RagSettings) -> Iterator[str]:
+    with _server_completion(messages, settings, stream=True) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                return
+            try:
+                event = json.loads(payload)
+                choices = event.get("choices") or []
+                if choices:
+                    content = (choices[0].get("delta") or {}).get("content") or choices[0].get("text") or ""
+                    if content:
+                        yield str(content)
+            except json.JSONDecodeError:
+                continue
 
 
 def build_system_instruction(
@@ -41,7 +97,7 @@ def build_system_instruction(
     )
     return (
         "You are Cephalon, a local assistant with persistent chat memory and optional document retrieval. "
-        "Answer in a capable, direct voice that fits the current conversation and the selected local model's natural style. "
+        "Answer in a capable, direct voice that fits the current conversation and the configured external server model's natural style. "
         "Use chat history as normal conversation context. Treat retrieved files as supporting evidence, not as the only thing you can discuss. "
         "Reason through the request before answering, but do not expose hidden chain-of-thought. "
         "Do not repeat the user's prompt as part of the answer. "
@@ -55,13 +111,6 @@ def build_system_instruction(
         f"{architecture_context}"
         f"--- START RECALLED MEMORIES & FILES ---\n{context}\n--- END RECALLED MEMORIES & FILES ---\n\n"
     )
-
-
-def _completion_text(result: dict[str, Any]) -> str:
-    choices = result.get("choices") or []
-    if not choices:
-        return ""
-    return str(choices[0].get("text") or "").strip()
 
 
 def _draft_answer(
@@ -92,15 +141,10 @@ def _draft_answer(
     runtime = getattr(app_state, "model_runtime", None)
     guard = runtime.exclusive() if runtime is not None else nullcontext()
     with guard:
-        result = app_state.llm(
-            _format_prompt(system_instruction, bounded_history, prompt),
-            stream=False,
-            temperature=min(settings.temperature, 0.5),
-            max_tokens=max(128, min(settings.max_tokens, 512)),
-            stop=["<|im_end|>"],
-            echo=False,
-        )
-    return _completion_text(result)
+        draft_settings = settings.model_copy(update={"temperature": min(settings.temperature, 0.5), "max_tokens": max(128, min(settings.max_tokens, 512))})
+        with _server_completion(_chat_messages(system_instruction, bounded_history, prompt), draft_settings, stream=False) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    return _response_content(result)
 
 
 def stream_response_events(
@@ -147,18 +191,8 @@ def stream_response_events(
     runtime = getattr(app_state, "model_runtime", None)
     guard = runtime.exclusive() if runtime is not None else nullcontext()
     with guard:
-        stream = app_state.llm(
-            _format_prompt(system_instruction, bounded_history, prompt),
-            stream=True,
-            temperature=generation_settings.temperature,
-            max_tokens=generation_settings.max_tokens,
-            stop=["<|im_end|>"],
-            echo=False,
-        )
-        for chunk in stream:
-            content = chunk["choices"][0].get("text", "")
-            if content:
-                yield "token", content
+        for content in _stream_server_completion(_chat_messages(system_instruction, bounded_history, prompt), generation_settings):
+            yield "token", content
 
 
 def stream_response(

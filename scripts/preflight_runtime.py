@@ -20,7 +20,6 @@ RUNTIME_IMPORTS = [
     "transformers",
     "huggingface_hub",
     "numpy",
-    "llama_cpp",
 ]
 
 
@@ -37,24 +36,6 @@ def package_version(module_name: str) -> dict:
     }
 
 
-def llama_info() -> dict:
-    try:
-        import llama_cpp
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-
-    package_dir = Path(llama_cpp.__file__).resolve().parent
-    lib_dir = package_dir / "lib"
-    vulkan_dll = lib_dir / "ggml-vulkan.dll"
-    return {
-        "ok": vulkan_dll.exists(),
-        "package": str(package_dir),
-        "lib_dir": str(lib_dir),
-        "vulkan_dll": str(vulkan_dll) if vulkan_dll.exists() else None,
-        "dlls": sorted(path.name for path in lib_dir.glob("*.dll")) if lib_dir.exists() else [],
-    }
-
-
 def onnx_assets(model_root: Path) -> dict:
     assets = {}
     for name in ("embedder", "reranker"):
@@ -67,15 +48,6 @@ def onnx_assets(model_root: Path) -> dict:
             "missing": missing,
         }
     return assets
-
-
-def gguf_assets(model_root: Path) -> dict:
-    ggufs = sorted(path.name for path in model_root.glob("*.gguf")) if model_root.exists() else []
-    chat_models = [
-        name for name in ggufs
-        if not any(marker in name.lower() for marker in ("embed", "retrieval", "reranker", "cross-encoder"))
-    ]
-    return {"model_dir": str(model_root), "gguf_count": len(ggufs), "chat_models": chat_models}
 
 
 def main() -> int:
@@ -94,9 +66,7 @@ def main() -> int:
             "user_site_enabled": any("Roaming\\Python" in path for path in sys.path),
         },
         "imports": imports,
-        "llama_cpp": llama_info(),
         "onnx_assets": {"skipped": True} if args.skip_onnx else onnx_assets(model_root),
-        "gguf_assets": gguf_assets(model_root),
     }
     print(json.dumps(report, indent=2))
 
@@ -105,12 +75,8 @@ def main() -> int:
     failures = []
     if failed_imports:
         failures.append(f"missing imports: {', '.join(failed_imports)}")
-    if not report["llama_cpp"]["ok"]:
-        failures.append("llama-cpp-python is not Vulkan-enabled or ggml-vulkan.dll is missing")
     if failed_onnx:
         failures.append(f"missing ONNX assets: {', '.join(failed_onnx)}")
-    if not report["gguf_assets"]["chat_models"]:
-        failures.append("no chat GGUF models found")
     if failures:
         raise SystemExit("; ".join(failures))
     return 0

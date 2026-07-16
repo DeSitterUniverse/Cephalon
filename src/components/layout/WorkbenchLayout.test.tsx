@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("WorkbenchLayout", () => {
   beforeEach(() => {
     useUiStore.setState({
-      rightPanel: "jobs",
+      rightPanel: "history",
       leftPanelOpen: true,
       rightPanelOpen: true,
       leftPanelWidth: 300,
@@ -33,7 +33,7 @@ describe("WorkbenchLayout", () => {
 
     expect(screen.getByText("Work")).toBeInTheDocument();
     expect(screen.getByText("Diagnostics")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Jobs" })).toHaveTextContent("Jobs");
+    expect(screen.queryByRole("button", { name: "Jobs" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toHaveTextContent("Settings");
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
@@ -54,7 +54,7 @@ describe("WorkbenchLayout", () => {
     await user.click(screen.getByRole("button", { name: "Hide details" }));
     expect(useUiStore.getState().rightPanelOpen).toBe(false);
 
-    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(screen.getByRole("button", { name: "Chats" }));
     expect(useUiStore.getState().rightPanelOpen).toBe(true);
     await user.keyboard("{Escape}");
     expect(useUiStore.getState().rightPanelOpen).toBe(false);

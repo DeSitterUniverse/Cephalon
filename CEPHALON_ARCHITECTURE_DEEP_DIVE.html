@@ -49,7 +49,7 @@ Tauri desktop shell
       -> SQLite metadata / FTS5
       -> LanceDB dense vectors
       -> ONNX Runtime embedder + reranker
-      -> llama.cpp GGUF generation
+      -> external llama.cpp server generation
 </pre>
   </div>
   <div class="grid">
@@ -72,7 +72,7 @@ Tauri desktop shell
     <thead><tr><th>Path</th><th>Role</th><th>Notes</th></tr></thead>
     <tbody>
       <tr><td><code>~/cephalon-data</code></td><td>Primary local app data</td><td>SQLite database, LanceDB directory, temporary downloads, and model directory live here by default.</td></tr>
-      <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td>Chat GGUF files plus <code>embedder</code> and <code>reranker</code> ONNX Runtime folders.</td></tr>
+      <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td><code>embedder</code> and <code>reranker</code> ONNX Runtime folders. The external llama.cpp server owns the chat GGUF.</td></tr>
       <tr><td><code>~/Documents/Cephalon Metrics</code></td><td>Analysis exports</td><td>Numeric-first JSONL/CSV files intended for spreadsheet or data-tool ingestion.</td></tr>
     </tbody>
   </table>
@@ -95,7 +95,7 @@ Tauri desktop shell
     <tbody>
       <tr><td>Embedder</td><td>ONNX Runtime</td><td><code>models/embedder</code></td><td>Generates 1024-dimensional vectors for documents and queries.</td></tr>
       <tr><td>Reranker</td><td>ONNX Runtime</td><td><code>models/reranker</code></td><td>Scores fused candidates with cross-encoder style relevance.</td></tr>
-      <tr><td>Chat LLM</td><td>llama.cpp</td><td>Selected <code>.gguf</code> file</td><td>Generates responses after the user explicitly loads a model.</td></tr>
+      <tr><td>Chat LLM</td><td>External llama.cpp server</td><td>User-operated server and its selected <code>.gguf</code> file</td><td>Generates responses after Cephalon connects to the server.</td></tr>
     </tbody>
   </table>
   <p>The installer packages the app and backend runtime. Embedder/reranker artifacts are installed into the user model directory from Settings by using configured prepared ONNX repos or selecting exported local folders. A valid ONNX engine folder contains <code>model.onnx</code>, tokenizer files, <code>onnx_profile.json</code>, and any external ONNX data files referenced by the model.</p>
@@ -160,7 +160,7 @@ question
       <tr><td>Library</td><td><code>/documents</code></td><td>Search, filter, import, reindex, delete, and select documents.</td></tr>
       <tr><td>Chat</td><td><code>/query</code>, conversations APIs</td><td>Ask questions, stream answers, save chat history, and attach per-message sources.</td></tr>
       <tr><td>Sources</td><td>query stream/message sources</td><td>Inspect source scores, snippets, ranks, and document references.</td></tr>
-      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, GGUF selection, ONNX engine setup, and metrics export. Retrieval scope is selected from the chat composer.</td></tr>
+      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, external llama.cpp server connection, ONNX engine setup, and metrics export. Retrieval scope is selected from the chat composer.</td></tr>
       <tr><td>Diagnostics</td><td>trace, health, eval, support APIs</td><td>Debug retrieval quality and index state without leaving the app.</td></tr>
     </tbody>
   </table>
@@ -171,7 +171,7 @@ question
   <h2>Failure Handling</h2>
   <ul>
     <li>Missing ONNX engines create a visible setup state; the app does not silently fall back to another embedder or reranker.</li>
-    <li>Querying without a loaded GGUF returns a conflict response and the UI keeps the run action disabled.</li>
+    <li>Querying without a connection to the configured external llama.cpp server returns a conflict response and the UI keeps the run action disabled.</li>
     <li>Model diagnostics report Python runtime, llama.cpp package path, backend libraries, active context, and load errors.</li>
     <li>Metrics and trace write failures are non-fatal where possible and surfaced through health or diagnostics.</li>
     <li>Event-stream disconnects trigger reconnect attempts and temporary polling rather than permanently lying about state.</li>

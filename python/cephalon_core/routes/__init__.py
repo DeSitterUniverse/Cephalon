@@ -25,7 +25,7 @@ def state(request: Request):
 
 def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
     if getattr(app_state, "active_model_name", None) != requested_model:
-        raise HTTPException(status_code=409, detail="Load the selected GGUF model before querying.")
+        raise HTTPException(status_code=409, detail="Connect to the configured external llama.cpp server before querying.")
 
 
 def _settings_for_retrieval_scope(settings: RagSettings, scope: str) -> RagSettings:
@@ -151,7 +151,7 @@ def load_model(request: Request, req: LoadModelRequest):
     if app_state.startup_error:
         raise HTTPException(status_code=503, detail=app_state.startup_error)
     if not req.model.strip():
-        raise HTTPException(status_code=400, detail="Select a local GGUF model before loading.")
+        raise HTTPException(status_code=400, detail="Select the configured external llama.cpp server before connecting.")
 
     models.load_llm(app_state, req.model)
     return {
@@ -304,7 +304,7 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required.")
     if not req.model.strip():
-        raise HTTPException(status_code=400, detail="Select a local GGUF model before querying.")
+        raise HTTPException(status_code=400, detail="Connect to the configured external llama.cpp server before querying.")
 
     rag_settings = _settings_for_retrieval_scope(req.settings or storage.get_rag_settings(app_state.sqlite), req.retrieval_scope)
     _ensure_query_model_loaded(app_state, req.model)

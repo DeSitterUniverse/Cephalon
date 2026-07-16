@@ -44,7 +44,7 @@ def test_retrieval_trace_persistence_roundtrip():
     assert loaded["final_context"][0]["source_id"] == "S1"
 
 
-def test_onnx_setup_installs_local_folder_atomically(tmp_path, monkeypatch):
+def test_onnx_setup_replaces_local_folder_without_retaining_a_backup(tmp_path, monkeypatch):
     monkeypatch.setenv("CEPHALON_DATA_DIR", str(tmp_path / "data"))
     settings = Settings()
     source = tmp_path / "source"
@@ -56,6 +56,9 @@ def test_onnx_setup_installs_local_folder_atomically(tmp_path, monkeypatch):
         '{"model_id":"jinaai/jina-embeddings-v5-text-small","kind":"embedder","dimension":1024,"validated":true}',
         encoding="utf-8",
     )
+    previous = tmp_path / "data" / "models" / "embedder"
+    previous.mkdir(parents=True)
+    (previous / "obsolete.txt").write_text("old engine", encoding="utf-8")
 
     result = onnx_setup.install_local(settings, "embedder", str(source))
     current = onnx_setup.status(settings)["embedder"]
@@ -64,6 +67,9 @@ def test_onnx_setup_installs_local_folder_atomically(tmp_path, monkeypatch):
     assert current["ok"] is True
     assert (tmp_path / "data" / "models" / "embedder" / "model.onnx").exists()
     assert (tmp_path / "data" / "models" / "embedder" / "onnx_profile.json").exists()
+    assert not (tmp_path / "data" / "models" / "embedder" / "obsolete.txt").exists()
+    assert result.get("backup_path") is None
+    assert not list((tmp_path / "data" / "models").glob("embedder.backup-*"))
 
 
 def test_stale_embedding_detection_uses_hashes_versions_and_models():

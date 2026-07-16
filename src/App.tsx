@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   addDocumentTag,
-  cancelJob,
   createConversation,
   deleteConversation,
   deleteDocument,
@@ -15,7 +14,6 @@ import {
   getConversations,
   getDocument,
   getDocuments,
-  getJobs,
   getHealth,
   getIndexHealth,
   getModels,
@@ -29,7 +27,6 @@ import {
   loadModel,
   reindexDocument,
   renameConversation,
-  retryJob,
   runEval,
   updateDocument,
   type Document,
@@ -44,7 +41,6 @@ import { EvaluationPanel } from "./components/diagnostics/EvaluationPanel";
 import { IndexHealthPanel } from "./components/diagnostics/IndexHealthPanel";
 import { RetrievalTracePanel } from "./components/diagnostics/RetrievalTracePanel";
 import { ChatHistoryPanel } from "./components/chat/ChatHistoryPanel";
-import { JobsPanel } from "./components/jobs/JobsPanel";
 import { LibraryPanel } from "./components/library/LibraryPanel";
 import { DocumentDetails } from "./components/library/DocumentDetails";
 import { WorkbenchLayout } from "./components/layout/WorkbenchLayout";
@@ -87,7 +83,6 @@ export default function App() {
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady });
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
-  const jobsQuery = useQuery({ queryKey: ["jobs"], queryFn: getJobs, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
   const onnxStatusQuery = useQuery({ queryKey: ["onnx-setup"], queryFn: getOnnxSetupStatus, enabled: bootReady && rightPanel === "settings" });
@@ -114,8 +109,6 @@ export default function App() {
     mutationFn: (path: string) => ingestPath(path),
     onSuccess: data => {
       notify(data.message || "Ingestion queued.", "success");
-      setRightPanel("jobs");
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
     onError: error => notify(error instanceof Error ? error.message : "Failed to queue ingestion.", "error"),
   });
@@ -124,7 +117,6 @@ export default function App() {
     mutationFn: (doc: Document) => deleteDocument(doc.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
 
@@ -132,19 +124,17 @@ export default function App() {
     mutationFn: (doc: Document) => reindexDocument(doc.id),
     onSuccess: data => {
       notify(data.message || "Reindex queued.", "success");
-      setRightPanel("jobs");
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
 
   const loadModelMutation = useMutation({
     mutationFn: (model: string) => loadModel(model),
-    onMutate: () => notify("Loading model into llama.cpp..."),
+    onMutate: () => notify("Connecting to external llama.cpp server..."),
     onSuccess: data => {
-      notify(data.active_model ? `Loaded ${data.active_model}` : "Model loaded.", "success");
+      notify(data.active_model ? `Connected to ${data.active_model}` : "Connected to llama.cpp server.", "success");
       queryClient.invalidateQueries({ queryKey: ["models"] });
     },
-    onError: error => notify(error instanceof Error ? error.message : "Failed to load model.", "error"),
+    onError: error => notify(error instanceof Error ? error.message : "Failed to connect to the external llama.cpp server.", "error"),
   });
 
   const metricsMutation = useMutation({
@@ -206,18 +196,6 @@ export default function App() {
     },
   });
 
-  const cancelJobMutation = useMutation({
-    mutationFn: cancelJob,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
-    onError: error => notify(error instanceof Error ? error.message : "Failed to cancel job.", "error"),
-  });
-
-  const retryJobMutation = useMutation({
-    mutationFn: retryJob,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
-    onError: error => notify(error instanceof Error ? error.message : "Failed to retry job.", "error"),
-  });
-
   useEffect(() => {
     let active = true;
     const poll = async () => {
@@ -227,7 +205,7 @@ export default function App() {
         try {
           const health = await getHealth();
           setBootHealth(health);
-          setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and local model inventory.");
+          setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and external server configuration.");
           if (!health.engines_ready || health.onnx_setup?.startup_error) {
             setRightPanel("settings");
             notify("Embedding and reranking setup needed.", "error");
@@ -239,7 +217,7 @@ export default function App() {
             "Starting local backend.",
             "Loading ONNX embedder and reranker.",
             "Opening SQLite and LanceDB indexes.",
-            "Scanning local model directory.",
+            "Reading external server configuration.",
           ];
           setBootStatus(`${steps[Math.min(attempts - 1, steps.length - 1)]} (${attempts})`);
         }
@@ -302,8 +280,6 @@ export default function App() {
     if (selectedPath && typeof selectedPath === "string") ingestPath(selectedPath, true)
       .then(data => {
         notify(data.message || "Text ingestion queued.", "success");
-        setRightPanel("jobs");
-        queryClient.invalidateQueries({ queryKey: ["jobs"] });
       })
       .catch(error => notify(error instanceof Error ? error.message : "Failed to queue text import.", "error"));
   }
@@ -363,7 +339,6 @@ export default function App() {
             conversations={conversationsQuery.data?.conversations || []}
             selectedId={selectedConversationId}
             onSelect={setSelectedConversationId}
-            onNew={() => newConversationMutation.mutate()}
             onRename={(id, title) => renameConversation(id, title).then(() => {
               queryClient.invalidateQueries({ queryKey: ["conversations"] });
               queryClient.invalidateQueries({ queryKey: ["conversation", id] });
@@ -399,13 +374,7 @@ export default function App() {
             onDelete={() => documentQuery.data && removeDocument(documentQuery.data)}
           />
         )
-        : (
-          <JobsPanel
-            jobs={jobsQuery.data?.jobs || []}
-            onCancel={id => cancelJobMutation.mutate(id)}
-            onRetry={id => retryJobMutation.mutate(id)}
-          />
-        );
+        : null;
 
   if (!bootReady) {
     return (
@@ -422,7 +391,7 @@ export default function App() {
 
   const activeModel = modelsQuery.data?.active_model || "";
   const modelReady = Boolean(selectedModel && activeModel === selectedModel);
-  const backendLabel = modelsQuery.data?.llama_backend?.backend_label || "llama.cpp";
+  const backendLabel = modelsQuery.data?.llama_backend?.backend_label || "External llama.cpp server";
 
   return (
     <>
@@ -451,6 +420,7 @@ export default function App() {
               setSelectedConversationId(id);
               queryClient.invalidateQueries({ queryKey: ["conversations"] });
             }}
+            onNewChat={() => newConversationMutation.mutate()}
             onLoadOlder={() => {
               const current = conversationQuery.data;
               if (!selectedConversationId || !current?.next_before) return;

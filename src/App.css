@@ -504,7 +504,7 @@ select, option { background: #050505; color: var(--text); }
 }
 .segmented button.active { color: var(--text); background: #141414; }
 
-.document-list, .job-list, .source-list {
+.document-list, .source-list {
   min-height: 0;
   overflow: auto;
   padding: 0 10px 10px;
@@ -591,7 +591,7 @@ select, option { background: #050505; color: var(--text); }
 .document-select:active { background: #0d0a06; }
 .document-main { display: grid; gap: 3px; padding-right: 54px; }
 .document-main strong { font-size: 0.82rem; overflow-wrap: anywhere; }
-.document-main span, .job-meta { color: var(--muted); font-size: 0.73rem; }
+.document-main span { color: var(--muted); font-size: 0.73rem; }
 .document-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .document-tags span, .tag-list button {
   display: inline-flex;
@@ -635,9 +635,32 @@ select, option { background: #050505; color: var(--text); }
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
+.chat-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px 0;
+}
+.new-chat-button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.76rem;
+}
+.new-chat-button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.new-chat-button:disabled { cursor: not-allowed; opacity: 0.5; }
 .message-feed {
   min-height: 0;
   overflow: auto;
@@ -821,56 +844,20 @@ select, option { background: #050505; color: var(--text); }
   color: var(--danger);
 }
 
-.job-card, .source-card, .field, .chunk-preview article {
+.source-card, .field, .chunk-preview article {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #050505;
   padding: 8px;
   margin-bottom: 7px;
 }
-.job-title, .source-head {
+.source-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   font-size: 0.82rem;
 }
-.job-title span { color: var(--muted); margin-left: auto; }
-.job-stage {
-  margin-top: 4px;
-  color: var(--accent-2);
-  font-size: 0.72rem;
-}
-.job-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  margin-top: 8px;
-}
-.job-actions button {
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-2);
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 0.72rem;
-}
-.job-actions button:hover { border-color: var(--line-strong); color: var(--text); }
-.progress {
-  height: 5px;
-  margin: 8px 0;
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--panel-3);
-}
-.progress span { display: block; height: 100%; background: var(--accent); }
-.error-text { color: var(--danger); font-size: 0.76rem; margin-top: 6px; }
-.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
 .field {
   display: grid;
   gap: 8px;
@@ -911,6 +898,22 @@ select, option { background: #050505; color: var(--text); }
 }
 .runtime-line.ok { color: var(--ok); }
 .runtime-line.warn { color: var(--warn); }
+.onnx-guide {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 9px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #050505;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.onnx-guide strong,
+.onnx-guide b { color: var(--text); }
+.onnx-guide ol { display: grid; gap: 4px; margin: 0; padding-left: 18px; }
+.onnx-guide code { color: var(--text); font-size: inherit; }
 .theme-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -983,7 +986,8 @@ select, option { background: #050505; color: var(--text); }
 .status-text.ok { color: var(--ok); }
 .status-text.warn { color: var(--warn); }
 .onnx-actions {
-  display: flex;
+  display: grid;
+  align-content: start;
   gap: 6px;
 }
 .onnx-actions button,
@@ -1000,7 +1004,9 @@ select, option { background: #050505; color: var(--text); }
   cursor: pointer;
 }
 .onnx-actions button {
-  width: 30px;
+  min-width: 132px;
+  padding: 0 8px;
+  font-size: 0.7rem;
 }
 .onnx-actions button:hover:not(:disabled),
 .settings-actions button:hover:not(:disabled) {

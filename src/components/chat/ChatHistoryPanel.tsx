@@ -1,17 +1,16 @@
 import { FormEvent, useState } from "react";
-import { Check, MessageSquarePlus, Pencil, Search, Trash2, X } from "lucide-react";
+import { Check, Pencil, Search, Trash2, X } from "lucide-react";
 import type { Conversation } from "../../api";
 
 type Props = {
   conversations: Conversation[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onNew: () => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => Promise<unknown> | void;
 };
 
-export function ChatHistoryPanel({ conversations, selectedId, onSelect, onNew, onDelete, onRename }: Props) {
+export function ChatHistoryPanel({ conversations, selectedId, onSelect, onDelete, onRename }: Props) {
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
@@ -39,9 +38,6 @@ export function ChatHistoryPanel({ conversations, selectedId, onSelect, onNew, o
           <h2>Chat history</h2>
           <span>{conversations.length} sessions</span>
         </div>
-        <button className="icon-button" type="button" onClick={onNew} title="Start new chat">
-          <MessageSquarePlus size={15} />
-        </button>
       </div>
       <div className="search-box">
         <Search size={15} />

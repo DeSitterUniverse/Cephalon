@@ -33,7 +33,6 @@ export function RightPanel({ open, panel, children, onClose }: Props) {
 
 function panelTitle(panel: RightPanelName) {
   return {
-    jobs: "Jobs",
     settings: "Settings",
     document: "Document",
     sources: "Sources",

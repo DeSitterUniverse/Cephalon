@@ -135,21 +135,38 @@ def test_query_request_separates_retrieval_scope_and_response_effort():
     assert request.response_effort == "thorough"
 
 
-def test_thorough_response_effort_drafts_then_refines():
+def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     calls = []
 
-    class FakeLlm:
-        def __call__(self, prompt, **kwargs):
-            calls.append({"prompt": prompt, **kwargs})
-            if kwargs["stream"]:
+    class FakeResponse:
+        def __init__(self, stream: bool):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"Draft answer with one gap."}}]}'
+
+        def __iter__(self):
+            if self.stream:
                 return iter([
-                    {"choices": [{"text": "Final "}]},
-                    {"choices": [{"text": "answer"}]},
+                    b'data: {"choices":[{"delta":{"content":"Final "}}]}\n',
+                    b'data: {"choices":[{"delta":{"content":"answer"}}]}\n',
+                    b"data: [DONE]\n",
                 ])
-            return {"choices": [{"text": "Draft answer with one gap."}]}
+            return iter([])
+
+    def fake_completion(messages, settings, *, stream):
+        calls.append({"messages": messages, "settings": settings, "stream": stream})
+        return FakeResponse(stream)
+
+    monkeypatch.setattr(generation, "_server_completion", fake_completion)
 
     state = SimpleNamespace(
-        llm=FakeLlm(),
         architecture_context="",
     )
 
@@ -167,7 +184,7 @@ def test_thorough_response_effort_drafts_then_refines():
     assert len(calls) == 2
     assert calls[0]["stream"] is False
     assert calls[1]["stream"] is True
-    assert "Draft answer with one gap." in calls[1]["prompt"]
+    assert "Draft answer with one gap." in calls[1]["messages"][0]["content"]
 
 
 def test_prompt_budget_preserves_first_intent_and_recent_messages():
@@ -262,70 +279,24 @@ def test_migrations_create_workbench_tables():
     assert storage.get_rag_settings(state.sqlite).context_tokens == 32768
 
 
-def test_model_inventory_separates_chat_and_auxiliary_ggufs(tmp_path):
-    model_dir = tmp_path / "models"
-    model_dir.mkdir()
-    for filename in [
-        "granite-4.1-8b-Q4_K_S.gguf",
-        "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
-        "jina-reranker-v3-Q8_0.gguf",
-        "v5-small-retrieval-Q8_0.gguf",
-    ]:
-        (model_dir / filename).write_text("model", encoding="utf-8")
-    settings = Settings()
-    settings.model_dir = str(model_dir)
-
-    inventory = models.model_inventory(settings)
-
-    assert inventory["chat_models"] == [
-        "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
-        "granite-4.1-8b-Q4_K_S.gguf",
-    ]
-    assert inventory["auxiliary_gguf"] == [
-        "jina-reranker-v3-Q8_0.gguf",
-        "v5-small-retrieval-Q8_0.gguf",
-    ]
+def test_model_inventory_reports_the_configured_external_server(monkeypatch):
+    monkeypatch.setenv("CEPHALON_LLAMA_SERVER_MODEL", "My external model")
+    inventory = models.model_inventory(Settings())
+    assert inventory["chat_models"] == ["My external model"]
+    assert inventory["chat_model_details"] == []
+    assert inventory["auxiliary_gguf"] == []
 
 
-def test_packaged_llama_dll_discovery_uses_sidecar_path_when_present():
-    discovered = models._discover_packaged_llama_dll_dir()
-
-    if discovered is not None:
-        assert discovered.endswith("llama_cpp\\lib") or discovered.endswith("llama_cpp/lib")
-        assert any(name.startswith("ggml") for name in os.listdir(discovered))
-
-
-def test_quiet_llama_stderr_preserves_loader_exceptions():
-    with pytest.raises(RuntimeError, match="load failed"):
-        with models._quiet_llama_stderr():
-            raise RuntimeError("load failed")
-
-
-def test_load_llm_retries_configured_context_when_full_context_fails(monkeypatch, tmp_path):
-    model_dir = tmp_path / "models"
-    model_dir.mkdir()
-    (model_dir / "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
-    settings = Settings()
-    settings.model_dir = str(model_dir)
+def test_load_llm_connects_to_configured_external_server(monkeypatch):
+    monkeypatch.setenv("CEPHALON_LLAMA_SERVER_MODEL", "My external model")
+    monkeypatch.setenv("CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS", "32768")
     state = build_memory_state()
-    state.settings = settings
     state.llm = None
-    storage.save_rag_settings(state.sqlite, RagSettings(context_tokens=32768, full_context=True))
-    attempts = []
+    monkeypatch.setattr(models, "_server_request", lambda path: {"status": "ok"})
 
-    class FakeLlama:
-        def __init__(self, **kwargs):
-            attempts.append(kwargs["n_ctx"])
-            if kwargs["n_ctx"] == 131072:
-                raise RuntimeError("Failed to create llama_context")
+    models.load_llm(state, "My external model")
 
-    monkeypatch.setattr(models, "_model_context_length", lambda _path: 131072)
-    monkeypatch.setattr(models, "Llama", FakeLlama)
-
-    models.load_llm(state, "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf")
-
-    assert attempts == [131072, 32768]
-    assert state.active_model_name == "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
+    assert state.active_model_name == "My external model"
     assert state.active_context_tokens == 32768
 
 
@@ -666,7 +637,7 @@ def test_query_requires_explicit_loaded_model():
         routes._ensure_query_model_loaded(app_state, "other.gguf")
 
     assert exc.value.status_code == 409
-    assert "Load the selected GGUF model" in exc.value.detail
+    assert "Connect to the configured external llama.cpp server" in exc.value.detail
 
 
 def test_query_accepts_loaded_model():

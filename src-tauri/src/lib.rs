@@ -18,7 +18,9 @@ struct PythonCommand {
 fn backend_addr() -> SocketAddr {
     let host = env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string());
-    format!("{host}:{port}").parse().expect("valid backend address")
+    format!("{host}:{port}")
+        .parse()
+        .expect("valid backend address")
 }
 
 fn backend_is_listening() -> bool {
@@ -26,7 +28,8 @@ fn backend_is_listening() -> bool {
 }
 
 fn backend_is_cephalon() -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400))
+    else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
@@ -53,13 +56,17 @@ fn check_backend() -> bool {
 
 #[tauri::command]
 fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
     window.minimize().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn toggle_maximize_window(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
     if window.is_maximized().map_err(|error| error.to_string())? {
         window.unmaximize().map_err(|error| error.to_string())
     } else {
@@ -69,7 +76,9 @@ fn toggle_maximize_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn close_window(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
     window.close().map_err(|error| error.to_string())
 }
 
@@ -107,33 +116,32 @@ fn apply_backend_env(
     command: &mut Command,
     repo_root: Option<&Path>,
     sidecar_internal: Option<&Path>,
-    dev_llama_lib: Option<&Path>,
 ) {
     let data_dir = default_data_dir();
     let model_dir = default_model_dir(&data_dir);
 
     command.env("CEPHALON_DATA_DIR", data_dir);
     command.env("CEPHALON_MODEL_DIR", model_dir);
-    command.env("CEPHALON_HOST", env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()));
-    command.env("CEPHALON_PORT", env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()));
+    command.env(
+        "CEPHALON_HOST",
+        env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+    );
+    command.env(
+        "CEPHALON_PORT",
+        env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()),
+    );
     command.env("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,https://tauri.localhost");
-    command.env("CEPHALON_LLAMA_VERBOSE", "0");
     command.env("PYTHONNOUSERSITE", "1");
 
-    if let Some(llama_lib) = dev_llama_lib {
-        command.env("CEPHALON_LLAMA_DLL_DIR", llama_lib);
-        command.env("LLAMA_CPP_LIB_PATH", llama_lib);
-        let path = prepend_path(env::var("PATH").ok(), &[llama_lib.to_path_buf()]);
-        command.env("PATH", path);
-    }
-
     if let Some(internal) = sidecar_internal {
-        let dll_dir = internal.join("llama_cpp").join("lib");
-        let path = prepend_path(env::var("PATH").ok(), &[dll_dir, internal.to_path_buf()]);
+        let path = prepend_path(env::var("PATH").ok(), &[internal.to_path_buf()]);
         command.env("PATH", path);
 
         if let Some(root) = repo_root {
-            let python_path = prepend_path(env::var("PYTHONPATH").ok(), &[root.join("python"), internal.to_path_buf()]);
+            let python_path = prepend_path(
+                env::var("PYTHONPATH").ok(),
+                &[root.join("python"), internal.to_path_buf()],
+            );
             command.env("PYTHONPATH", python_path);
         }
     } else if let Some(root) = repo_root {
@@ -143,15 +151,19 @@ fn apply_backend_env(
 }
 
 fn python_candidates() -> Vec<PythonCommand> {
-    let mut candidates = vec![PythonCommand {
-        program: PathBuf::from("python"),
-        prefix_args: vec![],
-    }];
+    let mut candidates = vec![];
     if cfg!(target_os = "windows") {
         candidates.push(PythonCommand {
             program: PathBuf::from("py"),
-            prefix_args: vec!["-3".to_string()],
+            prefix_args: vec!["-3.14".to_string()],
         });
+    } else {
+        for program in ["python3.14", "python3", "python"] {
+            candidates.push(PythonCommand {
+                program: PathBuf::from(program),
+                prefix_args: vec![],
+            });
+        }
     }
     candidates
 }
@@ -162,11 +174,15 @@ fn python_runs(candidate: &PythonCommand) -> bool {
         command.arg(arg);
     }
     command
-        .arg("--version")
+        .arg("-c")
+        .arg("import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    command.status().map(|status| status.success()).unwrap_or(false)
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn resolve_python_command() -> Option<PythonCommand> {
@@ -176,42 +192,9 @@ fn resolve_python_command() -> Option<PythonCommand> {
         }
     }
     eprintln!(
-        "Cephalon could not find Python on PATH. Enable the Windows Python app execution alias or add python.exe/py.exe to PATH, then rerun npm run tauri dev."
+        "Cephalon requires Python 3.14. Install it, then ensure `py -3.14` (Windows) or `python3.14` (Linux) is on PATH before rerunning `npm run tauri dev`."
     );
     None
-}
-
-fn discover_dev_llama_lib(python: &PythonCommand) -> Option<PathBuf> {
-    let mut command = Command::new(&python.program);
-    for arg in &python.prefix_args {
-        command.arg(arg);
-    }
-    command
-        .arg("-c")
-        .arg("import pathlib, llama_cpp; p = pathlib.Path(llama_cpp.__file__).resolve().parent / 'lib'; v = p / 'ggml-vulkan.dll'; print(p if v.exists() else '')")
-        .stdin(Stdio::null());
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(error) => {
-            eprintln!("Failed to inspect local Python llama_cpp package: {error}");
-            return None;
-        }
-    };
-    if !output.status.success() {
-        eprintln!(
-            "Local Python can start, but llama_cpp is not importable. Install the Vulkan-enabled llama-cpp-python wheel before running Tauri dev."
-        );
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        eprintln!(
-            "Local Python has llama_cpp, but ggml-vulkan.dll was not found. Rebuild llama-cpp-python with CMAKE_ARGS=-DGGML_VULKAN=on."
-        );
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
 }
 
 fn spawn_dev_backend() -> Option<Child> {
@@ -221,7 +204,6 @@ fn spawn_dev_backend() -> Option<Child> {
         .to_path_buf();
 
     let python = resolve_python_command()?;
-    let dev_llama_lib = discover_dev_llama_lib(&python)?;
     let mut command = Command::new(&python.program);
     for arg in &python.prefix_args {
         command.arg(arg);
@@ -232,12 +214,7 @@ fn spawn_dev_backend() -> Option<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    apply_backend_env(
-        &mut command,
-        Some(&repo_root),
-        None,
-        Some(dev_llama_lib.as_path()),
-    );
+    apply_backend_env(&mut command, Some(&repo_root), None);
 
     match command.spawn() {
         Ok(child) => Some(child),
@@ -250,9 +227,19 @@ fn spawn_dev_backend() -> Option<Child> {
 
 fn spawn_release_backend(app: &tauri::App) -> Option<Child> {
     let resource_path = app.path().resource_dir().expect("failed to find resources");
-    let binary_name = if cfg!(target_os = "windows") { "engine.exe" } else { "engine" };
-    let binary_path = resource_path.join("backend").join("engine").join(binary_name);
-    let sidecar_internal = resource_path.join("backend").join("engine").join("_internal");
+    let binary_name = if cfg!(target_os = "windows") {
+        "engine.exe"
+    } else {
+        "engine"
+    };
+    let binary_path = resource_path
+        .join("backend")
+        .join("engine")
+        .join(binary_name);
+    let sidecar_internal = resource_path
+        .join("backend")
+        .join("engine")
+        .join("_internal");
 
     if !binary_path.exists() {
         eprintln!("Backend sidecar not found at {}.", binary_path.display());
@@ -268,8 +255,9 @@ fn spawn_release_backend(app: &tauri::App) -> Option<Child> {
     apply_backend_env(
         &mut command,
         None,
-        sidecar_internal.exists().then_some(sidecar_internal.as_path()),
-        None,
+        sidecar_internal
+            .exists()
+            .then_some(sidecar_internal.as_path()),
     );
 
     match command.spawn() {
@@ -290,13 +278,17 @@ pub fn run() {
                 println!("Cephalon external backend mode enabled; skipping local backend launch.");
                 None
             } else if backend_is_cephalon() {
-                println!("Cephalon backend already listening at {}; reusing it.", backend_addr());
+                println!(
+                    "Cephalon backend already listening at {}; reusing it.",
+                    backend_addr()
+                );
                 None
             } else if backend_is_listening() {
                 return Err(format!(
                     "Port {} is occupied by a service that is not a compatible Cephalon backend.",
                     backend_addr()
-                ).into());
+                )
+                .into());
             } else if cfg!(debug_assertions) {
                 spawn_dev_backend()
             } else {
@@ -331,13 +323,18 @@ mod tests {
 
     #[test]
     fn accepts_compatible_cephalon_health_response() {
-        let response = "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":1,\"status\":\"ok\"}";
+        let response =
+            "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":1,\"status\":\"ok\"}";
         assert!(backend_health_is_compatible(response));
     }
 
     #[test]
     fn rejects_unrelated_or_incompatible_services() {
-        assert!(!backend_health_is_compatible("HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}"));
-        assert!(!backend_health_is_compatible("{\"service\":\"cephalon\",\"api_version\":2}"));
+        assert!(!backend_health_is_compatible(
+            "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}"
+        ));
+        assert!(!backend_health_is_compatible(
+            "{\"service\":\"cephalon\",\"api_version\":2}"
+        ));
     }
 }

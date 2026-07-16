@@ -63,7 +63,7 @@ describe("ChatPanel", () => {
 
   it("restores saved chat messages and exposes per-message source badges", async () => {
     const user = userEvent.setup();
-    useUiStore.setState({ selectedSources: [], rightPanel: "jobs" });
+    useUiStore.setState({ selectedSources: [], rightPanel: "history" });
 
     render(
       <ChatPanel
@@ -93,6 +93,15 @@ describe("ChatPanel", () => {
     expect(screen.getByLabelText("Response effort")).toHaveValue("balanced");
     expect(screen.getByText("Quick response")).toBeInTheDocument();
     expect(screen.getByText("Thorough response")).toBeInTheDocument();
+  });
+
+  it("starts a new chat from the main chat UI", async () => {
+    const user = userEvent.setup();
+    const onNewChat = vi.fn();
+    render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} onNewChat={onNewChat} />);
+
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    expect(onNewChat).toHaveBeenCalledOnce();
   });
 
   it("keeps the first streamed answer visible after the conversation event", async () => {

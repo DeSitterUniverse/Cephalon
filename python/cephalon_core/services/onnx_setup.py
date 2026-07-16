@@ -152,16 +152,14 @@ def _replace_target(settings: Settings, kind: str, source: Path) -> dict:
     destination = target_dir(settings, kind)
     destination.parent.mkdir(parents=True, exist_ok=True)
     installing = destination.parent / f"{kind}.installing"
-    backup = destination.parent / f"{kind}.backup-{int(time.time())}"
     if installing.exists():
         shutil.rmtree(installing)
     shutil.copytree(source, installing)
     if destination.exists():
-        shutil.move(str(destination), str(backup))
+        shutil.rmtree(destination)
     shutil.move(str(installing), str(destination))
     status_payload = inspect_model_dir(destination, kind)
     status_payload["restart_required"] = True
-    status_payload["backup_path"] = str(backup) if backup.exists() else None
     return status_payload
 
 

@@ -2,6 +2,15 @@ import os
 import sys
 import shutil
 import subprocess
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def add_data_arg(source: str, destination: str) -> str:
+    """Return PyInstaller's platform-specific SOURCE<sep>DEST value."""
+    return f"{source}{os.pathsep}{destination}"
 
 def build():
     print("Building FastAPI backend with PyInstaller (--onedir)...")
@@ -11,7 +20,6 @@ def build():
         "onnxruntime",
         "transformers",
         "numpy",
-        "llama_cpp",
         "huggingface_hub",
         "uvicorn",
         "docx",
@@ -33,10 +41,9 @@ def build():
         "--noconfirm",
         "--onedir",
         "--name", "engine",
-        "--collect-all=llama_cpp",
-        "--add-data", "AI_SYSTEM_AWARENESS.md;.",
-        "--add-data", "CEPHALON_ARCHITECTURE_DEEP_DIVE.html;.",
-        "python/main.py"
+        "--add-data", add_data_arg("AI_SYSTEM_AWARENESS.md", "."),
+        "--add-data", add_data_arg("CEPHALON_ARCHITECTURE_DEEP_DIVE.html", "."),
+        "python/main.py",
     ]
     
     for imp in hidden_imports:
@@ -44,19 +51,20 @@ def build():
     for module in excluded_modules:
         cmd.extend(["--exclude-module", module])
         
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
     
     print("Build complete. Moving to src-tauri/backend...")
     
-    source_dir = os.path.join("dist", "engine")
-    target_dir = os.path.join("src-tauri", "backend")
+    source_dir = REPO_ROOT / "dist" / "engine"
+    target_dir = REPO_ROOT / "src-tauri" / "backend"
+    destination_dir = target_dir / "engine"
     
-    if os.path.exists(target_dir):
+    if target_dir.exists():
         shutil.rmtree(target_dir)
         
-    shutil.copytree(source_dir, os.path.join(target_dir, "engine"))
+    shutil.copytree(source_dir, destination_dir)
     
-    print("Backend successfully staged at src-tauri/backend/engine/")
+    print(f"Backend successfully staged at {destination_dir}")
 
 if __name__ == "__main__":
     build()

@@ -3,7 +3,6 @@ import {
   FileText,
   History,
   Library,
-  ListChecks,
   SearchCode,
   Settings2,
   ShieldCheck,
@@ -19,7 +18,6 @@ type NavItem = {
 };
 
 const workItems: NavItem[] = [
-  { panel: "jobs", label: "Jobs", icon: ListChecks },
   { panel: "history", label: "Chats", icon: History },
   { panel: "document", label: "Document", icon: FileText },
   { panel: "sources", label: "Sources", icon: Library },
@@ -29,7 +27,7 @@ const workItems: NavItem[] = [
 const diagnosticItems: NavItem[] = [
   { panel: "trace", label: "Trace", icon: SearchCode },
   { panel: "health", label: "Health", icon: BarChart3 },
-  { panel: "eval", label: "Evaluation", icon: ListChecks },
+  { panel: "eval", label: "Evaluation", icon: BarChart3 },
   { panel: "support", label: "Support", icon: ShieldCheck },
 ];
 

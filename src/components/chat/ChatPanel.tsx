@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { MessageSquarePlus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AnswerSupport, Conversation, Message, RagSettings, SourceChunk } from "../../api";
@@ -33,6 +34,7 @@ type Props = {
   selectedConversationId?: string | null;
   onConversationSelected?: (id: string) => void;
   onLoadOlder?: () => void;
+  onNewChat?: () => void;
 };
 
 type ChatMessage = Message & {
@@ -42,7 +44,7 @@ type ChatMessage = Message & {
   status?: "complete" | "streaming" | "error" | "stopped";
 };
 
-export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected, onLoadOlder }: Props) {
+export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected, onLoadOlder, onNewChat }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -173,6 +175,12 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
 
   return (
     <section className="chat-shell">
+      <div className="chat-toolbar">
+        <button className="new-chat-button" type="button" onClick={onNewChat} disabled={isTyping} title="Start new chat">
+          <MessageSquarePlus size={15} />
+          New chat
+        </button>
+      </div>
       <div className="message-feed" ref={feedRef} onScroll={handleFeedScroll}>
         {conversation?.has_more && onLoadOlder && (
           <button type="button" className="load-older" onClick={onLoadOlder}>Load older messages</button>
@@ -180,7 +188,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
         {messages.length === 0 && (
           <div className="chat-empty">
             <h2>Search your documents</h2>
-            <p>Import files, load a local model, and review the cited sources for each response.</p>
+            <p>Import files, connect to your external llama.cpp server, and review the cited sources for each response.</p>
           </div>
         )}
         {messages.map((message, index) => {
@@ -246,7 +254,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
         onStop={() => abortRef.current?.abort()}
         isRunning={isTyping}
         disabled={isTyping || !selectedModel || !modelReady || !settings}
-        placeholder={!selectedModel ? "Select a local model." : !modelReady ? "Load the selected model first." : "Search, compare, summarize..."}
+        placeholder={!selectedModel ? "Select the configured external server." : !modelReady ? "Connect to the external llama.cpp server first." : "Search, compare, summarize..."}
         retrievalScope={retrievalScope}
         responseEffort={responseEffort}
         onRetrievalScopeChange={setRetrievalScope}
