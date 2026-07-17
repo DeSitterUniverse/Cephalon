@@ -364,24 +364,21 @@ async def build_semantic_child_chunks(app_state, parent_text: str, settings: Rag
     units = split_text_units(parent_text)
     if not units:
         return []
+    # Keep child chunks aligned to sentence/paragraph units, but do not call
+    # the embedder while deciding their boundaries.  That used to add many
+    # duplicate ONNX passes before the final batched indexing pass and made
+    # large real-world documents impractically slow to ingest.
     chunks: list[str] = []
     current: list[str] = []
     current_tokens = 0
-    current_vector: list[float] | None = None
     for unit in units:
         unit_tokens = estimate_tokens(unit)
         should_break = current and current_tokens + unit_tokens > maximum
-        if current and current_tokens >= 60 and not should_break:
-            next_vector = await get_embedding(app_state, unit)
-            if current_vector is None:
-                current_vector = await get_embedding(app_state, " ".join(current))
-            should_break = cosine_similarity(current_vector, next_vector) < 0.18
         if should_break:
             chunks.append(" ".join(current).strip())
             overlap_words = " ".join(current).split()[-overlap:] if overlap else []
             current = [" ".join(overlap_words)] if overlap_words else []
             current_tokens = len(overlap_words)
-            current_vector = None
         current.append(unit)
         current_tokens += unit_tokens
         if current_tokens >= target:
@@ -389,7 +386,6 @@ async def build_semantic_child_chunks(app_state, parent_text: str, settings: Rag
             overlap_words = " ".join(current).split()[-overlap:] if overlap else []
             current = [" ".join(overlap_words)] if overlap_words else []
             current_tokens = len(overlap_words)
-            current_vector = None
     if current:
         chunks.append(" ".join(current).strip())
     return chunks

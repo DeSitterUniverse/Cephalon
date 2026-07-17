@@ -20,6 +20,7 @@ from . import observability
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
 EMBEDDING_CACHE_LIMIT = 128
+EMBEDDING_INFERENCE_BATCH_SIZE = 16
 RERANK_CACHE_LIMIT = 96
 RERANK_TEXT_LIMIT = 700
 MEMORY_ONLY_REQUEST = re.compile(r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\s+only\b", re.IGNORECASE)
@@ -133,12 +134,20 @@ def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
             missing_texts.append(normalized_texts[index])
 
     if missing_texts:
+        configured_batch_size = getattr(app_state, "embedding_batch_size", EMBEDDING_INFERENCE_BATCH_SIZE)
         try:
-            embedded = _run_embedding_batch(app_state, missing_texts)
-        except Exception:
-            if len(missing_texts) == 1:
-                raise
-            embedded = [_run_embedding_batch(app_state, [text])[0] for text in missing_texts]
+            batch_size = max(1, int(configured_batch_size))
+        except (TypeError, ValueError):
+            batch_size = EMBEDDING_INFERENCE_BATCH_SIZE
+        embedded = []
+        for start in range(0, len(missing_texts), batch_size):
+            batch = missing_texts[start:start + batch_size]
+            try:
+                embedded.extend(_run_embedding_batch(app_state, batch))
+            except Exception:
+                if len(batch) == 1:
+                    raise
+                embedded.extend(_run_embedding_batch(app_state, [text])[0] for text in batch)
         for index, vector in zip(missing_indices, embedded, strict=True):
             cache_key = cache_keys[index]
             cache[cache_key] = vector
@@ -415,11 +424,28 @@ def _retrieval_prior_score(prompt: str, result: dict) -> float:
 def plan_subqueries(prompt: str) -> list[dict[str, str]]:
     clean = " ".join(prompt.strip().split())
     parts = [p.strip(" ,;") for p in re.split(r"\b(?:and|also|versus|vs\.?|compare)\b|[?;]", clean, flags=re.I) if p.strip(" ,;")]
+    # A short fragment such as "2027" is not an independent retrieval
+    # question.  Likewise, output/citation instructions describe how to
+    # answer, not what evidence to retrieve.  Searching for either dilutes
+    # the candidate pool for multi-part factual questions.
+    useful_parts = []
+    for part in parts:
+        lowered = part.lower()
+        if re.match(r"^(?:cite|include|use|answer|respond|format)\b", lowered):
+            continue
+        terms = [
+            term for term in re.findall(r"[\w]+", lowered, flags=re.UNICODE)
+            if len(term) >= 3 and term not in QUERY_STOPWORDS
+        ]
+        if len(terms) >= 2:
+            useful_parts.append(part)
     if len(parts) <= 1:
         return [{"id": "q1", "text": clean}]
+    if len(useful_parts) <= 1:
+        return [{"id": "q0", "text": clean}]
     # Keep the complete question as the primary retrieval intent. Decomposed
     # parts improve recall but must not erase comparison/relationship context.
-    return [{"id": "q0", "text": clean}] + [{"id": f"q{idx}", "text": part} for idx, part in enumerate(parts[:5], start=1)]
+    return [{"id": "q0", "text": clean}] + [{"id": f"q{idx}", "text": part} for idx, part in enumerate(useful_parts[:5], start=1)]
 
 
 def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = None, start_rank: int = 1) -> list[SourceChunk]:
@@ -467,12 +493,25 @@ def _merge_candidates(target: dict[str, dict], results: list[dict], subquery_id:
             continue
         if subquery_id not in existing["subquery_ids"]:
             existing["subquery_ids"].append(subquery_id)
+        # A candidate can arrive through different subqueries with different
+        # RRF scores.  Preserve its best original retrieval ranks even when a
+        # later result replaces the score-bearing row, so that a top dense hit
+        # remains eligible for the context safety net below.
+        best_ranks = {
+            field: min(
+                value for value in (existing.get(field), result.get(field))
+                if value is not None
+            )
+            for field in ("dense_rank", "lexical_rank", "summary_rank")
+            if any(value is not None for value in (existing.get(field), result.get(field)))
+        }
         # RRF scores are comparable across these equally configured searches.
         if float(result.get("score", 0)) > float(existing.get("score", 0)):
             subqueries = existing["subquery_ids"]
             existing.clear()
             existing.update(dict(result))
             existing["subquery_ids"] = subqueries
+        existing.update(best_ranks)
 
 
 async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str, dict[str, Any]]:
@@ -813,7 +852,10 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     else:
         merged_candidates: dict[str, dict] = {}
         table_name = vector_table_name(app_state)
-        memory_results = _memory_dense_search(app_state, table_name, query_vector)
+        # Respect the user's per-query memory setting.  Otherwise unrelated
+        # remembered conversations can consume a context slot for a document
+        # question even when the caller explicitly turned memory off.
+        memory_results = _memory_dense_search(app_state, table_name, query_vector) if settings.conversation_memory else []
         if memory_results:
             _merge_candidates(merged_candidates, memory_results, "memory")
             trace["memory_candidates"] = [_trace_candidate(row, rank) for rank, row in enumerate(memory_results, start=1)]
@@ -845,7 +887,17 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             memory_candidates = [row for row in candidates if row.get("doc_id") == CORE_MEMORY_DOC_ID]
             non_memory_candidates = [row for row in candidates if row.get("doc_id") != CORE_MEMORY_DOC_ID]
             candidates = memory_candidates + non_memory_candidates
-        rerank_candidates = candidates[:_rerank_candidate_limit(settings)]
+        # RRF is excellent for consensus, but a precise dense hit can score
+        # below many weaker lexical matches when a question is decomposed.
+        # Keep each subquery's top dense result in the rerank window and in the
+        # final context as a small recall safety net.
+        anchor_ids = {
+            row["id"] for row in candidates
+            if row.get("doc_id") != CORE_MEMORY_DOC_ID and row.get("dense_rank") == 1
+        }
+        anchors = [row for row in candidates if row["id"] in anchor_ids]
+        non_anchors = [row for row in candidates if row["id"] not in anchor_ids]
+        rerank_candidates = (anchors + non_anchors)[:_rerank_candidate_limit(settings)]
         skipped_rerank = candidates[len(rerank_candidates):]
         rerank_started = time.perf_counter()
         all_ranked = await asyncio.to_thread(rerank, app_state, prompt, rerank_candidates)
@@ -854,6 +906,11 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             reranked = all_ranked[:settings.rerank_top_n]
         else:
             reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
+            anchor_ranked = [row for row in all_ranked if row["id"] in anchor_ids]
+            if anchor_ranked:
+                reranked = (anchor_ranked + [
+                    row for row in reranked if row["id"] not in anchor_ids
+                ])[:settings.rerank_top_n]
             if memory_preferred:
                 memory_ranked = [row for row in all_ranked if row.get("doc_id") == CORE_MEMORY_DOC_ID]
                 if memory_ranked:
@@ -884,7 +941,12 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
             context_text = _parent_context(app_state, res) or res["text"]
             context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
-            compression_inputs.append(CompressionSource(source_id=source_id, text=context_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
+            # Parent text provides useful surrounding context for ordinary
+            # results.  For a top dense anchor, however, retain the exact
+            # child hit during compression so a large parent section cannot
+            # crowd out the sentence that earned the top semantic rank.
+            compression_text = res["text"] if res["id"] in anchor_ids else context_text
+            compression_inputs.append(CompressionSource(source_id=source_id, text=compression_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
 
     if compression_inputs:
         compressed_context, compression_stats = compress_context(prompt, compression_inputs, max_sentences=max(6, settings.rerank_top_n * 3))

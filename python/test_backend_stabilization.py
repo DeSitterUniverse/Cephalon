@@ -15,7 +15,7 @@ from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import generation, metrics, retrieval
+from cephalon_core.services import generation, ingestion, metrics, retrieval
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -150,6 +150,32 @@ def test_query_decomposition_keeps_the_original_question_and_deduplicates_candid
     assert merged["chunk-1"]["score"] == 0.4
 
 
+def test_query_decomposition_drops_format_instructions_and_orphaned_years():
+    subqueries = retrieval.plan_subqueries(
+        "What global growth rates are projected for 2026 and 2027? "
+        "Explain the reasons for the change; cite only the local source."
+    )
+    assert subqueries[0]["id"] == "q0"
+    texts = [item["text"] for item in subqueries]
+    assert "2027" not in texts
+    assert all(not text.lower().startswith("cite") for text in texts)
+
+
+def test_generation_instruction_requires_checking_supplied_evidence_before_refusal():
+    state = SimpleNamespace(architecture_context="")
+    instruction = generation.build_system_instruction(state, "What does the report say?", "[[src:S1]] growth is 2.6 percent")
+    assert "Before saying that the local documents do not contain an answer" in instruction
+
+
+def test_candidate_merge_preserves_a_top_dense_rank_across_subqueries():
+    merged = {}
+    retrieval._merge_candidates(merged, [{"id": "chunk-1", "score": 0.01, "dense_rank": 1}], "q0")
+    retrieval._merge_candidates(merged, [{"id": "chunk-1", "score": 0.03, "lexical_rank": 1}], "q1")
+
+    assert merged["chunk-1"]["dense_rank"] == 1
+    assert merged["chunk-1"]["lexical_rank"] == 1
+
+
 def test_reranker_uses_safe_single_pair_batches_by_default():
     reranker = FakeReranker()
     state = SimpleNamespace(tokenizer=FakeTokenizer(), reranker=reranker)
@@ -168,6 +194,22 @@ def test_reranker_uses_declared_validated_batch_size():
 
     assert reranker.batch_sizes == [2, 1]
     assert scores.tolist() == [0.0, 1.0, 0.0]
+
+
+def test_embedding_runtime_uses_bounded_batches(monkeypatch):
+    state = SimpleNamespace(embedder=object(), embedding_batch_size=2)
+    batch_sizes = []
+
+    def fake_run(_app_state, texts: list[str]):
+        batch_sizes.append(len(texts))
+        return [[float(index)] * 3 for index, _text in enumerate(texts)]
+
+    monkeypatch.setattr(retrieval, "_run_embedding_batch", fake_run)
+
+    vectors = retrieval._get_embeddings_sync(state, ["one", "two", "three", "four", "five"])
+
+    assert batch_sizes == [2, 2, 1]
+    assert len(vectors) == 5
 
 
 def test_query_request_separates_retrieval_scope_and_response_effort():
@@ -596,6 +638,21 @@ def test_process_single_file_batches_final_embeddings(monkeypatch, tmp_path):
 
     assert result["status"] == "ready"
     assert batch_sizes == [2]
+
+
+def test_semantic_child_chunking_does_not_embed_each_sentence(monkeypatch):
+    state = SimpleNamespace(embedder=object())
+
+    async def unexpected_embedding(*_args, **_kwargs):
+        raise AssertionError("Chunk boundary selection should not invoke the embedder.")
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embeddings", unexpected_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", unexpected_embedding)
+    text = "First sentence has enough words to be a real unit. Second sentence is another separate unit. Third sentence completes the test."
+
+    chunks = asyncio.run(ingestion.build_semantic_child_chunks(state, text, RagSettings()))
+
+    assert chunks
 
 
 def test_process_single_file_reports_stage_progress(monkeypatch, tmp_path):

@@ -133,6 +133,8 @@ def build_system_instruction(
         "Reason through the request before answering, but do not expose hidden chain-of-thought. "
         "Do not repeat the user's prompt as part of the answer. "
         "When an answer depends on retrieved document evidence, cite the relevant source tags exactly as provided, for example [[src:S1]]. "
+        "Before saying that the local documents do not contain an answer, inspect every supplied source for directly stated facts; "
+        "if a source states the requested fact, answer from it rather than describing other sources as incomplete. "
         "For casual conversation, general knowledge, creative work, or coding guidance, citations are optional and should not be forced. "
         "Do not invent source tags. Do not expose internal parsing instructions. "
         "For multi-part questions, answer each subquestion separately and keep citations attached to the relevant subquestion. "
