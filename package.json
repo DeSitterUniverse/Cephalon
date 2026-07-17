@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:frontend": "vite",
+    "dev:full": "node scripts/dev.mjs",
     "build": "tsc && vite build",
     "test:frontend": "vitest run",
     "check:tauri": "cargo check --manifest-path src-tauri/Cargo.toml",

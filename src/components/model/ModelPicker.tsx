@@ -1,15 +1,12 @@
-import { ChevronDown, HardDrive, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { CircleAlert, CircleCheck, Loader2, PlugZap } from "lucide-react";
 type Props = {
-  models: string[];
-  modelDetails?: Array<{ name: string; size_bytes: number }>;
-  selectedModel: string;
   activeModel?: string | null;
   backendLabel?: string;
+  serverUrl?: string;
+  serverAvailable?: boolean | null;
+  serverError?: string | null;
   contextTokens?: number | null;
-  isScanning?: boolean;
   isLoading?: boolean;
-  onSelect: (model: string) => void;
   onLoad: () => void;
 };
 
@@ -17,45 +14,25 @@ function compactName(name: string) {
   return name.replace(/\.gguf$/i, "").replace(/[-_]+/g, " ");
 }
 
-export function ModelPicker({ models, selectedModel, activeModel, backendLabel, contextTokens, isScanning, isLoading, onSelect, onLoad }: Props) {
-  const [open, setOpen] = useState(false);
-  const loaded = Boolean(selectedModel && activeModel === selectedModel);
-  const contextLabel = contextTokens ? `${Math.round(contextTokens / 1024)}k ctx` : backendLabel || "llama.cpp";
+export function ModelPicker({ activeModel, backendLabel, serverUrl, serverAvailable, serverError, contextTokens, isLoading, onLoad }: Props) {
+  const connected = Boolean(serverAvailable && activeModel);
+  const state = isLoading ? "Connecting" : connected ? "Connected" : serverAvailable ? "Ready to connect" : "Disconnected";
+  const modelLabel = activeModel ? compactName(activeModel) : backendLabel || "External llama.cpp server";
+  const contextLabel = contextTokens ? `${Math.round(contextTokens / 1024)}k context` : serverUrl || "Configure server in Settings";
 
   return (
-    <div className={loaded ? "model-picker loaded" : "model-picker"}>
-      <button className="model-trigger" type="button" onClick={() => setOpen(value => !value)} disabled={isLoading} title="Select configured external llama.cpp server">
-        <span className="model-title">{selectedModel ? compactName(selectedModel) : isScanning ? "Scanning models" : "Select model"}</span>
+    <div className={connected ? "model-picker loaded" : "model-picker"}>
+      <div className="model-status" title={serverError || serverUrl || "External llama.cpp server"}>
+        <span className="model-title">{modelLabel}</span>
         <span className="model-meta">
-          <HardDrive size={12} />
-          {selectedModel ? `${contextLabel}` : `${models.length} available`}
+          {connected ? <CircleCheck size={12} /> : <CircleAlert size={12} />}
+          {state} · {contextLabel}
         </span>
-        <ChevronDown size={15} />
+      </div>
+      <button className="model-load" type="button" onClick={onLoad} disabled={isLoading}>
+        {isLoading ? <Loader2 size={14} className="spin-icon" /> : <PlugZap size={14} />}
+        {isLoading ? "Connecting" : connected ? "Reconnect" : "Connect"}
       </button>
-      <button className="model-load" type="button" onClick={onLoad} disabled={!selectedModel || loaded || isLoading}>
-        {isLoading ? <Loader2 size={14} className="spin-icon" /> : loaded ? "Connected" : "Connect"}
-      </button>
-      {open && (
-        <div className="model-menu">
-          {models.map(model => {
-            return (
-              <button
-                key={model}
-                type="button"
-                className={model === selectedModel ? "active" : ""}
-                onClick={() => {
-                  onSelect(model);
-                  setOpen(false);
-                }}
-              >
-                <strong>{compactName(model)}</strong>
-                <span>External server / {contextLabel}</span>
-              </button>
-            );
-          })}
-          {models.length === 0 && <div className="model-empty">External llama.cpp server is not configured.</div>}
-        </div>
-      )}
     </div>
   );
 }

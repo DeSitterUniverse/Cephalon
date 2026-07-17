@@ -70,9 +70,9 @@ export function Composer({
           disabled={isRunning}
           aria-label="Response effort"
         >
-          <option value="quick">Quick response</option>
-          <option value="balanced">Balanced response</option>
-          <option value="thorough">Thorough response</option>
+          <option value="quick">Quick</option>
+          <option value="balanced">Balanced</option>
+          <option value="thorough">Thorough</option>
         </select>
       </div>
       <textarea

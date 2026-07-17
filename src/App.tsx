@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   addDocumentTag,
@@ -16,6 +17,7 @@ import {
   getDocuments,
   getHealth,
   getIndexHealth,
+  getLlamaServerSettings,
   getModels,
   getOnnxSetupStatus,
   getEvalRuns,
@@ -29,6 +31,8 @@ import {
   renameConversation,
   runEval,
   updateDocument,
+  updateLlamaServerSettings,
+  updateSettings,
   type Document,
   type HealthResponse,
   type OnnxModelKind,
@@ -64,6 +68,9 @@ export default function App() {
   const [bootReady, setBootReady] = useState(false);
   const [bootStatus, setBootStatus] = useState("Starting local service...");
   const [bootHealth, setBootHealth] = useState<HealthResponse | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootCycle, setBootCycle] = useState(0);
+  const [isRetryingBackend, setIsRetryingBackend] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const { notify, confirm } = useNotifications();
@@ -81,7 +88,8 @@ export default function App() {
 
   useEventStream();
 
-  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady });
+  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: getModels, enabled: bootReady, refetchInterval: 4000, refetchOnWindowFocus: true });
+  const llamaServerQuery = useQuery({ queryKey: ["llama-server"], queryFn: getLlamaServerSettings, enabled: bootReady });
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
@@ -128,13 +136,32 @@ export default function App() {
   });
 
   const loadModelMutation = useMutation({
-    mutationFn: (model: string) => loadModel(model),
+    mutationFn: () => loadModel(),
     onMutate: () => notify("Connecting to external llama.cpp server..."),
     onSuccess: data => {
       notify(data.active_model ? `Connected to ${data.active_model}` : "Connected to llama.cpp server.", "success");
       queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: error => notify(error instanceof Error ? error.message : "Failed to connect to the external llama.cpp server.", "error"),
+  });
+
+  const llamaServerMutation = useMutation({
+    mutationFn: updateLlamaServerSettings,
+    onSuccess: data => {
+      notify(`Saved llama.cpp endpoint: ${data.server_url}`, "success");
+      queryClient.setQueryData(["llama-server"], data);
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+    onError: error => notify(error instanceof Error ? error.message : "Failed to save llama.cpp server settings.", "error"),
+  });
+
+  const settingsMutation = useMutation({
+    mutationFn: updateSettings,
+    onSuccess: data => {
+      queryClient.setQueryData(["settings"], data);
+      notify("Retrieval settings saved. Reindex documents after changing chunk boundaries.", "success");
+    },
+    onError: error => notify(error instanceof Error ? error.message : "Failed to save retrieval settings.", "error"),
   });
 
   const metricsMutation = useMutation({
@@ -200,38 +227,66 @@ export default function App() {
     let active = true;
     const poll = async () => {
       let attempts = 0;
+      const startedAt = Date.now();
+      setBootReady(false);
+      setBootError(null);
       while (active) {
         attempts += 1;
         try {
           const health = await getHealth();
           setBootHealth(health);
-          setBootStatus(health.startup_error ? "Backend reached; ONNX startup needs attention." : "Loading document index and external server configuration.");
+          setBootStatus(health.startup_error ? "Local backend reached; retrieval setup needs attention." : "Local backend is ready.");
           if (!health.engines_ready || health.onnx_setup?.startup_error) {
             setRightPanel("settings");
             notify("Embedding and reranking setup needed.", "error");
           }
           setBootReady(true);
           return;
-        } catch {
-          const steps = [
-            "Starting local backend.",
-            "Loading ONNX embedder and reranker.",
-            "Opening SQLite and LanceDB indexes.",
-            "Reading external server configuration.",
-          ];
-          setBootStatus(`${steps[Math.min(attempts - 1, steps.length - 1)]} (${attempts})`);
+        } catch (error) {
+          const elapsed = Date.now() - startedAt;
+          if (elapsed >= 15_000) {
+            const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
+            let processDetail = "";
+            if (isTauriRuntime()) {
+              try {
+                const backend = await invoke<{ managed_process: boolean; exited: boolean; exit_code?: number | null; address: string }>("get_backend_status");
+                if (backend.exited) processDetail = ` The managed backend exited${backend.exit_code == null ? "" : ` with code ${backend.exit_code}`}.`;
+                else if (!backend.managed_process) processDetail = ` No managed backend process is running for ${backend.address}.`;
+              } catch {
+                processDetail = "";
+              }
+            }
+            setBootStatus("Local backend is unavailable.");
+            setBootError(`Cephalon could not reach its local backend after ${attempts} attempts.${detail}${processDetail}`);
+            return;
+          }
+          setBootStatus(`Starting local backend… attempt ${attempts}`);
         }
         await new Promise(resolve => setTimeout(resolve, 750));
       }
     };
     poll();
     return () => { active = false; };
-  }, [notify, setRightPanel]);
+  }, [bootCycle, notify, setRightPanel]);
+
+  async function retryBackendStartup() {
+    setIsRetryingBackend(true);
+    try {
+      if (isTauriRuntime()) await invoke("restart_backend");
+      setBootStatus("Retrying local backend...");
+      setBootCycle(value => value + 1);
+    } catch (error) {
+      setBootStatus("Local backend could not be restarted.");
+      setBootError(error instanceof Error ? error.message : "Cephalon could not restart its local backend.");
+    } finally {
+      setIsRetryingBackend(false);
+    }
+  }
 
   useEffect(() => {
-    const names = modelsQuery.data?.models || [];
-    if (!selectedModel && names.length > 0) setSelectedModel(names[0]);
-  }, [modelsQuery.data, selectedModel, setSelectedModel]);
+    const configuredName = llamaServerQuery.data?.model_name || modelsQuery.data?.llama_backend?.model_name || "External llama.cpp server";
+    if (selectedModel !== configuredName) setSelectedModel(configuredName);
+  }, [llamaServerQuery.data?.model_name, modelsQuery.data?.llama_backend?.model_name, selectedModel, setSelectedModel]);
 
   useEffect(() => {
     const firstConversation = conversationsQuery.data?.conversations?.[0];
@@ -306,9 +361,12 @@ export default function App() {
   const right = rightPanel === "settings"
     ? (
       <SettingsPanel
-        models={modelsQuery.data?.models || []}
-        selectedModel={selectedModel}
-        setSelectedModel={setSelectedModel}
+        llamaServer={llamaServerQuery.data}
+        onSaveLlamaServer={(settings) => llamaServerMutation.mutate(settings)}
+        isSavingLlamaServer={llamaServerMutation.isPending}
+        ragSettings={settingsQuery.data}
+        onSaveRagSettings={(settings) => settingsMutation.mutate(settings)}
+        isSavingRagSettings={settingsMutation.isPending}
         onnxStatus={onnxStatusQuery.data}
         isDownloadingModels={onnxDownloadMutation.isPending || onnxInstallMutation.isPending}
         onDownloadOnnx={(kind) => onnxDownloadMutation.mutate(kind)}
@@ -384,18 +442,23 @@ export default function App() {
           <strong>Cephalon</strong>
           <span>{bootStatus}</span>
           {bootHealth?.startup_error && <small>{bootHealth.startup_error}</small>}
+          {bootError && <small className="boot-error">{bootError}</small>}
+          {bootError && <button type="button" className="boot-retry" onClick={() => void retryBackendStartup()} disabled={isRetryingBackend}>{isRetryingBackend ? "Retrying…" : isTauriRuntime() ? "Retry local backend" : "Retry connection"}</button>}
         </div>
       </div>
     );
   }
 
   const activeModel = modelsQuery.data?.active_model || "";
-  const modelReady = Boolean(selectedModel && activeModel === selectedModel);
+  const serverAvailable = modelsQuery.data?.llama_backend?.server_available;
+  const modelReady = Boolean(activeModel && serverAvailable);
   const backendLabel = modelsQuery.data?.llama_backend?.backend_label || "External llama.cpp server";
 
   return (
     <>
       <WorkbenchLayout
+        onNewChat={() => newConversationMutation.mutate()}
+        newChatDisabled={newConversationMutation.isPending}
         left={
           <LibraryPanel
             documents={documentsQuery.data?.documents || []}
@@ -420,7 +483,6 @@ export default function App() {
               setSelectedConversationId(id);
               queryClient.invalidateQueries({ queryKey: ["conversations"] });
             }}
-            onNewChat={() => newConversationMutation.mutate()}
             onLoadOlder={() => {
               const current = conversationQuery.data;
               if (!selectedConversationId || !current?.next_before) return;
@@ -437,16 +499,14 @@ export default function App() {
         )}
         modelControl={(
           <ModelPicker
-            models={modelsQuery.data?.models || []}
-            modelDetails={modelsQuery.data?.model_details || []}
-            selectedModel={selectedModel}
             activeModel={activeModel}
             backendLabel={backendLabel}
+            serverUrl={modelsQuery.data?.llama_backend?.server_url}
+            serverAvailable={serverAvailable}
+            serverError={modelsQuery.data?.llama_backend?.server_error}
             contextTokens={modelsQuery.data?.active_context_tokens}
-            isScanning={modelsQuery.isLoading}
             isLoading={loadModelMutation.isPending}
-            onSelect={setSelectedModel}
-            onLoad={() => selectedModel && loadModelMutation.mutate(selectedModel)}
+            onLoad={() => loadModelMutation.mutate()}
           />
         )}
         right={right}

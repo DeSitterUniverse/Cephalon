@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import storage
+from ..services import retrieval
 
 
 router = APIRouter()
@@ -52,6 +53,7 @@ async def rename_conversation(request: Request, conversation_id: str, body: dict
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(request: Request, conversation_id: str):
+    retrieval.delete_conversation_memory(request.app.state, conversation_id)
     storage.archive_conversation(request.app.state.sqlite, conversation_id)
     await request.app.state.event_bus.publish(
         "conversation",

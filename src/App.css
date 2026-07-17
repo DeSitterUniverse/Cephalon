@@ -310,7 +310,7 @@ select, option { background: #050505; color: var(--text); }
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
 }
-.model-trigger {
+.model-status {
   min-width: 0;
   height: 38px;
   display: grid;
@@ -323,13 +323,20 @@ select, option { background: #050505; color: var(--text); }
   border-radius: 6px;
   background: #050505;
   color: var(--text);
+}
+.boot-card .boot-error { color: var(--danger); max-width: 310px; }
+.boot-retry {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
   cursor: pointer;
 }
-.model-trigger:hover {
-  border-color: rgba(255, 154, 46, 0.42);
-  background: #090909;
-}
-.model-picker.loaded .model-trigger { border-color: rgba(110, 231, 168, 0.45); }
+.boot-retry:hover:not(:disabled) { border-color: var(--accent-2); }
+.boot-retry:disabled { cursor: wait; opacity: .6; }
+.model-picker.loaded .model-status { border-color: rgba(110, 231, 168, 0.45); }
 .model-title {
   min-width: 0;
   overflow: hidden;
@@ -346,11 +353,6 @@ select, option { background: #050505; color: var(--text); }
   color: #b7b7b7;
   font-size: 0.68rem;
 }
-.model-trigger > svg {
-  grid-column: 2;
-  grid-row: 1 / 3;
-  color: var(--muted);
-}
 .model-load {
   height: 38px;
   min-width: 68px;
@@ -359,48 +361,18 @@ select, option { background: #050505; color: var(--text); }
   background: #111;
   color: var(--text);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .model-load:hover:not(:disabled) {
   border-color: rgba(255, 154, 46, 0.42);
   background: #15110c;
 }
 .model-load:disabled { opacity: 0.6; cursor: not-allowed; }
-.model-menu {
-  position: absolute;
-  z-index: 10;
-  top: 44px;
-  left: 0;
-  right: 76px;
-  max-height: 330px;
-  overflow: auto;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: #050505;
-  box-shadow: 0 8px 18px rgba(0,0,0,0.35);
-}
-.model-menu button {
-  width: 100%;
-  display: grid;
-  gap: 3px;
-  text-align: left;
-  padding: 9px 10px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-}
-.model-menu button:hover, .model-menu button.active { background: #111; }
-.model-menu button:active { background: #181008; }
-.model-menu strong {
-  font-size: 0.8rem;
-  overflow-wrap: anywhere;
-}
-.model-menu span, .model-empty {
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-.model-empty { padding: 12px; }
+.title-new-chat { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
+.title-new-chat:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); }
+.title-new-chat:disabled { opacity: .5; cursor: not-allowed; }
 .spin-icon { animation: spin 900ms linear infinite; }
 .icon-button {
   display: inline-grid;
@@ -635,32 +607,9 @@ select, option { background: #050505; color: var(--text); }
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   overflow: hidden;
 }
-.chat-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 10px 12px 0;
-}
-.new-chat-button {
-  min-height: 32px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-2);
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 0.76rem;
-}
-.new-chat-button:hover:not(:disabled) {
-  border-color: var(--line-strong);
-  color: var(--text);
-}
-.new-chat-button:disabled { cursor: not-allowed; opacity: 0.5; }
 .message-feed {
   min-height: 0;
   overflow: auto;
@@ -910,6 +859,9 @@ select, option { background: #050505; color: var(--text); }
   font-size: 0.72rem;
   line-height: 1.4;
 }
+.thinking-trace { margin-top: 9px; color: var(--muted); font-size: .78rem; }
+.thinking-trace summary { cursor: pointer; }
+.thinking-trace pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #090909; }
 .onnx-guide strong,
 .onnx-guide b { color: var(--text); }
 .onnx-guide ol { display: grid; gap: 4px; margin: 0; padding-left: 18px; }

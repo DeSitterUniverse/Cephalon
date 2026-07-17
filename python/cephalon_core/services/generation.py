@@ -11,6 +11,23 @@ from .prompt_budget import budget_prompt
 
 
 ResponseEffort = Literal["quick", "balanced", "thorough"]
+THINKING_TOKEN_ALLOCATION = 2048
+FINAL_OUTPUT_TOKEN_LIMITS = {
+    "quick": 2048,
+    "balanced": 4096,
+    "thorough": 4096,
+}
+
+
+def _settings_for_response_effort(settings: RagSettings, effort: ResponseEffort) -> RagSettings:
+    """Reserve separate server completion capacity for reasoning and the visible answer.
+
+    llama.cpp's OpenAI-compatible ``max_tokens`` covers both reasoning and final
+    answer tokens. The server's ``--reasoning-budget`` enforces the reasoning
+    portion; the additional capacity here keeps the final-answer limits intact.
+    """
+    final_output_tokens = FINAL_OUTPUT_TOKEN_LIMITS[effort]
+    return settings.model_copy(update={"max_tokens": final_output_tokens + THINKING_TOKEN_ALLOCATION})
 
 
 def _chat_messages(system_instruction: str, history: list[Message], prompt: str) -> list[dict[str, str]]:
@@ -22,16 +39,17 @@ def _chat_messages(system_instruction: str, history: list[Message], prompt: str)
     return messages
 
 
-def _server_completion(messages: list[dict[str, str]], settings: RagSettings, *, stream: bool) -> Any:
+def _server_completion(app_state, messages: list[dict[str, str]], settings: RagSettings, *, stream: bool) -> Any:
+    server = models.server_settings(app_state)
     payload = json.dumps({
-        "model": models.llama_server_model_name(),
+        "model": getattr(app_state, "active_model_name", None) or server.model_name,
         "messages": messages,
         "stream": stream,
         "temperature": settings.temperature,
         "max_tokens": settings.max_tokens,
     }).encode("utf-8")
     request = Request(
-        f"{models.llama_server_url()}/v1/chat/completions",
+        f"{server.server_url}/v1/chat/completions",
         data=payload,
         headers={"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json"},
         method="POST",
@@ -42,9 +60,9 @@ def _server_completion(messages: list[dict[str, str]], settings: RagSettings, *,
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"llama.cpp server returned HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Could not reach llama.cpp server at {models.llama_server_url()}: {exc.reason}") from exc
+        raise RuntimeError(f"Could not reach llama.cpp server at {server.server_url}: {exc.reason}") from exc
     except OSError as exc:
-        raise RuntimeError(f"Could not reach llama.cpp server at {models.llama_server_url()}: {exc}") from exc
+        raise RuntimeError(f"Could not reach llama.cpp server at {server.server_url}: {exc}") from exc
 
 
 def _response_content(response: dict[str, Any]) -> str:
@@ -55,8 +73,9 @@ def _response_content(response: dict[str, Any]) -> str:
     return str((choice.get("message") or {}).get("content") or choice.get("text") or "").strip()
 
 
-def _stream_server_completion(messages: list[dict[str, str]], settings: RagSettings) -> Iterator[str]:
-    with _server_completion(messages, settings, stream=True) as response:
+def _stream_server_completion(app_state, messages: list[dict[str, str]], settings: RagSettings) -> Iterator[str]:
+    with _server_completion(app_state, messages, settings, stream=True) as response:
+        in_thinking = False
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -68,11 +87,23 @@ def _stream_server_completion(messages: list[dict[str, str]], settings: RagSetti
                 event = json.loads(payload)
                 choices = event.get("choices") or []
                 if choices:
-                    content = (choices[0].get("delta") or {}).get("content") or choices[0].get("text") or ""
+                    delta = choices[0].get("delta") or {}
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    content = delta.get("content") or choices[0].get("text") or ""
+                    if reasoning:
+                        if not in_thinking:
+                            yield "<think>"
+                            in_thinking = True
+                        yield str(reasoning)
                     if content:
+                        if in_thinking:
+                            yield "</think>"
+                            in_thinking = False
                         yield str(content)
             except json.JSONDecodeError:
                 continue
+        if in_thinking:
+            yield "</think>"
 
 
 def build_system_instruction(
@@ -125,7 +156,7 @@ def _draft_answer(
         history,
         context,
         context_window=getattr(app_state, "active_context_tokens", settings.context_tokens),
-        output_tokens=max(128, min(settings.max_tokens, 512)),
+        output_tokens=settings.max_tokens,
     )
     system_instruction = build_system_instruction(
         app_state,
@@ -141,8 +172,8 @@ def _draft_answer(
     runtime = getattr(app_state, "model_runtime", None)
     guard = runtime.exclusive() if runtime is not None else nullcontext()
     with guard:
-        draft_settings = settings.model_copy(update={"temperature": min(settings.temperature, 0.5), "max_tokens": max(128, min(settings.max_tokens, 512))})
-        with _server_completion(_chat_messages(system_instruction, bounded_history, prompt), draft_settings, stream=False) as response:
+        draft_settings = settings.model_copy(update={"temperature": min(settings.temperature, 0.5)})
+        with _server_completion(app_state, _chat_messages(system_instruction, bounded_history, prompt), draft_settings, stream=False) as response:
             result = json.loads(response.read().decode("utf-8"))
     return _response_content(result)
 
@@ -159,13 +190,12 @@ def stream_response_events(
 ) -> Iterator[tuple[str, str]]:
     effort = response_effort if response_effort in {"quick", "balanced", "thorough"} else "balanced"
     extra_instruction = ""
-    generation_settings = settings
+    generation_settings = _settings_for_response_effort(settings, effort)
     if effort == "quick":
-        generation_settings = settings.model_copy(update={"max_tokens": min(settings.max_tokens, 384)})
         yield "phase", "answering"
     elif effort == "thorough":
         yield "phase", "drafting"
-        draft = _draft_answer(app_state, prompt, context, history, settings, query_meta)
+        draft = _draft_answer(app_state, prompt, context, history, generation_settings, query_meta)
         yield "phase", "refining"
         extra_instruction = (
             "Improve the candidate answer below. Correct unsupported claims, fill visible gaps, "
@@ -191,7 +221,7 @@ def stream_response_events(
     runtime = getattr(app_state, "model_runtime", None)
     guard = runtime.exclusive() if runtime is not None else nullcontext()
     with guard:
-        for content in _stream_server_completion(_chat_messages(system_instruction, bounded_history, prompt), generation_settings):
+        for content in _stream_server_completion(app_state, _chat_messages(system_instruction, bounded_history, prompt), generation_settings):
             yield "token", content
 
 

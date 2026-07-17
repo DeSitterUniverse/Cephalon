@@ -24,12 +24,21 @@ DOCUMENT_ID_PATTERN = re.compile(
 class RagDefaults:
     top_k: int = 20
     rerank_top_n: int = 3
-    max_tokens: int = 512
+    max_tokens: int = 4096
     temperature: float = 0.4
+    # Kept for compatibility with older stored settings. New indexing uses the
+    # explicit parent/child settings below.
     chunk_size: int = 1500
     chunk_overlap: int = 150
+    parent_target_tokens: int = 520
+    parent_max_tokens: int = 650
+    child_target_tokens: int = 110
+    child_max_tokens: int = 150
+    child_overlap_tokens: int = 0
     context_tokens: int = 32768
     full_context: bool = False
+    evidence_required: bool = False
+    conversation_memory: bool = True
     trace_persistence: bool = True
     no_answer_min_confidence: float = 0.35
     no_answer_min_rerank_score: float = 0.15
@@ -50,15 +59,26 @@ class Settings:
         ))
         self.host = os.getenv("CEPHALON_HOST", "127.0.0.1")
         self.port = int(os.getenv("CEPHALON_PORT", "8765"))
+        self.llama_server_url = os.getenv("CEPHALON_LLAMA_SERVER_URL", "http://127.0.0.1:8080").rstrip("/")
+        self.llama_server_model = os.getenv("CEPHALON_LLAMA_SERVER_MODEL", "External llama.cpp server").strip() or "External llama.cpp server"
+        raw_server_context = os.getenv("CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS", "").strip()
+        self.llama_server_context_tokens = max(4096, int(raw_server_context)) if raw_server_context.isdigit() else None
         self.rag_defaults = RagDefaults(
             top_k=int(os.getenv("CEPHALON_TOP_K", "20")),
             rerank_top_n=int(os.getenv("CEPHALON_RERANK_TOP_N", "3")),
-            max_tokens=int(os.getenv("CEPHALON_MAX_TOKENS", "512")),
+            max_tokens=int(os.getenv("CEPHALON_MAX_TOKENS", "4096")),
             temperature=float(os.getenv("CEPHALON_TEMPERATURE", "0.4")),
             chunk_size=int(os.getenv("CEPHALON_CHUNK_SIZE", "1500")),
             chunk_overlap=int(os.getenv("CEPHALON_CHUNK_OVERLAP", "150")),
+            parent_target_tokens=int(os.getenv("CEPHALON_PARENT_TARGET_TOKENS", "520")),
+            parent_max_tokens=int(os.getenv("CEPHALON_PARENT_MAX_TOKENS", "650")),
+            child_target_tokens=int(os.getenv("CEPHALON_CHILD_TARGET_TOKENS", "110")),
+            child_max_tokens=int(os.getenv("CEPHALON_CHILD_MAX_TOKENS", "150")),
+            child_overlap_tokens=int(os.getenv("CEPHALON_CHILD_OVERLAP_TOKENS", "0")),
             context_tokens=int(os.getenv("CEPHALON_CONTEXT_TOKENS", "32768")),
             full_context=os.getenv("CEPHALON_FULL_CONTEXT", "0") == "1",
+            evidence_required=os.getenv("CEPHALON_EVIDENCE_REQUIRED", "0") == "1",
+            conversation_memory=os.getenv("CEPHALON_CONVERSATION_MEMORY", "1") != "0",
             trace_persistence=os.getenv("CEPHALON_TRACE_PERSISTENCE", "1") != "0",
             no_answer_min_confidence=float(os.getenv("CEPHALON_NO_ANSWER_MIN_CONFIDENCE", "0.35")),
             no_answer_min_rerank_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_RERANK_SCORE", "0.15")),

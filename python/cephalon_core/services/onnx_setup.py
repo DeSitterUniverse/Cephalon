@@ -59,6 +59,7 @@ def inspect_model_dir(model_dir: Path, kind: str) -> dict:
         "validated": meta.get("validated") is True,
         "dimension": meta.get("dimension"),
         "score_mode": meta.get("score_mode"),
+        "max_batch_size": meta.get("max_batch_size", 1) if kind == "reranker" else None,
     }
 
 
@@ -71,6 +72,7 @@ def runtime_status(app_state) -> dict:
     payload["embedder"]["active_model_id"] = getattr(app_state, "embedding_model_id", None)
     payload["reranker"]["active_model_id"] = getattr(app_state, "reranker_model_id", None)
     payload["reranker"]["score_mode"] = getattr(app_state, "reranker_score_mode", payload["reranker"].get("score_mode"))
+    payload["reranker"]["max_batch_size"] = getattr(app_state, "reranker_batch_size", payload["reranker"].get("max_batch_size", 1))
     return payload
 
 
@@ -130,7 +132,7 @@ def _prepare_source_folder(source: Path, kind: str, repo_id: str | None = None) 
 
     meta = _read_meta(source)
     if not meta:
-        meta = _default_meta(kind, repo_id)
+        meta = _default_meta(kind, repo_id or source.name)
     meta_error = _validate_meta(kind, meta)
     if meta_error:
         raise ValueError(meta_error)
@@ -191,44 +193,54 @@ def _write_meta(model_dir: Path, meta: dict) -> None:
     (model_dir / "onnx_profile.json").write_text(payload, encoding="utf-8")
 
 
-def _default_meta(kind: str, repo_id: str | None = None) -> dict:
+def _default_meta(kind: str, model_id: str | None = None) -> dict:
     if kind == "embedder":
         return {
-            "model_id": EMBEDDING_MODEL_ID,
+            "model_id": model_id or EMBEDDING_MODEL_ID,
             "kind": "embedder",
-            "pooling": "last_token",
+            "pooling": "auto",
             "normalized": True,
-            "dimension": EMBEDDING_DIMENSION,
-            "fixed_sequence_length": 512,
+            "dimension": None,
             "validated": True,
-            "validation_key": "downloaded_onnx_artifact",
-            "source_repo": repo_id,
+            "validation_key": "structural_local_profile",
+            "source_repo": model_id,
         }
     return {
-        "model_id": RERANKER_MODEL_ID,
+        "model_id": model_id or RERANKER_MODEL_ID,
         "kind": "reranker",
         "validated": True,
-        "validation_key": "downloaded_onnx_artifact",
-        "score_mode": "logit_margin_0_minus_1",
-        "source_repo": repo_id,
+        "validation_key": "structural_local_profile",
+        "score_mode": "auto",
+        # The prepared reranker is validated as a single-pair export.  A
+        # different export may opt into a larger value after validating it.
+        "max_batch_size": 1,
+        "source_repo": model_id,
     }
 
 
 def _validate_meta(kind: str, meta: dict) -> str | None:
     if kind == "embedder":
-        if meta.get("model_id") != EMBEDDING_MODEL_ID:
-            return f"Embedder model mismatch: expected {EMBEDDING_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
-        if int(meta.get("dimension") or 0) != EMBEDDING_DIMENSION:
-            return f"Embedder dimension mismatch: expected {EMBEDDING_DIMENSION}, got {meta.get('dimension') or 'unknown'}."
+        if meta.get("kind") not in {None, "embedder"}:
+            return "ONNX profile is not an embedder profile."
+        if not str(meta.get("model_id") or "").strip():
+            return "Embedder metadata is missing model_id."
+        dimension = meta.get("dimension")
+        if dimension is not None and (not isinstance(dimension, int) or isinstance(dimension, bool) or dimension < 1):
+            return "Embedder metadata has an invalid dimension."
         if meta.get("validated") is not True:
-            return "Jina embedder ONNX export exists but has not passed validation."
+            return "Embedder ONNX export exists but has not passed validation."
         return None
-    if meta.get("model_id") != RERANKER_MODEL_ID:
-        return f"Reranker model mismatch: expected {RERANKER_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
+    if meta.get("kind") not in {None, "reranker"}:
+        return "ONNX profile is not a reranker profile."
+    if not str(meta.get("model_id") or "").strip():
+        return "Reranker metadata is missing model_id."
     if meta.get("validated") is not True:
-        return "Jina reranker ONNX export exists but has not passed validation."
+        return "Reranker ONNX export exists but has not passed validation."
     if not meta.get("score_mode"):
-        return "Jina reranker validation metadata is missing score_mode."
+        return "Reranker validation metadata is missing score_mode."
+    batch_size = meta.get("max_batch_size")
+    if batch_size is not None and (not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1):
+        return "Jina reranker validation metadata has an invalid max_batch_size."
     return None
 
 

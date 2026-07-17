@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageSquarePlus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AnswerSupport, Conversation, Message, RagSettings, SourceChunk } from "../../api";
@@ -34,7 +33,6 @@ type Props = {
   selectedConversationId?: string | null;
   onConversationSelected?: (id: string) => void;
   onLoadOlder?: () => void;
-  onNewChat?: () => void;
 };
 
 type ChatMessage = Message & {
@@ -44,7 +42,7 @@ type ChatMessage = Message & {
   status?: "complete" | "streaming" | "error" | "stopped";
 };
 
-export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected, onLoadOlder, onNewChat }: Props) {
+export function ChatPanel({ selectedModel, modelReady, settings, conversation, selectedConversationId, onConversationSelected, onLoadOlder }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -85,7 +83,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
     abortRef.current = controller;
     followOutputRef.current = true;
     setIsTyping(true);
-    setResponsePhase("retrieving");
+    setResponsePhase("Connecting to retrieval...");
     setMessages([...baseMessages, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "", status: "streaming" }]);
 
     try {
@@ -175,12 +173,6 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
 
   return (
     <section className="chat-shell">
-      <div className="chat-toolbar">
-        <button className="new-chat-button" type="button" onClick={onNewChat} disabled={isTyping} title="Start new chat">
-          <MessageSquarePlus size={15} />
-          New chat
-        </button>
-      </div>
       <div className="message-feed" ref={feedRef} onScroll={handleFeedScroll}>
         {conversation?.has_more && onLoadOlder && (
           <button type="button" className="load-older" onClick={onLoadOlder}>Load older messages</button>
@@ -225,6 +217,12 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
                   <details className="message-inspector">
                     <summary>Answer details</summary>
                     <p>{message.sources?.length ? `Generated from ${message.sources.length} retrieved source${message.sources.length === 1 ? "" : "s"}.` : "Generated without retrieved sources."}</p>
+                  </details>
+                ) : null}
+                {message.role === "assistant" && parsed.thinking ? (
+                  <details className="thinking-trace">
+                    <summary>Thinking trace</summary>
+                    <pre>{parsed.thinking}</pre>
                   </details>
                 ) : null}
                 {message.role === "assistant" && message.content && message.status !== "streaming" && (
@@ -291,6 +289,11 @@ async function consumeQueryStream(
       boundary = buffer.indexOf("\n\n");
     }
   }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const result = handleSsePacket(buffer, sources, onSources, onChunk, onMessageSources, onMeta, onPhase);
+    if (result.conversationId) conversationId = result.conversationId;
+  }
   return conversationId;
 }
 
@@ -336,6 +339,7 @@ function renderSourceTags(content: string) {
 }
 
 function phaseLabel(phase: string) {
+  if (phase === "Connecting to retrieval...") return phase;
   if (phase === "drafting") return "Drafting an answer...";
   if (phase === "refining") return "Refining the answer...";
   if (phase === "answering") return "Writing the answer...";

@@ -33,8 +33,15 @@ export type RagSettings = {
   temperature: number;
   chunk_size: number;
   chunk_overlap: number;
+  parent_target_tokens: number;
+  parent_max_tokens: number;
+  child_target_tokens: number;
+  child_max_tokens: number;
+  child_overlap_tokens: number;
   context_tokens: number;
   full_context: boolean;
+  evidence_required: boolean;
+  conversation_memory: boolean;
   trace_persistence: boolean;
   no_answer_min_confidence: number;
   no_answer_min_rerank_score: number;
@@ -182,6 +189,7 @@ export type OnnxModelInfo = {
   validated?: boolean;
   dimension?: number | null;
   score_mode?: string | null;
+  max_batch_size?: number | null;
 };
 export type OnnxSetupStatus = {
   model_dir: string;
@@ -208,6 +216,11 @@ export type ModelsResponse = {
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
   llama_backend?: HealthResponse["llama_backend"];
+};
+export type LlamaServerSettings = {
+  server_url: string;
+  model_name: string;
+  context_tokens?: number | null;
 };
 export type LoadModelResponse = {
   status: "loaded";
@@ -240,10 +253,21 @@ export function getModels(): Promise<ModelsResponse> {
   return requestJson<ModelsResponse>("/models");
 }
 
-export function loadModel(model: string): Promise<LoadModelResponse> {
+export function loadModel(model = ""): Promise<LoadModelResponse> {
   return requestJson<LoadModelResponse>("/models/load", {
     method: "POST",
     body: JSON.stringify({ model }),
+  });
+}
+
+export function getLlamaServerSettings(): Promise<LlamaServerSettings> {
+  return requestJson<LlamaServerSettings>("/models/server");
+}
+
+export function updateLlamaServerSettings(settings: LlamaServerSettings): Promise<LlamaServerSettings> {
+  return requestJson<LlamaServerSettings>("/models/server", {
+    method: "PUT",
+    body: JSON.stringify(settings),
   });
 }
 

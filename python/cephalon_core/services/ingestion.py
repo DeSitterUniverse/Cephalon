@@ -47,18 +47,14 @@ async def process_single_file(
         await _report_progress(progress, "extracting", 10)
         raw_text, extraction_mode = await asyncio.to_thread(documents.extract_text, file_path, force_text=force_text)
         metadata = storage.active_embedding_metadata(app_state)
-        chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, {
-            "parent_target_tokens": PARENT_TARGET_TOKENS,
-            "parent_max_tokens": PARENT_MAX_TOKENS,
-            "child_target_tokens": CHILD_TARGET_TOKENS,
-            "child_max_tokens": CHILD_MAX_TOKENS,
-        })
+        chunking_config = _chunking_config(rag_settings)
+        chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, chunking_config)
         text_hash = observability.text_hash(raw_text)
         if not raw_text.strip():
             raise ValueError("No extractable text found.")
 
         await _report_progress(progress, "chunking", 35)
-        parents = build_parent_chunks(raw_text)
+        parents = build_parent_chunks(raw_text, rag_settings)
         if not parents:
             raise ValueError("No text chunks produced.")
 
@@ -89,7 +85,7 @@ async def process_single_file(
                 "chunk_length": len(summary),
             })
 
-            child_chunks = await build_semantic_child_chunks(app_state, parent_text)
+            child_chunks = await build_semantic_child_chunks(app_state, parent_text, rag_settings)
             for child_text in child_chunks:
                 chunk_id = f"{doc_id}_{child_count}"
                 token_count = estimate_tokens(child_text)
@@ -119,7 +115,9 @@ async def process_single_file(
                     "embedded",
                 ))
                 fts_rows.append((chunk_id, doc_id, child_text))
-                vector_texts.append(child_text)
+                # Preserve raw text for FTS, source display, and parent context,
+                # but give dense retrieval concise document context.
+                vector_texts.append(contextual_text)
                 lance_data.append({
                     "id": chunk_id,
                     "doc_id": doc_id,
@@ -321,20 +319,34 @@ def _looks_like_row_block(lines: list[str]) -> bool:
     return row_like >= max(2, len(lines) // 2)
 
 
-def build_parent_chunks(text: str) -> list[str]:
+def _chunking_config(settings: RagSettings) -> dict[str, int]:
+    return {
+        "parent_target_tokens": settings.parent_target_tokens,
+        "parent_max_tokens": settings.parent_max_tokens,
+        "child_target_tokens": settings.child_target_tokens,
+        "child_max_tokens": settings.child_max_tokens,
+        "child_overlap_tokens": settings.child_overlap_tokens,
+    }
+
+
+def build_parent_chunks(text: str, settings: RagSettings | None = None) -> list[str]:
+    target = settings.parent_target_tokens if settings else PARENT_TARGET_TOKENS
+    maximum = settings.parent_max_tokens if settings else PARENT_MAX_TOKENS
+    if target > maximum:
+        target = maximum
     units = split_text_units(text)
     parents: list[str] = []
     current: list[str] = []
     current_tokens = 0
     for unit in units:
         unit_tokens = estimate_tokens(unit)
-        if current and current_tokens + unit_tokens > PARENT_MAX_TOKENS:
+        if current and current_tokens + unit_tokens > maximum:
             parents.append("\n".join(current).strip())
             current = []
             current_tokens = 0
         current.append(unit)
         current_tokens += unit_tokens
-        if current_tokens >= PARENT_TARGET_TOKENS:
+        if current_tokens >= target:
             parents.append("\n".join(current).strip())
             current = []
             current_tokens = 0
@@ -343,7 +355,12 @@ def build_parent_chunks(text: str) -> list[str]:
     return parents
 
 
-async def build_semantic_child_chunks(app_state, parent_text: str) -> list[str]:
+async def build_semantic_child_chunks(app_state, parent_text: str, settings: RagSettings | None = None) -> list[str]:
+    target = settings.child_target_tokens if settings else CHILD_TARGET_TOKENS
+    maximum = settings.child_max_tokens if settings else CHILD_MAX_TOKENS
+    overlap = settings.child_overlap_tokens if settings else 0
+    if target > maximum:
+        target = maximum
     units = split_text_units(parent_text)
     if not units:
         return []
@@ -353,7 +370,7 @@ async def build_semantic_child_chunks(app_state, parent_text: str) -> list[str]:
     current_vector: list[float] | None = None
     for unit in units:
         unit_tokens = estimate_tokens(unit)
-        should_break = current and current_tokens + unit_tokens > CHILD_MAX_TOKENS
+        should_break = current and current_tokens + unit_tokens > maximum
         if current and current_tokens >= 60 and not should_break:
             next_vector = await get_embedding(app_state, unit)
             if current_vector is None:
@@ -361,15 +378,17 @@ async def build_semantic_child_chunks(app_state, parent_text: str) -> list[str]:
             should_break = cosine_similarity(current_vector, next_vector) < 0.18
         if should_break:
             chunks.append(" ".join(current).strip())
-            current = []
-            current_tokens = 0
+            overlap_words = " ".join(current).split()[-overlap:] if overlap else []
+            current = [" ".join(overlap_words)] if overlap_words else []
+            current_tokens = len(overlap_words)
             current_vector = None
         current.append(unit)
         current_tokens += unit_tokens
-        if current_tokens >= CHILD_TARGET_TOKENS:
+        if current_tokens >= target:
             chunks.append(" ".join(current).strip())
-            current = []
-            current_tokens = 0
+            overlap_words = " ".join(current).split()[-overlap:] if overlap else []
+            current = [" ".join(overlap_words)] if overlap_words else []
+            current_tokens = len(overlap_words)
             current_vector = None
     if current:
         chunks.append(" ".join(current).strip())

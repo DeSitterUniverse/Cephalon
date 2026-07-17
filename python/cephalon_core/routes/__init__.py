@@ -2,12 +2,13 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from collections.abc import Iterator
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .. import storage
-from ..schemas import EvalRunRequest, IngestRequest, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
+from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
 from ..services import evaluation, generation, metrics, models, observability, onnx_setup, retrieval, support
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
@@ -24,8 +25,7 @@ def state(request: Request):
 
 
 def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
-    if getattr(app_state, "active_model_name", None) != requested_model:
-        raise HTTPException(status_code=409, detail="Connect to the configured external llama.cpp server before querying.")
+    models.ensure_server_connected(app_state, requested_model)
 
 
 def _settings_for_retrieval_scope(settings: RagSettings, scope: str) -> RagSettings:
@@ -64,7 +64,7 @@ def health(request: Request):
         "onnx_warmup": getattr(app_state, "onnx_warmup", None),
         "onnx_setup": onnx_setup.runtime_status(app_state),
         "python_runtime": models.python_runtime_info(),
-        "llama_backend": models.llama_backend_info(),
+        "llama_backend": models.llama_backend_info(app_state, probe=True),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
         "generated_index_backup": getattr(app_state, "generated_index_backup", None),
         "embedding": {
@@ -111,7 +111,7 @@ def download_onnx(request: Request, req: OnnxDownloadRequest):
 @router.get("/models")
 def get_models(request: Request):
     app_state = state(request)
-    inventory = models.model_inventory(app_state.settings)
+    inventory = models.model_inventory(app_state)
     return {
         "models": inventory["chat_models"],
         "model_details": inventory.get("chat_model_details", []),
@@ -121,7 +121,7 @@ def get_models(request: Request):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
-        "llama_backend": models.llama_backend_info(),
+        "llama_backend": models.llama_backend_info(app_state, probe=True),
     }
 
 
@@ -150,9 +150,6 @@ def load_model(request: Request, req: LoadModelRequest):
     app_state = state(request)
     if app_state.startup_error:
         raise HTTPException(status_code=503, detail=app_state.startup_error)
-    if not req.model.strip():
-        raise HTTPException(status_code=400, detail="Select the configured external llama.cpp server before connecting.")
-
     models.load_llm(app_state, req.model)
     return {
         "status": "loaded",
@@ -160,8 +157,26 @@ def load_model(request: Request, req: LoadModelRequest):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
-        "llama_backend": models.llama_backend_info(),
+        "llama_backend": models.llama_backend_info(app_state, probe=True),
     }
+
+
+@router.get("/models/server")
+def get_llama_server_settings(request: Request):
+    return state(request).llama_server_settings
+
+
+@router.put("/models/server")
+async def put_llama_server_settings(request: Request, server_settings: LlamaServerSettings):
+    app_state = state(request)
+    saved = storage.save_llama_server_settings(app_state.sqlite, server_settings)
+    app_state.llama_server_settings = saved
+    app_state.active_model_name = None
+    app_state.active_context_tokens = None
+    app_state.active_model_context_tokens = None
+    app_state.last_model_load_error = None
+    await app_state.event_bus.publish("llama_server", saved.model_dump())
+    return saved
 
 
 @router.get("/settings")
@@ -171,8 +186,14 @@ def get_settings(request: Request):
 
 @router.put("/settings")
 async def put_settings(request: Request, rag_settings: RagSettings):
-    saved = storage.save_rag_settings(state(request).sqlite, rag_settings)
-    await state(request).event_bus.publish("settings", saved.model_dump())
+    app_state = state(request)
+    previous = storage.get_rag_settings(app_state.sqlite)
+    chunk_keys = ("parent_target_tokens", "parent_max_tokens", "child_target_tokens", "child_max_tokens", "child_overlap_tokens")
+    reindex_required = any(getattr(previous, key) != getattr(rag_settings, key) for key in chunk_keys)
+    saved = storage.save_rag_settings(app_state.sqlite, rag_settings)
+    if reindex_required:
+        storage.execute(app_state.sqlite, "UPDATE documents SET stale_embedding = 1 WHERE type = 'file'")
+    await app_state.event_bus.publish("settings", {**saved.model_dump(), "reindex_required": reindex_required})
     return saved
 
 
@@ -263,8 +284,9 @@ async def create_eval_run(request: Request, body: EvalRunRequest):
 
 @router.post("/feedback")
 def save_feedback(request: Request, body: dict):
-    storage.execute(
-        state(request).sqlite,
+    app_state = state(request)
+    cursor = storage.execute(
+        app_state.sqlite,
         """
         INSERT INTO user_feedback (query_id, message_id, feedback_value, failure_reason, correction_text, expected_doc_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
@@ -278,7 +300,16 @@ def save_feedback(request: Request, body: dict):
             body.get("expected_doc_id"),
         ),
     )
-    return {"status": "success"}
+    feedback_id = cursor.lastrowid
+    expected_doc_id = str(body.get("expected_doc_id") or "").strip()
+    question = str(body.get("question") or body.get("correction_text") or "").strip()
+    if expected_doc_id and question:
+        storage.execute(
+            app_state.sqlite,
+            "INSERT INTO eval_cases (id, question, expected_doc_id, source_feedback_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+            (str(uuid.uuid4()), question[:4000], expected_doc_id, feedback_id, int(time.time())),
+        )
+    return {"status": "success", "feedback_id": feedback_id}
 
 
 @router.get("/events")
@@ -309,54 +340,57 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     rag_settings = _settings_for_retrieval_scope(req.settings or storage.get_rag_settings(app_state.sqlite), req.retrieval_scope)
     _ensure_query_model_loaded(app_state, req.model)
 
-    query_vector = await retrieval.get_embedding(app_state, req.prompt)
-    context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
-    query_meta["retrieval_scope"] = req.retrieval_scope
-    query_meta["response_effort"] = req.response_effort
-    if rag_settings.trace_persistence and query_meta.get("trace"):
-        storage.save_retrieval_trace(app_state.sqlite, query_meta["trace"])
-    conversation_id = req.conversation_id
-    if not conversation_id:
-        title = req.prompt.strip().replace("\n", " ")[:80]
-        conversation_id = storage.create_conversation(app_state.sqlite, title)["id"]
-    user_message = storage.append_message(
-        app_state.sqlite,
-        conversation_id,
-        "user",
-        req.prompt,
-        model=req.model,
-        settings={
-            **rag_settings.model_dump(),
-            "retrieval_scope": req.retrieval_scope,
-            "response_effort": req.response_effort,
-        },
-    )
-
     async def response_stream():
         answer_parts: list[str] = []
-        for subquery in query_meta["subqueries"]:
-            yield _sse("subquery", subquery)
-        yield _sse("conversation", {"conversation_id": conversation_id, "user_message_id": user_message["id"]})
-        for source in sources:
-            yield _sse("source", source.model_dump())
-        yield _sse("answer_meta", {key: value for key, value in query_meta.items() if key not in {"subqueries", "trace"}})
         try:
-            generation_started = time.perf_counter()
-            generation_events = generation.stream_response_events(
-                app_state,
-                req.prompt,
-                context,
-                req.history,
-                rag_settings,
-                query_meta,
-                response_effort=req.response_effort,
+            # Send an event immediately so slow embedding/retrieval cannot leave the UI
+            # waiting for a response that has not begun streaming yet.
+            yield _sse("phase", {"phase": "retrieving"})
+            query_vector = await retrieval.get_embedding(app_state, req.prompt)
+            context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
+            query_meta["retrieval_scope"] = req.retrieval_scope
+            query_meta["response_effort"] = req.response_effort
+            if rag_settings.trace_persistence and query_meta.get("trace"):
+                storage.save_retrieval_trace(app_state.sqlite, query_meta["trace"])
+            conversation_id = req.conversation_id
+            if conversation_id:
+                conversation = storage.get_conversation(app_state.sqlite, conversation_id)
+                if conversation and conversation.get("title") == "New chat":
+                    storage.rename_conversation(app_state.sqlite, conversation_id, _conversation_title(req.prompt))
+            else:
+                conversation_id = storage.create_conversation(app_state.sqlite, _conversation_title(req.prompt))["id"]
+            user_message = storage.append_message(
+                app_state.sqlite, conversation_id, "user", req.prompt, model=req.model,
+                settings={**rag_settings.model_dump(), "retrieval_scope": req.retrieval_scope, "response_effort": req.response_effort},
             )
-            async for event_type, value in _cancel_on_disconnect(request, generation_events):
-                if event_type == "phase":
-                    yield _sse("phase", {"phase": value})
-                else:
-                    answer_parts.append(value)
-                    yield _sse("token", {"text": value})
+            for subquery in query_meta["subqueries"]:
+                yield _sse("subquery", subquery)
+            yield _sse("conversation", {"conversation_id": conversation_id, "user_message_id": user_message["id"]})
+            for source in sources:
+                yield _sse("source", source.model_dump())
+            yield _sse("answer_meta", {key: value for key, value in query_meta.items() if key not in {"subqueries", "trace"}})
+            generation_started = time.perf_counter()
+            if rag_settings.evidence_required and query_meta.get("no_answer"):
+                answer = "I could not find sufficient supporting evidence in your local documents to answer that reliably."
+                answer_parts.append(answer)
+                yield _sse("phase", {"phase": "evidence_required"})
+                yield _sse("token", {"text": answer})
+            else:
+                generation_events = generation.stream_response_events(
+                    app_state,
+                    req.prompt,
+                    context,
+                    req.history,
+                    rag_settings,
+                    query_meta,
+                    response_effort=req.response_effort,
+                )
+                async for event_type, value in _cancel_on_disconnect(request, generation_events):
+                    if event_type == "phase":
+                        yield _sse("phase", {"phase": value})
+                    else:
+                        answer_parts.append(value)
+                        yield _sse("token", {"text": value})
             if await request.is_disconnected():
                 return
             answer_text = "".join(answer_parts)
@@ -390,6 +424,14 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                 meta=query_meta,
             )
             storage.save_message_sources(app_state.sqlite, assistant_message["id"], [source.model_dump() for source in sources])
+            if rag_settings.conversation_memory and answer_text.strip():
+                await retrieval.save_permanent_memory(
+                    app_state,
+                    conversation_id,
+                    assistant_message["id"],
+                    req.prompt,
+                    answer_text,
+                )
             storage.save_answer_record(app_state.sqlite, {
                 "id": assistant_message["id"],
                 "query_id": query_meta.get("query_id"),
@@ -409,6 +451,10 @@ async def chat_and_remember(request: Request, req: QueryRequest):
             yield _sse("error", {"message": str(exc)})
 
     return StreamingResponse(response_stream(), media_type="text/event-stream")
+
+
+def _conversation_title(prompt: str) -> str:
+    return " ".join(prompt.split())[:80] or "New chat"
 
 
 def _sse(event_type: str, payload: dict) -> str:

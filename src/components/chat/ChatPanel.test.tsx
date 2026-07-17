@@ -21,8 +21,15 @@ const settings: RagSettings = {
   temperature: 0.4,
   chunk_size: 1500,
   chunk_overlap: 150,
+  parent_target_tokens: 520,
+  parent_max_tokens: 650,
+  child_target_tokens: 110,
+  child_max_tokens: 150,
+  child_overlap_tokens: 0,
   context_tokens: 32768,
   full_context: false,
+  evidence_required: false,
+  conversation_memory: true,
   trace_persistence: true,
   no_answer_min_confidence: 0.35,
   no_answer_min_rerank_score: 0.15,
@@ -91,17 +98,8 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Low retrieval")).toBeInTheDocument();
     expect(screen.getByText("High retrieval")).toBeInTheDocument();
     expect(screen.getByLabelText("Response effort")).toHaveValue("balanced");
-    expect(screen.getByText("Quick response")).toBeInTheDocument();
-    expect(screen.getByText("Thorough response")).toBeInTheDocument();
-  });
-
-  it("starts a new chat from the main chat UI", async () => {
-    const user = userEvent.setup();
-    const onNewChat = vi.fn();
-    render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} onNewChat={onNewChat} />);
-
-    await user.click(screen.getByRole("button", { name: "New chat" }));
-    expect(onNewChat).toHaveBeenCalledOnce();
+    expect(screen.getByText("Quick")).toBeInTheDocument();
+    expect(screen.getByText("Thorough")).toBeInTheDocument();
   });
 
   it("keeps the first streamed answer visible after the conversation event", async () => {

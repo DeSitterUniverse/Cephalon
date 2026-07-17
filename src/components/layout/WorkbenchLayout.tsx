@@ -1,6 +1,6 @@
 import type { CSSProperties, MouseEvent, ReactNode } from "react";
 import { useEffect } from "react";
-import { Maximize2, Minus, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
+import { Maximize2, MessageSquarePlus, Minus, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import logoUrl from "../../assets/cephalon.svg";
 import { useUiStore } from "../../store";
@@ -12,9 +12,11 @@ type Props = {
   center: ReactNode;
   right: ReactNode;
   modelControl?: ReactNode;
+  onNewChat?: () => void;
+  newChatDisabled?: boolean;
 };
 
-export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
+export function WorkbenchLayout({ left, center, right, modelControl, onNewChat, newChatDisabled }: Props) {
   const rightPanel = useUiStore(state => state.rightPanel);
   const theme = useUiStore(state => state.theme);
   const leftPanelOpen = useUiStore(state => state.leftPanelOpen);
@@ -67,6 +69,7 @@ export function WorkbenchLayout({ left, center, right, modelControl }: Props) {
               <div>
                 <div className="brand">Cephalon</div>
               </div>
+              {onNewChat && <button className="title-new-chat" type="button" onClick={onNewChat} disabled={newChatDisabled} title="Start new chat" aria-label="New chat"><MessageSquarePlus size={15} /></button>}
             </div>
             <div className="topbar-actions">
               {modelControl}

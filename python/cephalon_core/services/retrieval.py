@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,11 @@ CORE_MEMORY_DOC_ID = "core_memory"
 EMBEDDING_CACHE_LIMIT = 128
 RERANK_CACHE_LIMIT = 96
 RERANK_TEXT_LIMIT = 700
+MEMORY_ONLY_REQUEST = re.compile(r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\s+only\b", re.IGNORECASE)
+MEMORY_PREFERRED_REQUEST = re.compile(
+    r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\b|\b(?:we\s+(?:just\s+)?discuss(?:ed)?|remember)\b",
+    re.IGNORECASE,
+)
 QUERY_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "best", "for", "from", "how", "i", "in", "is", "it",
     "amount", "day", "me", "my", "of", "on", "or", "show", "the", "to", "what", "when", "which", "with",
@@ -152,32 +158,46 @@ def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
     else:
         tokenizer_kwargs["padding"] = True
     inputs = app_state.embed_tokenizer(texts, **tokenizer_kwargs)
-    ort_inputs = {
-        "input_ids": inputs["input_ids"].astype(np.int64),
-        "attention_mask": inputs["attention_mask"].astype(np.int64),
-    }
-    if "token_type_ids" in inputs:
+    accepted_inputs = {item.name for item in app_state.embedder.get_inputs()} if hasattr(app_state.embedder, "get_inputs") else set()
+    ort_inputs = {"input_ids": inputs["input_ids"].astype(np.int64)}
+    if "attention_mask" in inputs and (not accepted_inputs or "attention_mask" in accepted_inputs):
+        ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
+    if "token_type_ids" in inputs and (not accepted_inputs or "token_type_ids" in accepted_inputs):
         ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
 
-    outs = app_state.embedder.run(None, ort_inputs)
+    runtime = getattr(app_state, "embedding_runtime", None)
+    guard = runtime.exclusive() if runtime is not None else nullcontext()
+    with guard:
+        outs = app_state.embedder.run(None, ort_inputs)
     output = np.asarray(outs[0])
     if output.ndim == 2:
         batch_vectors = output
     elif output.ndim == 3:
-        pooling = getattr(app_state, "embedding_pooling", "cls")
+        pooling = getattr(app_state, "embedding_pooling", "auto")
         batch_vectors = []
         if pooling == "last_token":
             for index, hidden in enumerate(output):
                 seq_len = int(ort_inputs["attention_mask"][index].sum()) - 1
                 batch_vectors.append(hidden[max(seq_len, 0)])
-        else:
+        elif pooling == "cls":
             batch_vectors = [hidden[0] for hidden in output]
+        else:
+            masks = ort_inputs.get("attention_mask")
+            if masks is None:
+                batch_vectors = [hidden.mean(axis=0) for hidden in output]
+            else:
+                batch_vectors = [
+                    (hidden * masks[index][:, np.newaxis]).sum(axis=0) / max(int(masks[index].sum()), 1)
+                    for index, hidden in enumerate(output)
+                ]
+    else:
+        raise RuntimeError(f"Unsupported embedding output rank: {output.ndim}")
+
+    if getattr(app_state, "embedding_normalized", False):
         batch_vectors = np.asarray([
             vector / norm if (norm := np.linalg.norm(vector)) else vector
             for vector in batch_vectors
         ])
-    else:
-        raise RuntimeError(f"Unsupported embedding output rank: {output.ndim}")
 
     if len(batch_vectors) != len(texts):
         raise RuntimeError(f"Embedding ONNX returned {len(batch_vectors)} vectors for {len(texts)} texts.")
@@ -190,24 +210,57 @@ def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-async def save_permanent_memory(app_state, user_prompt: str, vector: list[float]) -> None:
+async def save_permanent_memory(app_state, conversation_id: str, message_id: str, user_prompt: str, answer_text: str) -> None:
+    """Persist a compact, searchable local memory for a completed conversation turn."""
+    if not getattr(storage.get_rag_settings(app_state.sqlite), "conversation_memory", True):
+        return
     memory_id = f"mem_{uuid.uuid4()}"
-    memory_text = f"[Past Conversation Context]: The user stated/asked: '{user_prompt}'"
-    lance_data = [{
-        "vector": vector,
-        "id": memory_id,
-        "doc_id": "core_memory",
-        "text": memory_text,
-        "chunk_index": -1,
-        "parent_id": None,
-        "source_kind": "memory",
-        **storage.active_embedding_metadata(app_state),
-        "chunk_length": len(memory_text),
-    }]
+    # Reasoning traces are useful for the live response, but they are neither a
+    # user-facing answer nor useful semantic-memory content.  Keeping them out
+    # prevents a long trace from drowning out the actual answer on retrieval.
+    clean_answer = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.IGNORECASE | re.DOTALL).strip()
+    memory_text = (
+        f"[Past Conversation Context]\nUser: {user_prompt.strip()[:1600]}\n"
+        f"Assistant: {(clean_answer or answer_text.strip())[:3200]}"
+    )
     try:
-        ensure_vector_table(app_state, lance_data)
+        vector = await get_embedding(app_state, memory_text)
+        lance_data = [{
+            "vector": vector,
+            "id": memory_id,
+            "doc_id": "core_memory",
+            "text": memory_text,
+            "chunk_index": -1,
+            "parent_id": None,
+            "source_kind": "memory",
+            **storage.active_embedding_metadata(app_state),
+            "chunk_length": len(memory_text),
+        }]
+        await asyncio.to_thread(ensure_vector_table, app_state, lance_data)
+        storage.execute(
+            app_state.sqlite,
+            "INSERT INTO conversation_memory (id, conversation_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+            (memory_id, conversation_id, message_id, int(time.time())),
+        )
     except Exception:
         pass
+
+
+def delete_conversation_memory(app_state, conversation_id: str) -> None:
+    rows = storage.fetchall(app_state.sqlite, "SELECT id FROM conversation_memory WHERE conversation_id = ?", (conversation_id,))
+    table_name = vector_table_name(app_state)
+    if rows and table_name in app_state.lance.table_names():
+        table = app_state.lance.open_table(table_name)
+        for row in rows:
+            try:
+                table.delete(f"id = {_quote_lance_string(row['id'])}")
+            except Exception:
+                continue
+    storage.execute(app_state.sqlite, "DELETE FROM conversation_memory WHERE conversation_id = ?", (conversation_id,))
+
+
+def _quote_lance_string(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
@@ -250,12 +303,9 @@ def _score_rerank_pair(app_state, pair: list[str]) -> float:
 def _score_rerank_pairs(app_state, pairs: list[list[str]]) -> np.ndarray:
     if not pairs:
         return np.asarray([], dtype=float)
-    try:
-        return _run_reranker_batch(app_state, pairs)
-    except Exception:
-        if len(pairs) == 1:
-            raise
-        return np.asarray([_run_reranker_batch(app_state, [pair])[0] for pair in pairs], dtype=float)
+    batch_size = max(1, int(getattr(app_state, "reranker_batch_size", 1)))
+    batches = (pairs[index:index + batch_size] for index in range(0, len(pairs), batch_size))
+    return np.concatenate([_run_reranker_batch(app_state, batch) for batch in batches]).astype(float)
 
 
 def _run_reranker_batch(app_state, pairs: list[list[str]]) -> np.ndarray:
@@ -268,7 +318,10 @@ def _run_reranker_batch(app_state, pairs: list[list[str]]) -> np.ndarray:
         ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
     if "token_type_ids" in inputs and (not accepted_inputs or "token_type_ids" in accepted_inputs):
         ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
-    raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
+    runtime = getattr(app_state, "reranker_runtime", None)
+    guard = runtime.exclusive() if runtime is not None else nullcontext()
+    with guard:
+        raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
     scores = _reranker_scores(app_state, raw_scores)
     if scores.size == 0:
         raise RuntimeError("Reranker ONNX returned no score for a candidate pair.")
@@ -335,6 +388,12 @@ def _select_relevant_results(ranked: list[dict], limit: int) -> list[dict]:
     return selected
 
 
+def _memory_request_mode(prompt: str) -> tuple[bool, bool]:
+    """Return (memory_only, memory_preferred) for explicit conversation references."""
+    memory_only = bool(MEMORY_ONLY_REQUEST.search(prompt))
+    return memory_only, memory_only or bool(MEMORY_PREFERRED_REQUEST.search(prompt))
+
+
 def _retrieval_prior_score(prompt: str, result: dict) -> float:
     prior = 0.0
     if result.get("lexical_rank") is not None:
@@ -358,10 +417,12 @@ def plan_subqueries(prompt: str) -> list[dict[str, str]]:
     parts = [p.strip(" ,;") for p in re.split(r"\b(?:and|also|versus|vs\.?|compare)\b|[?;]", clean, flags=re.I) if p.strip(" ,;")]
     if len(parts) <= 1:
         return [{"id": "q1", "text": clean}]
-    return [{"id": f"q{idx}", "text": part} for idx, part in enumerate(parts[:5], start=1)]
+    # Keep the complete question as the primary retrieval intent. Decomposed
+    # parts improve recall but must not erase comparison/relationship context.
+    return [{"id": "q0", "text": clean}] + [{"id": f"q{idx}", "text": part} for idx, part in enumerate(parts[:5], start=1)]
 
 
-def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = None) -> list[SourceChunk]:
+def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = None, start_rank: int = 1) -> list[SourceChunk]:
     if not results:
         return []
     doc_ids = list({res["doc_id"] for res in results if res["doc_id"] != "core_memory"})
@@ -372,7 +433,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
 
     sources: list[SourceChunk] = []
-    for rank, res in enumerate(results, start=1):
+    for rank, res in enumerate(results, start=start_rank):
         doc_id = res["doc_id"]
         doc_name = "Core Memory" if doc_id == "core_memory" else path_map.get(doc_id, "Unknown")
         text = res["text"].strip()
@@ -390,9 +451,28 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             lexical_score=float(res["lexical_score"]) if res.get("lexical_score") is not None else None,
             fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
             snippet=text[:500],
-            subquery_id=subquery_id,
+            subquery_id=subquery_id or ",".join(res.get("subquery_ids", [])) or None,
         ))
     return sources
+
+
+def _merge_candidates(target: dict[str, dict], results: list[dict], subquery_id: str) -> None:
+    for result in results:
+        chunk_id = result["id"]
+        existing = target.get(chunk_id)
+        if existing is None:
+            merged = dict(result)
+            merged["subquery_ids"] = [subquery_id]
+            target[chunk_id] = merged
+            continue
+        if subquery_id not in existing["subquery_ids"]:
+            existing["subquery_ids"].append(subquery_id)
+        # RRF scores are comparable across these equally configured searches.
+        if float(result.get("score", 0)) > float(existing.get("score", 0)):
+            subqueries = existing["subquery_ids"]
+            existing.clear()
+            existing.update(dict(result))
+            existing["subquery_ids"] = subqueries
 
 
 async def _search_once(app_state, prompt: str, query_vector: list[float], settings: RagSettings) -> tuple[list[dict], str, dict[str, Any]]:
@@ -490,6 +570,30 @@ def _dense_search(app_state, table_name: str, query_vector: list[float], limit: 
     return results
 
 
+def _memory_dense_search(app_state, table_name: str, query_vector: list[float], limit: int = 2) -> list[dict]:
+    if table_name not in app_state.lance.table_names():
+        return []
+    table = app_state.lance.open_table(table_name)
+    try:
+        query = table.search(query_vector, vector_column_name="vector")
+    except TypeError:
+        query = table.search(query_vector)
+    try:
+        rows = query.where("source_kind = 'memory'").limit(limit).to_list()
+    except Exception:
+        rows = query.limit(max(limit * 10, 20)).to_list()
+    results = []
+    for rank, row in enumerate((item for item in rows if item.get("source_kind") == "memory") , start=1):
+        if rank > limit:
+            break
+        item = dict(row)
+        item["dense_rank"] = rank
+        item["vector_score"] = _distance_to_score(item.get("_distance"))
+        item["score"] = float(item["vector_score"] or 0.0)
+        results.append(item)
+    return results
+
+
 def _lexical_search(app_state, prompt: str, limit: int) -> list[dict]:
     storage.ensure_chunks_fts(app_state.sqlite)
     rows = storage.fetchall(
@@ -576,6 +680,24 @@ def split_sentences(text: str) -> list[str]:
     ]
 
 
+def split_context_blocks(text: str) -> list[tuple[str, str]]:
+    """Keep tables, code, and lists intact instead of slicing them as prose."""
+    blocks: list[tuple[str, str]] = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        clean = block.strip()
+        if not clean:
+            continue
+        lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
+        structured = clean.startswith("```") or any("\t" in line or "|" in line for line in lines) or all(
+            re.match(r"\s*(?:[-*•]|\d+[.)])\s+", line) for line in lines
+        )
+        if structured:
+            blocks.append(("structured", clean))
+        else:
+            blocks.extend(("prose", sentence) for sentence in split_sentences(clean))
+    return blocks
+
+
 def format_source_context(source_id: str, doc_name: str, chunk_id: str, text: str) -> str:
     return f"[[src:{source_id}]] Source: {doc_name} | Chunk: {chunk_id}\n{text.strip()}"
 
@@ -599,11 +721,12 @@ def compress_context(query: str, sources: list[CompressionSource], max_sentences
     query_terms = _term_set(query)
     candidates: list[dict[str, Any]] = []
     for source in sources:
-        for sentence in split_sentences(source.text):
-            relevance = _sentence_relevance(query_terms, sentence)
+        for block_type, text in split_context_blocks(source.text):
+            relevance = _sentence_relevance(query_terms, text)
             candidates.append({
                 "source_id": source.source_id,
-                "sentence": sentence,
+                "sentence": text,
+                "block_type": block_type,
                 "rank": source.rank,
                 "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04),
                 "relevant": relevance > 0,
@@ -665,6 +788,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "retrieval_mode": "",
         "subqueries": [],
         "vector_candidates": [],
+        "memory_candidates": [],
         "bm25_candidates": [],
         "fused_candidates": [],
         "reranked_candidates": [],
@@ -674,6 +798,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "no_answer": {},
     }
     subqueries = plan_subqueries(prompt)
+    memory_only, memory_preferred = _memory_request_mode(prompt)
     trace["subqueries"] = subqueries
     numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
     if numeric_context:
@@ -686,56 +811,86 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         search_modes.append("numeric_scan")
         trace["reranked_candidates"] = [source.model_dump() for source in numeric_sources]
     else:
-        for subquery in subqueries:
-            vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
-            search_output = await _search_once(app_state, subquery["text"], vector, settings)
-            if len(search_output) == 2:
-                results, mode = search_output
-                stage_trace = {"latency": {}}
-            else:
-                results, mode, stage_trace = search_output
-            search_modes.append(mode)
-            trace["vector_candidates"].extend(stage_trace.get("vector_candidates", []))
-            trace["bm25_candidates"].extend(stage_trace.get("bm25_candidates", []))
-            trace["fused_candidates"].extend(stage_trace.get("fused_candidates", []))
-            for key in ("vector_ms", "bm25_ms", "fusion_ms"):
-                trace["latency"][key] = round(trace["latency"].get(key, 0) + stage_trace.get("latency", {}).get(key, 0), 2)
-            rerank_started = time.perf_counter()
-            rerank_candidates = results[:_rerank_candidate_limit(settings)]
-            skipped_rerank = results[len(rerank_candidates):]
-            all_ranked = await asyncio.to_thread(rerank, app_state, subquery["text"], rerank_candidates)
-            trace["latency"]["rerank_ms"] = round(trace["latency"].get("rerank_ms", 0) + ((time.perf_counter() - rerank_started) * 1000), 2)
-            reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
-            selected_ids = {item["id"] for item in reranked}
-            trace["reranked_candidates"].extend([_trace_candidate(row, rank) for rank, row in enumerate(all_ranked, start=1)])
-            trace["unused_candidates"].extend([
-                {**_trace_candidate(row, rank), "reason": "below final context cutoff"}
-                for rank, row in enumerate(all_ranked, start=1)
-                if row["id"] not in selected_ids
-            ][: max(settings.top_k, 10)])
-            trace["unused_candidates"].extend([
-                {**_trace_candidate(row, rank + len(rerank_candidates)), "reason": "below rerank candidate cutoff"}
-                for rank, row in enumerate(skipped_rerank, start=1)
-            ][: max(settings.top_k, 10)])
-            sources = hydrate_sources(app_state, reranked, subquery["id"])
-            all_sources.extend(sources)
-            source_by_chunk = {source.chunk_id: source for source in sources}
+        merged_candidates: dict[str, dict] = {}
+        table_name = vector_table_name(app_state)
+        memory_results = _memory_dense_search(app_state, table_name, query_vector)
+        if memory_results:
+            _merge_candidates(merged_candidates, memory_results, "memory")
+            trace["memory_candidates"] = [_trace_candidate(row, rank) for rank, row in enumerate(memory_results, start=1)]
+            search_modes.append("conversation_memory")
 
-            for res in reranked:
-                source = source_by_chunk.get(res["id"])
-                if res["doc_id"] == CORE_MEMORY_DOC_ID:
-                    context_chunks.append(res["text"])
+        if not memory_only:
+            for subquery in subqueries:
+                vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
+                search_output = await _search_once(app_state, subquery["text"], vector, settings)
+                if len(search_output) == 2:
+                    results, mode = search_output
+                    stage_trace = {"latency": {}}
                 else:
-                    label = source.doc_name if source else "Unknown"
-                    source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
-                    context_text = _parent_context(app_state, res) or res["text"]
-                    context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
-                    compression_inputs.append(CompressionSource(source_id=source_id, text=context_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
+                    results, mode, stage_trace = search_output
+                search_modes.append(mode)
+                _merge_candidates(merged_candidates, results, subquery["id"])
+                trace["vector_candidates"].extend(stage_trace.get("vector_candidates", []))
+                trace["bm25_candidates"].extend(stage_trace.get("bm25_candidates", []))
+                trace["fused_candidates"].extend(stage_trace.get("fused_candidates", []))
+                for key in ("vector_ms", "bm25_ms", "fusion_ms"):
+                    trace["latency"][key] = round(trace["latency"].get(key, 0) + stage_trace.get("latency", {}).get(key, 0), 2)
+
+        candidates = sorted(merged_candidates.values(), key=lambda row: float(row.get("score", 0)), reverse=True)
+        # Memory requests must not be crowded out before reranking by a larger
+        # document corpus.  For an explicit "past conversation only" request,
+        # documents are intentionally excluded above; otherwise reserve the
+        # leading rerank slot for the best semantic-memory candidate.
+        if memory_preferred:
+            memory_candidates = [row for row in candidates if row.get("doc_id") == CORE_MEMORY_DOC_ID]
+            non_memory_candidates = [row for row in candidates if row.get("doc_id") != CORE_MEMORY_DOC_ID]
+            candidates = memory_candidates + non_memory_candidates
+        rerank_candidates = candidates[:_rerank_candidate_limit(settings)]
+        skipped_rerank = candidates[len(rerank_candidates):]
+        rerank_started = time.perf_counter()
+        all_ranked = await asyncio.to_thread(rerank, app_state, prompt, rerank_candidates)
+        trace["latency"]["rerank_ms"] = round((time.perf_counter() - rerank_started) * 1000, 2)
+        if memory_only:
+            reranked = all_ranked[:settings.rerank_top_n]
+        else:
+            reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
+            if memory_preferred:
+                memory_ranked = [row for row in all_ranked if row.get("doc_id") == CORE_MEMORY_DOC_ID]
+                if memory_ranked:
+                    # An explicit reference to prior chat is stronger evidence
+                    # of intent than a generic document tie-breaker.
+                    reranked = (memory_ranked[:1] + [
+                        row for row in reranked if row.get("id") != memory_ranked[0].get("id")
+                    ])[:settings.rerank_top_n]
+        selected_ids = {item["id"] for item in reranked}
+        trace["reranked_candidates"] = [_trace_candidate(row, rank) for rank, row in enumerate(all_ranked, start=1)]
+        trace["unused_candidates"].extend([
+            {**_trace_candidate(row, rank), "reason": "below final context cutoff"}
+            for rank, row in enumerate(all_ranked, start=1)
+            if row["id"] not in selected_ids
+        ][: max(settings.top_k, 10)])
+        trace["unused_candidates"].extend([
+            {**_trace_candidate(row, rank + len(rerank_candidates)), "reason": "below rerank candidate cutoff"}
+            for rank, row in enumerate(skipped_rerank, start=1)
+        ][: max(settings.top_k, 10)])
+        all_sources = hydrate_sources(app_state, reranked)
+        source_by_chunk = {source.chunk_id: source for source in all_sources}
+        for res in reranked:
+            source = source_by_chunk.get(res["id"])
+            if res["doc_id"] == CORE_MEMORY_DOC_ID:
+                context_chunks.append(format_source_context(source.source_id or "S1", "Past conversation", res["id"], res["text"]))
+                continue
+            label = source.doc_name if source else "Unknown"
+            source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
+            context_text = _parent_context(app_state, res) or res["text"]
+            context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
+            compression_inputs.append(CompressionSource(source_id=source_id, text=context_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
 
     if compression_inputs:
         compressed_context, compression_stats = compress_context(prompt, compression_inputs, max_sentences=max(6, settings.rerank_top_n * 3))
         if compressed_context:
-            context_chunks = [compressed_context]
+            memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
+            context_chunks = memory_context + [compressed_context]
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 

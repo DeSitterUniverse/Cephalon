@@ -6,9 +6,19 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::Manager;
 
 pub struct BackendProcess(pub Mutex<Option<Child>>);
+
+#[derive(Serialize)]
+struct BackendStatus {
+    reachable: bool,
+    managed_process: bool,
+    exited: bool,
+    exit_code: Option<i32>,
+    address: String,
+}
 
 struct PythonCommand {
     program: PathBuf,
@@ -52,6 +62,38 @@ fn backend_health_is_compatible(response: &str) -> bool {
 #[tauri::command]
 fn check_backend() -> bool {
     backend_is_cephalon()
+}
+
+fn backend_status(state: &BackendProcess) -> BackendStatus {
+    let mut managed_process = false;
+    let mut exited = false;
+    let mut exit_code = None;
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(child) = guard.as_mut() {
+            managed_process = true;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    exited = true;
+                    exit_code = status.code();
+                    *guard = None;
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+    }
+    BackendStatus {
+        reachable: backend_is_cephalon(),
+        managed_process,
+        exited,
+        exit_code,
+        address: backend_addr().to_string(),
+    }
+}
+
+#[tauri::command]
+fn get_backend_status(state: tauri::State<BackendProcess>) -> BackendStatus {
+    backend_status(&state)
 }
 
 #[tauri::command]
@@ -225,7 +267,7 @@ fn spawn_dev_backend() -> Option<Child> {
     }
 }
 
-fn spawn_release_backend(app: &tauri::App) -> Option<Child> {
+fn spawn_release_backend(app: &tauri::AppHandle) -> Option<Child> {
     let resource_path = app.path().resource_dir().expect("failed to find resources");
     let binary_name = if cfg!(target_os = "windows") {
         "engine.exe"
@@ -269,6 +311,46 @@ fn spawn_release_backend(app: &tauri::App) -> Option<Child> {
     }
 }
 
+#[tauri::command]
+fn restart_backend(
+    app: tauri::AppHandle,
+    state: tauri::State<BackendProcess>,
+) -> Result<BackendStatus, String> {
+    if backend_is_cephalon() {
+        return Ok(backend_status(&state));
+    }
+    if backend_is_listening() {
+        return Err(format!(
+            "Port {} is occupied by a service that is not a compatible Cephalon backend.",
+            backend_addr()
+        ));
+    }
+    if env::var("CEPHALON_EXTERNAL_BACKEND").ok().as_deref() == Some("1") {
+        return Err("Cephalon is configured to use an external backend. Start that backend, then retry.".to_string());
+    }
+
+    let mut guard = state.0.lock().map_err(|_| "Backend process state is unavailable.".to_string())?;
+    let already_running = if let Some(child) = guard.as_mut() {
+        child.try_wait().map_err(|error| error.to_string())?.is_none()
+    } else {
+        false
+    };
+    if already_running {
+        drop(guard);
+        return Ok(backend_status(&state));
+    }
+    *guard = if cfg!(debug_assertions) {
+        spawn_dev_backend()
+    } else {
+        spawn_release_backend(&app)
+    };
+    if guard.is_none() {
+        return Err("Cephalon could not start its local backend. Check that the packaged backend and Python runtime are available.".to_string());
+    }
+    drop(guard);
+    Ok(backend_status(&state))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -292,7 +374,7 @@ pub fn run() {
             } else if cfg!(debug_assertions) {
                 spawn_dev_backend()
             } else {
-                spawn_release_backend(app)
+                spawn_release_backend(&app.handle())
             };
             app.manage(BackendProcess(Mutex::new(child)));
             Ok(())
@@ -309,6 +391,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_backend,
+            get_backend_status,
+            restart_backend,
             minimize_window,
             toggle_maximize_window,
             close_window,

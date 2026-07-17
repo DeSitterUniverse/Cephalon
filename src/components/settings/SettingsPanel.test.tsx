@@ -6,13 +6,12 @@ import { SettingsPanel } from "./SettingsPanel";
 describe("SettingsPanel", () => {
   it("keeps settings focused on model setup and appearance", async () => {
     const user = userEvent.setup();
-    const setSelectedModel = vi.fn();
+    const onSaveLlamaServer = vi.fn();
 
     render(
       <SettingsPanel
-        models={["small.gguf", "large.gguf"]}
-        selectedModel="small.gguf"
-        setSelectedModel={setSelectedModel}
+        llamaServer={{ server_url: "http://127.0.0.1:8080", model_name: "External llama.cpp server", context_tokens: 32768 }}
+        onSaveLlamaServer={onSaveLlamaServer}
         onnxStatus={{
           model_dir: "C:\\models",
           engines_ready: false,
@@ -26,8 +25,10 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    await user.selectOptions(screen.getByLabelText("Model"), "large.gguf");
-    expect(setSelectedModel).toHaveBeenCalledWith("large.gguf");
+    await user.clear(screen.getByLabelText("llama.cpp URL"));
+    await user.type(screen.getByLabelText("llama.cpp URL"), "http://127.0.0.1:8081");
+    await user.click(screen.getByRole("button", { name: "Save server settings" }));
+    expect(onSaveLlamaServer).toHaveBeenCalledWith(expect.objectContaining({ server_url: "http://127.0.0.1:8081" }));
     expect(screen.getByText("Appearance")).toBeInTheDocument();
     expect(screen.getByText("Embedding and reranking")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Download default" })).toHaveLength(2);

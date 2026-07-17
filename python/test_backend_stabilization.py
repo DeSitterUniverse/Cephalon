@@ -69,6 +69,19 @@ class FakeTokenizer:
         }
 
 
+class FakeReranker:
+    def __init__(self):
+        self.batch_sizes = []
+
+    def get_inputs(self):
+        return []
+
+    def run(self, _outputs, inputs):
+        batch_size = len(inputs["input_ids"])
+        self.batch_sizes.append(batch_size)
+        return [np.arange(batch_size, dtype=float).reshape(batch_size, 1)]
+
+
 class FakeLance:
     def __init__(self) -> None:
         self.table = None
@@ -124,6 +137,39 @@ def test_scope_modes_change_retrieval_not_model_style():
     assert low.max_tokens == medium.max_tokens == high.max_tokens == 777
 
 
+def test_query_decomposition_keeps_the_original_question_and_deduplicates_candidates():
+    subqueries = retrieval.plan_subqueries("Compare alpha versus beta")
+    assert subqueries[0] == {"id": "q0", "text": "Compare alpha versus beta"}
+
+    merged = {}
+    retrieval._merge_candidates(merged, [{"id": "chunk-1", "score": 0.2}], "q0")
+    retrieval._merge_candidates(merged, [{"id": "chunk-1", "score": 0.4}], "q1")
+
+    assert list(merged) == ["chunk-1"]
+    assert merged["chunk-1"]["subquery_ids"] == ["q0", "q1"]
+    assert merged["chunk-1"]["score"] == 0.4
+
+
+def test_reranker_uses_safe_single_pair_batches_by_default():
+    reranker = FakeReranker()
+    state = SimpleNamespace(tokenizer=FakeTokenizer(), reranker=reranker)
+
+    scores = retrieval._score_rerank_pairs(state, [["query", "one"], ["query", "two"], ["query", "three"]])
+
+    assert reranker.batch_sizes == [1, 1, 1]
+    assert scores.tolist() == [0.0, 0.0, 0.0]
+
+
+def test_reranker_uses_declared_validated_batch_size():
+    reranker = FakeReranker()
+    state = SimpleNamespace(tokenizer=FakeTokenizer(), reranker=reranker, reranker_batch_size=2)
+
+    scores = retrieval._score_rerank_pairs(state, [["query", "one"], ["query", "two"], ["query", "three"]])
+
+    assert reranker.batch_sizes == [2, 1]
+    assert scores.tolist() == [0.0, 1.0, 0.0]
+
+
 def test_query_request_separates_retrieval_scope_and_response_effort():
     request = QueryRequest(
         prompt="Compare the documents carefully.",
@@ -160,7 +206,7 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
                 ])
             return iter([])
 
-    def fake_completion(messages, settings, *, stream):
+    def fake_completion(_app_state, messages, settings, *, stream):
         calls.append({"messages": messages, "settings": settings, "stream": stream})
         return FakeResponse(stream)
 
@@ -184,7 +230,21 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     assert len(calls) == 2
     assert calls[0]["stream"] is False
     assert calls[1]["stream"] is True
+    assert calls[0]["settings"].max_tokens == 6144
+    assert calls[1]["settings"].max_tokens == 6144
     assert "Draft answer with one gap." in calls[1]["messages"][0]["content"]
+
+
+def test_response_effort_reserves_thinking_capacity_separately_from_final_output():
+    settings = RagSettings(max_tokens=16)
+
+    quick = generation._settings_for_response_effort(settings, "quick")
+    balanced = generation._settings_for_response_effort(settings, "balanced")
+    thorough = generation._settings_for_response_effort(settings, "thorough")
+
+    assert quick.max_tokens == 2048 + generation.THINKING_TOKEN_ALLOCATION
+    assert balanced.max_tokens == 4096 + generation.THINKING_TOKEN_ALLOCATION
+    assert thorough.max_tokens == 4096 + generation.THINKING_TOKEN_ALLOCATION
 
 
 def test_prompt_budget_preserves_first_intent_and_recent_messages():
@@ -281,7 +341,7 @@ def test_migrations_create_workbench_tables():
 
 def test_model_inventory_reports_the_configured_external_server(monkeypatch):
     monkeypatch.setenv("CEPHALON_LLAMA_SERVER_MODEL", "My external model")
-    inventory = models.model_inventory(Settings())
+    inventory = models.model_inventory(SimpleNamespace(settings=Settings()))
     assert inventory["chat_models"] == ["My external model"]
     assert inventory["chat_model_details"] == []
     assert inventory["auxiliary_gguf"] == []
@@ -292,7 +352,7 @@ def test_load_llm_connects_to_configured_external_server(monkeypatch):
     monkeypatch.setenv("CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS", "32768")
     state = build_memory_state()
     state.llm = None
-    monkeypatch.setattr(models, "_server_request", lambda path: {"status": "ok"})
+    monkeypatch.setattr(models, "_server_request", lambda _state, _path: {"status": "ok"})
 
     models.load_llm(state, "My external model")
 
@@ -615,7 +675,7 @@ def test_unknown_binary_file_fails_with_clear_reason(tmp_path):
     assert "binary" in result["error"].lower()
 
 
-def test_jina_model_metadata_is_strict():
+def test_onnx_model_metadata_accepts_valid_non_jina_profiles():
     assert _validate_embedder_meta({
         "model_id": "jinaai/jina-embeddings-v5-text-small",
         "dimension": 1024,
@@ -627,23 +687,26 @@ def test_jina_model_metadata_is_strict():
         "score_mode": "logit_margin_0_minus_1",
     }) is None
 
-    assert "Embedder model mismatch" in _validate_embedder_meta({"model_id": "other", "dimension": 1024, "validated": True})
-    assert "score_mode" in _validate_reranker_meta({"model_id": "jinaai/jina-reranker-v3", "validated": True})
+    assert _validate_embedder_meta({"model_id": "other/embedder", "kind": "embedder", "dimension": 768, "validated": True}) is None
+    assert _validate_reranker_meta({"model_id": "other/reranker", "kind": "reranker", "validated": True, "score_mode": "auto"}) is None
+    assert "score_mode" in _validate_reranker_meta({"model_id": "other/reranker", "kind": "reranker", "validated": True})
 
 
-def test_query_requires_explicit_loaded_model():
+def test_query_requires_connected_server(monkeypatch):
     app_state = SimpleNamespace(startup_error=None, active_model_name="loaded.gguf")
+    monkeypatch.setattr(models, "_server_request", lambda _state, _path: {"status": "ok"})
     with pytest.raises(HTTPException) as exc:
-        routes._ensure_query_model_loaded(app_state, "other.gguf")
+        routes._ensure_query_model_loaded(SimpleNamespace(startup_error=None, active_model_name=None), "other.gguf")
 
     assert exc.value.status_code == 409
     assert "Connect to the configured external llama.cpp server" in exc.value.detail
 
 
-def test_query_accepts_loaded_model():
+def test_query_accepts_server_reported_model_even_when_client_label_differs(monkeypatch):
     app_state = SimpleNamespace(startup_error=None, active_model_name="loaded.gguf")
+    monkeypatch.setattr(models, "_server_request", lambda _state, _path: {"status": "ok"})
 
-    routes._ensure_query_model_loaded(app_state, "loaded.gguf")
+    routes._ensure_query_model_loaded(app_state, "External llama.cpp server")
 
 
 def test_generation_event_stream_stops_after_client_disconnect():
@@ -740,6 +803,7 @@ def test_reranker_scores_candidates_in_one_onnx_batch():
         tokenizer=BatchTokenizer(),
         reranker=session,
         reranker_score_mode="logit_margin_0_minus_1",
+        reranker_batch_size=3,
         rerank_cache=OrderedDict(),
     )
     results = [
@@ -843,6 +907,12 @@ def test_relevant_selection_keeps_same_document_and_drops_weak_dense_strays():
     selected = retrieval._select_relevant_results(ranked, 3)
 
     assert [result["id"] for result in selected] == ["domain_0", "domain_1"]
+
+
+def test_memory_request_mode_reserves_or_isolates_conversation_memory():
+    assert retrieval._memory_request_mode("From our past conversation only, what did we decide?") == (True, True)
+    assert retrieval._memory_request_mode("What did we just discuss about the rollback?") == (False, True)
+    assert retrieval._memory_request_mode("What does the local document say about rollback?") == (False, False)
 
 
 def test_dense_search_excludes_core_memory_rows():

@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+from urllib.parse import urlparse
 
 
 class Message(BaseModel):
@@ -11,12 +12,19 @@ class Message(BaseModel):
 class RagSettings(BaseModel):
     top_k: int = 20
     rerank_top_n: int = 3
-    max_tokens: int = 512
+    max_tokens: int = 4096
     temperature: float = 0.4
     chunk_size: int = 1500
     chunk_overlap: int = 150
+    parent_target_tokens: int = 520
+    parent_max_tokens: int = 650
+    child_target_tokens: int = 110
+    child_max_tokens: int = 150
+    child_overlap_tokens: int = 0
     context_tokens: int = 32768
     full_context: bool = False
+    evidence_required: bool = False
+    conversation_memory: bool = True
     trace_persistence: bool = True
     no_answer_min_confidence: float = 0.35
     no_answer_min_rerank_score: float = 0.15
@@ -65,6 +73,20 @@ class RagSettings(BaseModel):
             raise ValueError("chunk_overlap must be between 0 and 2000")
         return value
 
+    @field_validator("parent_target_tokens", "parent_max_tokens", "child_target_tokens", "child_max_tokens")
+    @classmethod
+    def validate_chunk_limits(cls, value: int) -> int:
+        if value < 32 or value > 4000:
+            raise ValueError("chunk token limits must be between 32 and 4000")
+        return value
+
+    @field_validator("child_overlap_tokens")
+    @classmethod
+    def validate_child_overlap(cls, value: int) -> int:
+        if value < 0 or value > 1000:
+            raise ValueError("child_overlap_tokens must be between 0 and 1000")
+        return value
+
     @field_validator("context_tokens")
     @classmethod
     def validate_context_tokens(cls, value: int) -> int:
@@ -103,8 +125,34 @@ class QueryRequest(BaseModel):
 
 
 class LoadModelRequest(BaseModel):
-    model: str
+    model: str = ""
 
+
+class LlamaServerSettings(BaseModel):
+    server_url: str = "http://127.0.0.1:8080"
+    model_name: str = "External llama.cpp server"
+    context_tokens: int | None = None
+
+    @field_validator("server_url")
+    @classmethod
+    def validate_server_url(cls, value: str) -> str:
+        clean = value.strip().rstrip("/")
+        parsed = urlparse(clean)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("server_url must be a complete http:// or https:// URL, including its port.")
+        return clean
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str) -> str:
+        return value.strip()[:160] or "External llama.cpp server"
+
+    @field_validator("context_tokens")
+    @classmethod
+    def validate_context_tokens(cls, value: int | None) -> int | None:
+        if value is not None and not 4096 <= value <= 1_000_000:
+            raise ValueError("context_tokens must be between 4096 and 1000000.")
+        return value
 
 class OnnxInstallLocalRequest(BaseModel):
     kind: str

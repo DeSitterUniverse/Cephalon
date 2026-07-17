@@ -29,13 +29,13 @@ Cephalon supports Windows and Linux. It requires Node.js, Python 3.14, an extern
    Windows PowerShell:
 
    ```powershell
-   & "C:\path\to\llama-server.exe" -m "D:\models\your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99
+   & "C:\path\to\llama-server.exe" -m "D:\models\your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99 --reasoning-budget 2048
    ```
 
    Linux shell:
 
    ```bash
-   llama-server -m "$HOME/models/your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99
+   llama-server -m "$HOME/models/your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99 --reasoning-budget 2048
    ```
 
 3. Start Cephalon, then open **Settings** and use **Download both defaults** to install the embedder and reranker. Restart Cephalon after installation.
@@ -52,7 +52,7 @@ Cephalon supports Windows and Linux. It requires Node.js, Python 3.14, an extern
    npm run tauri dev
    ```
 
-4. Select the configured external server and press **Connect**, import documents, then ask a question.
+4. In **Settings**, enter the llama.cpp URL (including its port), an optional display label, and its context window. Save, press **Connect**, import documents, then ask a question.
 
 
 ## Features
@@ -68,7 +68,7 @@ Cephalon supports Windows and Linux. It requires Node.js, Python 3.14, an extern
 - Hierarchical indexing with summary nodes, parent chunks, and child chunks.
 - Structured query stream events for subqueries, sources, metadata, tokens, errors, and completion.
 - Low/Medium/High retrieval scope control for narrowing or broadening source review without changing model intelligence.
-- Quick/Balanced/Thorough response effort, including a hidden draft-and-refine pass for Thorough responses.
+- Quick/Balanced/Thorough response effort with final-answer limits of 2,048 / 4,096 / 4,096 tokens. Thorough uses a 4,096-token draft and a separate 4,096-token final pass.
 - Labeled workbench navigation, collapsible panels, keyboard dismissal, and a narrow-window details drawer.
 - Source drawer with dense, lexical, fusion, rerank, confidence, and citation metadata.
 - Retrieval Trace panel for inspecting vector, BM25, fused, reranked, unused, and final context candidates.
@@ -114,9 +114,27 @@ The `models` directory contains only the embedder and reranker used by Cephalon.
 Packaged installers do not bundle the embedder/reranker ONNX artifacts. If they are missing, Cephalon opens Settings and shows the configured download sources.
 
 - **Download default** fetches the configured Hugging Face ONNX export and installs it into Cephalon's model directory.
-- **Use local folder** copies a compatible exported ONNX folder from your computer. It must contain an ONNX model, `tokenizer.json`, and `tokenizer_config.json`; Cephalon retains required metadata and any external ONNX data files.
+- **Use local folder** copies a compatible Transformer embedder or cross-encoder reranker ONNX folder from your computer. It must contain an ONNX model, `tokenizer.json`, and `tokenizer_config.json`; Cephalon creates a local profile when one is absent and retains any external ONNX data files.
 - Replacing an engine removes the previous installation before placing the new engine in its destination.
 - Restart Cephalon after installing or replacing either engine. The running backend does not reload ONNX engines automatically.
+
+### Reranker ONNX batch compatibility
+
+During RAG, the reranker scores each candidate as a query/document pair. Some ONNX reranker exports support multiple pairs in one inference, while others are exported with an internal singleton reshape and only support one. Cephalon safely uses one pair at a time unless the model metadata explicitly declares a validated `max_batch_size`. This prevents the ONNX Runtime reshape error that looks like `Input shape: {6,133}, requested shape: {1,1,133}`.
+
+In that message, `6` is the number of candidate pairs submitted together and `133` is the padded token length. The model holds `6 × 133 = 798` values, but its fixed reshape only accepts `1 × 1 × 133 = 133`; it is a batch-size limitation of that ONNX export, not an issue with the document text, llama.cpp, or the chat model.
+
+Cephalon is not restricted to the prepared Jina exports. A local embedder may use a different model ID and vector dimension; Cephalon creates a separate LanceDB table for that embedding profile so it cannot mix incompatible vectors with an existing index. Reindex documents after changing embedders. Local rerankers may use different score shapes, but should be validated before use:
+
+```powershell
+py -3.14 scripts\validate_onnx_models.py --mark
+```
+
+For a reranker known to support a larger batch, explicitly validate the desired size before setting or retaining it in its `onnx_profile.json`:
+
+```powershell
+py -3.14 scripts\validate_onnx_models.py --mark --reranker-batch-size 4
+```
 
 Current prepared ONNX repos:
 
@@ -191,13 +209,13 @@ Start your own `llama-server` with its chosen GGUF model before launching Cephal
 Windows PowerShell:
 
 ```powershell
-& "C:\path\to\llama-server.exe" -m "D:\models\your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99
+& "C:\path\to\llama-server.exe" -m "D:\models\your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99 --reasoning-budget 2048
 ```
 
 Linux shell:
 
 ```bash
-llama-server -m "$HOME/models/your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99
+llama-server -m "$HOME/models/your-model.gguf" --host 127.0.0.1 --port 8080 -c 32768 -ngl 99 --reasoning-budget 2048
 ```
 
 In the terminal used to launch Cephalon, configure a non-default server address, display label, or context size as needed:
@@ -236,7 +254,7 @@ npm.cmd run tauri dev
 npm run tauri dev
 ```
 
-Frontend only:
+Frontend development (the established Vite-only command; it uses the local backend already running on port 8765):
 
 ```powershell
 npm.cmd run dev
@@ -246,7 +264,7 @@ npm.cmd run dev
 npm run dev
 ```
 
-Then open Cephalon and press **Connect**. Cephalon checks the server health endpoint and uses its OpenAI-compatible `/v1/chat/completions` streaming API. It does not start, download, compile, or package llama.cpp, and it does not load a GGUF itself. Keep the server bound to `127.0.0.1` unless you deliberately intend remote access.
+Use `npm run dev:full` only when you specifically want one terminal to launch both the local backend and Vite. Then open Cephalon, set the server URL and port in **Settings**, and press **Connect**. Cephalon checks the server health endpoint, shows the model actually loaded by llama.cpp, and uses its OpenAI-compatible `/v1/chat/completions` streaming API. It does not start, download, compile, or package llama.cpp, and it does not load a GGUF itself. Keep the server bound to `127.0.0.1` unless you deliberately intend remote access.
 
 ## Build
 
@@ -321,6 +339,8 @@ $env:CEPHALON_RERANKER_ONNX_SUBFOLDER=""
 
 `CEPHALON_HOST` and `CEPHALON_PORT` configure Cephalon's own backend. `CEPHALON_LLAMA_SERVER_URL` configures the separately running llama.cpp server. When supplied, `CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS` takes precedence for generation prompt budgeting; set it to the context window used to start llama-server.
 
+Cephalon reserves 2,048 generated tokens for reasoning and sends llama.cpp enough total completion capacity to preserve the visible-answer limits: Quick 2,048, Balanced 4,096, and Thorough 4,096 for both its draft and final pass. Start a reasoning-capable llama.cpp server with `--reasoning-budget 2048` so that allocation is enforced. Non-reasoning models simply use the extra completion capacity without a thinking phase.
+
 On Linux, set the same variables with `export NAME="value"` instead of PowerShell's `$env:NAME="value"` syntax.
 
 For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time or set `cephalon.apiBaseUrl` in browser local storage.
@@ -330,6 +350,7 @@ For frontend-only remote testing, set `VITE_CEPHALON_API_URL` at build/dev time 
 - `GET /health`: startup status, paths, model diagnostics, backend status, retrieval state, and embedding metadata.
 - `GET /models`: configured external llama.cpp server model and active connection state.
 - `POST /models/load`: connect to the configured external llama.cpp server after its model is already loaded.
+- `GET/PUT /models/server`: read or save the external llama.cpp URL, display label, and optional context window.
 - `GET /models/onnx/status`: inspect embedder/reranker setup state.
 - `POST /models/onnx/download`: download configured prepared ONNX artifacts into the model directory; restart required after installation.
 - `POST /models/onnx/install-local`: install a local exported ONNX folder for the embedder or reranker; restart required after installation.

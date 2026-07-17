@@ -2,7 +2,6 @@ import datetime as dt
 import json
 import os
 import sqlite3
-import shutil
 import threading
 import time
 from typing import Any
@@ -11,7 +10,7 @@ import lancedb
 import pyarrow as pa
 
 from .config import ACTIVE_VECTOR_TABLE, EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, Settings
-from .schemas import RagSettings
+from .schemas import LlamaServerSettings, RagSettings
 
 
 SQLITE_LOCK = threading.RLock()
@@ -405,6 +404,33 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         add_column_if_missing(conn, "jobs", "stage_progress", "INTEGER DEFAULT 0")
         mark_migration(conn, "008_job_progress")
 
+    if not migration_applied(conn, "009_conversation_memory"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS conversation_memory (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_conversation ON conversation_memory(conversation_id);
+        """)
+        mark_migration(conn, "009_conversation_memory")
+
+    if not migration_applied(conn, "010_feedback_eval_cases"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS eval_cases (
+                id TEXT PRIMARY KEY,
+                question TEXT NOT NULL,
+                expected_doc_id TEXT,
+                expected_chunk_id TEXT,
+                source_feedback_id INTEGER REFERENCES user_feedback(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_eval_cases_status ON eval_cases(status, created_at);
+        """)
+        mark_migration(conn, "010_feedback_eval_cases")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -460,30 +486,9 @@ def delete_document_hierarchy(conn: sqlite3.Connection, doc_id: str) -> None:
         conn.commit()
 
 
-def clean_generated_vector_state(settings: Settings, lance_conn, active_table: str = ACTIVE_VECTOR_TABLE) -> str | None:
-    """Back up generated vector data before dropping inactive LanceDB tables."""
-    try:
-        table_names = list(lance_conn.table_names())
-    except Exception:
-        return None
-    stale_tables = [name for name in table_names if name != active_table]
-    if not stale_tables:
-        return None
-
-    backup_root = os.path.abspath(os.path.expanduser("~/cephalon-data-backups"))
-    timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir = os.path.join(backup_root, f"generated-indexes-{timestamp}")
-    os.makedirs(backup_dir, exist_ok=True)
-    lance_path = os.path.join(settings.data_dir, "lancedb")
-    if os.path.exists(lance_path):
-        shutil.copytree(lance_path, os.path.join(backup_dir, "lancedb"), dirs_exist_ok=True)
-
-    for table_name in stale_tables:
-        try:
-            lance_conn.drop_table(table_name)
-        except Exception:
-            continue
-    return backup_dir
+def clean_generated_vector_state(_settings: Settings, _lance_conn, _active_table: str = ACTIVE_VECTOR_TABLE) -> None:
+    """Compatibility hook: never back up or delete vector tables at startup."""
+    return None
 
 
 def ensure_default_settings(conn: sqlite3.Connection, settings: Settings) -> None:
@@ -492,6 +497,26 @@ def ensure_default_settings(conn: sqlite3.Connection, settings: Settings) -> Non
         return
     defaults = RagSettings(**settings.rag_defaults.__dict__)
     execute(conn, "INSERT INTO app_settings (key, value) VALUES (?, ?)", ("rag", defaults.model_dump_json()))
+
+
+def get_llama_server_settings(conn: sqlite3.Connection, settings: Settings) -> LlamaServerSettings:
+    row = fetchone(conn, "SELECT value FROM app_settings WHERE key = 'llama_server'")
+    if row:
+        return LlamaServerSettings(**json.loads(row["value"]))
+    return LlamaServerSettings(
+        server_url=settings.llama_server_url,
+        model_name=settings.llama_server_model,
+        context_tokens=settings.llama_server_context_tokens,
+    )
+
+
+def save_llama_server_settings(conn: sqlite3.Connection, server_settings: LlamaServerSettings) -> LlamaServerSettings:
+    execute(
+        conn,
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("llama_server", server_settings.model_dump_json()),
+    )
+    return server_settings
 
 
 def get_rag_settings(conn: sqlite3.Connection) -> RagSettings:
@@ -587,7 +612,7 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
 
 
 def active_vector_table_name(app_state=None) -> str:
-    return ACTIVE_VECTOR_TABLE
+    return getattr(app_state, "active_vector_table", ACTIVE_VECTOR_TABLE) if app_state is not None else ACTIVE_VECTOR_TABLE
 
 
 def active_embedding_metadata(app_state=None) -> dict[str, int | str]:

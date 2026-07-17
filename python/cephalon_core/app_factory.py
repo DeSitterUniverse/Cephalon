@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from contextlib import asynccontextmanager
 import time
 
@@ -62,14 +63,20 @@ def load_onnx_engines(app_state) -> str | None:
         app_state.embed_tokenizer = AutoTokenizer.from_pretrained(embed_path, fix_mistral_regex=True)
         output_shape = app_state.embedder.get_outputs()[0].shape
         output_dim = output_shape[-1] if output_shape and isinstance(output_shape[-1], int) else EMBEDDING_DIMENSION
-        if output_dim != EMBEDDING_DIMENSION:
-            return f"Embedding dimension mismatch: got {output_dim}, expected {EMBEDDING_DIMENSION}. Re-export Jina v5 small and rebuild indexes."
+        if not isinstance(output_dim, int) or output_dim < 1:
+            return "Embedding ONNX output does not expose a usable vector dimension."
         app_state.embedding_dim = output_dim
-        app_state.embedding_model_id = embed_meta.get("model_id") or EMBEDDING_MODEL_ID
-        app_state.embedding_pooling = embed_meta.get("pooling", "embedding" if len(output_shape) == 2 else "cls")
+        app_state.embedding_model_id = str(embed_meta.get("model_id") or EMBEDDING_MODEL_ID)
+        app_state.embedding_pooling = embed_meta.get("pooling", "embedding" if len(output_shape) == 2 else "auto")
+        app_state.embedding_normalized = bool(embed_meta.get("normalized", True))
         app_state.embedding_fixed_sequence_length = embed_meta.get("fixed_sequence_length")
-        app_state.reranker_model_id = reranker_meta.get("model_id") or RERANKER_MODEL_ID
+        app_state.active_vector_table = _vector_table_name(app_state.embedding_model_id, output_dim)
+        app_state.reranker_model_id = str(reranker_meta.get("model_id") or RERANKER_MODEL_ID)
         app_state.reranker_score_mode = reranker_meta.get("score_mode", "auto")
+        # Many otherwise compatible reranker exports have an internal reshape
+        # fixed to one query/document pair.  Treat an unspecified value as one
+        # so we do not intentionally trigger an ONNX error before retrying.
+        app_state.reranker_batch_size = _reranker_batch_size(reranker_meta)
         app_state.onnx_warmup = _warm_onnx_engines(app_state)
         return None
     except Exception as exc:
@@ -85,11 +92,11 @@ def _warm_onnx_engines(app_state) -> dict:
     else:
         embed_kwargs["padding"] = True
     embed_inputs = app_state.embed_tokenizer("Cephalon warmup text", **embed_kwargs)
-    embed_ort = {
-        "input_ids": embed_inputs["input_ids"].astype(np.int64),
-        "attention_mask": embed_inputs["attention_mask"].astype(np.int64),
-    }
-    if "token_type_ids" in embed_inputs:
+    embed_names = {item.name for item in app_state.embedder.get_inputs()}
+    embed_ort = {"input_ids": embed_inputs["input_ids"].astype(np.int64)}
+    if "attention_mask" in embed_inputs and "attention_mask" in embed_names:
+        embed_ort["attention_mask"] = embed_inputs["attention_mask"].astype(np.int64)
+    if "token_type_ids" in embed_inputs and "token_type_ids" in embed_names:
         embed_ort["token_type_ids"] = embed_inputs["token_type_ids"].astype(np.int64)
     app_state.embedder.run(None, embed_ort)
 
@@ -99,11 +106,11 @@ def _warm_onnx_engines(app_state) -> dict:
         truncation=True,
         return_tensors="np",
     )
-    rerank_ort = {
-        "input_ids": rerank_inputs["input_ids"].astype(np.int64),
-        "attention_mask": rerank_inputs["attention_mask"].astype(np.int64),
-    }
-    if "token_type_ids" in rerank_inputs:
+    rerank_names = {item.name for item in app_state.reranker.get_inputs()}
+    rerank_ort = {"input_ids": rerank_inputs["input_ids"].astype(np.int64)}
+    if "attention_mask" in rerank_inputs and "attention_mask" in rerank_names:
+        rerank_ort["attention_mask"] = rerank_inputs["attention_mask"].astype(np.int64)
+    if "token_type_ids" in rerank_inputs and "token_type_ids" in rerank_names:
         rerank_ort["token_type_ids"] = rerank_inputs["token_type_ids"].astype(np.int64)
     app_state.reranker.run(None, rerank_ort)
     return {"ready": True, "warmup_ms": round((time.perf_counter() - started) * 1000, 2)}
@@ -141,23 +148,46 @@ def _find_model_meta_file(model_dir: str) -> str:
 
 
 def _validate_embedder_meta(meta: dict) -> str | None:
-    if meta.get("model_id") != EMBEDDING_MODEL_ID:
-        return f"Embedder model mismatch: expected {EMBEDDING_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
-    if int(meta.get("dimension") or 0) != EMBEDDING_DIMENSION:
-        return f"Embedder dimension mismatch: expected {EMBEDDING_DIMENSION}, got {meta.get('dimension') or 'unknown'}."
+    if meta.get("kind") not in {None, "embedder"}:
+        return "ONNX profile is not an embedder profile."
+    if not str(meta.get("model_id") or "").strip():
+        return "Embedder metadata is missing model_id."
+    dimension = meta.get("dimension")
+    if dimension is not None and (not isinstance(dimension, int) or isinstance(dimension, bool) or dimension < 1):
+        return "Embedder metadata has an invalid dimension."
     if meta.get("validated") is not True:
-        return "Jina embedder ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
+        return "Embedder ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
     return None
 
 
 def _validate_reranker_meta(meta: dict) -> str | None:
-    if meta.get("model_id") != RERANKER_MODEL_ID:
-        return f"Reranker model mismatch: expected {RERANKER_MODEL_ID}, got {meta.get('model_id') or 'unknown'}."
+    if meta.get("kind") not in {None, "reranker"}:
+        return "ONNX profile is not a reranker profile."
+    if not str(meta.get("model_id") or "").strip():
+        return "Reranker metadata is missing model_id."
     if meta.get("validated") is not True:
-        return "Jina reranker ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
+        return "Reranker ONNX export exists but has not passed validation. Run scripts\\validate_onnx_models.py --mark."
     if not meta.get("score_mode"):
-        return "Jina reranker validation metadata is missing score_mode. Run scripts\\validate_onnx_models.py --mark."
+        return "Reranker validation metadata is missing score_mode. Run scripts\\validate_onnx_models.py --mark."
+    batch_size = meta.get("max_batch_size")
+    if batch_size is not None and (not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1):
+        return "Jina reranker validation metadata has an invalid max_batch_size."
     return None
+
+
+def _reranker_batch_size(meta: dict) -> int:
+    """Return the validated reranker batch size, safely defaulting to one."""
+    batch_size = meta.get("max_batch_size", 1)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        return 1
+    return max(1, batch_size)
+
+
+def _vector_table_name(model_id: str, dimension: int) -> str:
+    if model_id == EMBEDDING_MODEL_ID and dimension == EMBEDDING_DIMENSION:
+        return "vectors_jina_v5_small_1024"
+    slug = re.sub(r"[^a-z0-9]+", "_", model_id.lower()).strip("_")[:48] or "embedding"
+    return f"vectors_{slug}_{dimension}"
 
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:
@@ -172,8 +202,11 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.architecture_context = load_architecture_context()
         app.state.llm = None
         app.state.model_runtime = ModelRuntime()
+        app.state.embedding_runtime = ModelRuntime()
+        app.state.reranker_runtime = ModelRuntime()
         app.state.active_model_name = None
         app.state.sqlite = storage.connect_sqlite(active_settings)
+        app.state.llama_server_settings = storage.get_llama_server_settings(app.state.sqlite, active_settings)
         app.state.lance = storage.connect_lance(active_settings)
         app.state.startup_error = load_onnx_engines(app.state)
         app.state.onnx_setup = onnx_setup.runtime_status(app.state)

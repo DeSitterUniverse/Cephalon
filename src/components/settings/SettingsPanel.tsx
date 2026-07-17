@@ -1,11 +1,15 @@
-import { Download, FolderOpen } from "lucide-react";
-import type { OnnxSetupStatus } from "../../api";
+import { Download, FolderOpen, Save } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { LlamaServerSettings, OnnxSetupStatus, RagSettings } from "../../api";
 import { useUiStore } from "../../store";
 
 type Props = {
-  models: string[];
-  selectedModel: string;
-  setSelectedModel: (model: string) => void;
+  llamaServer?: LlamaServerSettings;
+  onSaveLlamaServer?: (settings: LlamaServerSettings) => void;
+  isSavingLlamaServer?: boolean;
+  ragSettings?: RagSettings;
+  onSaveRagSettings?: (settings: RagSettings) => void;
+  isSavingRagSettings?: boolean;
   onnxStatus?: OnnxSetupStatus;
   isDownloadingModels?: boolean;
   onDownloadOnnx?: (kind: "embedder" | "reranker" | "all") => void;
@@ -14,9 +18,12 @@ type Props = {
 };
 
 export function SettingsPanel({
-  models,
-  selectedModel,
-  setSelectedModel,
+  llamaServer,
+  onSaveLlamaServer,
+  isSavingLlamaServer,
+  ragSettings,
+  onSaveRagSettings,
+  isSavingRagSettings,
   onnxStatus,
   isDownloadingModels,
   onDownloadOnnx,
@@ -25,6 +32,19 @@ export function SettingsPanel({
 }: Props) {
   const theme = useUiStore(state => state.theme);
   const setTheme = useUiStore(state => state.setTheme);
+  const [serverUrl, setServerUrl] = useState(llamaServer?.server_url || "http://127.0.0.1:8080");
+  const [modelName, setModelName] = useState(llamaServer?.model_name || "External llama.cpp server");
+  const [contextTokens, setContextTokens] = useState(llamaServer?.context_tokens ? String(llamaServer.context_tokens) : "");
+  const [draftRagSettings, setDraftRagSettings] = useState<RagSettings | undefined>(ragSettings);
+
+  useEffect(() => {
+    if (!llamaServer) return;
+    setServerUrl(llamaServer.server_url);
+    setModelName(llamaServer.model_name);
+    setContextTokens(llamaServer.context_tokens ? String(llamaServer.context_tokens) : "");
+  }, [llamaServer]);
+
+  useEffect(() => setDraftRagSettings(ragSettings), [ragSettings]);
 
   return (
     <section className="side-section settings-screen">
@@ -51,14 +71,39 @@ export function SettingsPanel({
         </section>
 
         <section className="settings-section">
+          <h3>Retrieval behavior</h3>
+          <p className="settings-note">These controls affect future queries. Changing chunk boundaries requires reindexing documents before the new settings take effect.</p>
+          <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.evidence_required || false} onChange={event => setDraftRagSettings(current => current && { ...current, evidence_required: event.target.checked })} />Require local evidence for answers</label>
+          <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.conversation_memory ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, conversation_memory: event.target.checked })} />Use past chats as local retrieval memory</label>
+          <details className="onnx-guide">
+            <summary>Advanced chunking</summary>
+            <div className="settings-grid">
+              <NumberSetting label="Parent target" value={draftRagSettings?.parent_target_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, parent_target_tokens: value })} />
+              <NumberSetting label="Parent maximum" value={draftRagSettings?.parent_max_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, parent_max_tokens: value })} />
+              <NumberSetting label="Child target" value={draftRagSettings?.child_target_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, child_target_tokens: value })} />
+              <NumberSetting label="Child maximum" value={draftRagSettings?.child_max_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, child_max_tokens: value })} />
+              <NumberSetting label="Child overlap" value={draftRagSettings?.child_overlap_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, child_overlap_tokens: value })} />
+            </div>
+          </details>
+          <div className="settings-actions"><button type="button" disabled={!draftRagSettings || isSavingRagSettings} onClick={() => draftRagSettings && onSaveRagSettings?.(draftRagSettings)}><Save size={14} />{isSavingRagSettings ? "Saving" : "Save retrieval settings"}</button></div>
+        </section>
+
+        <section className="settings-section">
           <h3>Chat model</h3>
+          <p className="settings-note">Cephalon does not select or load a GGUF. Start llama.cpp with the model you want, then save its endpoint here and use Connect in the title bar.</p>
           <label className="field compact-field">
-            <span>External llama.cpp server<strong>{models.length ? "configured" : "not configured"}</strong></span>
-            <select aria-label="Model" value={selectedModel} onChange={event => setSelectedModel(event.target.value)}>
-              <option value="">No model selected</option>
-              {models.map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
+            <span>llama.cpp URL</span>
+            <input aria-label="llama.cpp URL" value={serverUrl} onChange={event => setServerUrl(event.target.value)} placeholder="http://127.0.0.1:8080" />
           </label>
+          <label className="field compact-field">
+            <span>Server label</span>
+            <input aria-label="Server label" value={modelName} onChange={event => setModelName(event.target.value)} placeholder="External llama.cpp server" />
+          </label>
+          <label className="field compact-field">
+            <span>Context window (optional)</span>
+            <input aria-label="Context window" inputMode="numeric" value={contextTokens} onChange={event => setContextTokens(event.target.value.replace(/[^0-9]/g, ""))} placeholder="For example, 32768" />
+          </label>
+          <div className="settings-actions"><button type="button" disabled={isSavingLlamaServer} onClick={() => onSaveLlamaServer?.({ server_url: serverUrl, model_name: modelName, context_tokens: contextTokens ? Number(contextTokens) : null })}><Save size={14} />{isSavingLlamaServer ? "Saving" : "Save server settings"}</button></div>
         </section>
 
         <section className="settings-section">
@@ -72,7 +117,7 @@ export function SettingsPanel({
               <li><b>Download default</b> fetches Cephalon’s configured Hugging Face export and replaces the engine in the shown destination.</li>
               <li><b>Use local folder</b> copies a compatible exported ONNX folder from your computer. It must contain an ONNX model, <code>tokenizer.json</code>, and <code>tokenizer_config.json</code>.</li>
             </ol>
-            <span>Restart Cephalon after installing or replacing either engine; the running backend does not reload ONNX models automatically.</span>
+            <span>Restart Cephalon after installing or replacing either engine; the running backend does not reload ONNX models automatically. Rerankers are run one query/document pair at a time unless their export has been explicitly validated for larger batches.</span>
           </div>
           {onnxStatus && (
             <div className={onnxStatus.engines_ready ? "runtime-line ok" : "runtime-line warn"}>
@@ -117,6 +162,10 @@ export function SettingsPanel({
   );
 }
 
+function NumberSetting({ label, value, onChange }: { label: string; value?: number; onChange: (value: number) => void }) {
+  return <label className="field compact-field"><span>{label} tokens</span><input aria-label={label} inputMode="numeric" value={value ?? ""} onChange={event => onChange(Number(event.target.value.replace(/[^0-9]/g, "")) || 0)} /></label>;
+}
+
 function OnnxRow({
   title,
   info,
@@ -142,6 +191,7 @@ function OnnxRow({
         <span className={loaded ? "status-text ok" : ready ? "status-text warn" : "status-text warn"}>{loaded ? "loaded" : ready ? "installed, restart to load" : "setup needed"}</span>
         <small>Default source: {source?.repo_id || "not configured"}{source?.subfolder ? ` / ${source.subfolder}` : ""}</small>
         <small>Installed at: <code>{info?.path || "not checked"}</code></small>
+        {title === "Reranker" && <small>Validated batch size: {info?.max_batch_size || 1} pair{(info?.max_batch_size || 1) === 1 ? "" : "s"} per inference.</small>}
         {!ready && <em>{info?.meta_error || (info?.missing?.length ? `missing ${info.missing.join(", ")}` : "status unavailable")}</em>}
       </div>
       <div className="onnx-actions">
