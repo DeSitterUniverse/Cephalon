@@ -187,6 +187,13 @@ class SourceChunk(BaseModel):
     fusion_score: float | None = None
     rerank_score: float | None = None
     subquery_id: str | None = None
+    block_type: str | None = None
+    section_heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
+    page_number: int | None = None
+    page_end: int | None = None
+    block_index: int | None = None
+    bounding_box: tuple[float, float, float, float] | None = None
 
 
 class QueryEnvelope(BaseModel):

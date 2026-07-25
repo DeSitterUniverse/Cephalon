@@ -835,6 +835,53 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert "Cephalon retrieval fixture" in context
 
 
+def test_hydrate_sources_adds_structured_provenance():
+    state = build_memory_state()
+    doc_id = "11111111-1111-4111-8111-111111111111"
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
+        VALUES (?, ?, ?, ?, 1, 'ready', 'file')
+        """,
+        (doc_id, "paper.pdf", "Paper", "hash"),
+    )
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO chunks (
+            id, doc_id, chunk_index, text, block_type, section_heading,
+            heading_path, page_number, page_end, block_index, bounding_box
+        )
+        VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chunk-1",
+            doc_id,
+            "Result table",
+            "table",
+            "Experimental Results",
+            '["Results","Experimental Results"]',
+            7,
+            8,
+            42,
+            "[72.0,145.0,510.0,260.0]",
+        ),
+    )
+
+    sources = retrieval.hydrate_sources(
+        state,
+        [{"id": "chunk-1", "doc_id": doc_id, "text": "Result table", "score": 0.9}],
+    )
+
+    assert sources[0].page_number == 7
+    assert sources[0].page_end == 8
+    assert sources[0].block_type == "table"
+    assert sources[0].heading_path == ["Results", "Experimental Results"]
+    assert sources[0].bounding_box == (72.0, 145.0, 510.0, 260.0)
+    assert retrieval.source_location_label(sources[0]) == "page 7-8 | Experimental Results | table"
+
+
 def test_reranker_scores_candidates_in_one_onnx_batch():
     class BatchTokenizer:
         def __call__(self, pairs, **_kwargs):

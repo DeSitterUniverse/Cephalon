@@ -190,5 +190,14 @@ def test_schema_initialization_is_idempotent_and_observability_tables_exist():
 
     chunk_columns = storage.table_columns(conn, "chunks")
     document_columns = storage.table_columns(conn, "documents")
-    assert {"text_hash", "chunking_config_hash", "parser_version", "embedding_status"} <= chunk_columns
+    assert {
+        "text_hash",
+        "chunking_config_hash",
+        "parser_version",
+        "embedding_status",
+        "page_end",
+        "block_index",
+        "bounding_box",
+        "provenance_json",
+    } <= chunk_columns
     assert {"text_hash", "chunking_config_hash", "parser_version", "embedding_config_hash", "parse_warnings"} <= document_columns

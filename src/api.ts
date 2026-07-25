@@ -62,6 +62,13 @@ export type SourceChunk = {
   fusion_score?: number | null;
   rerank_score?: number | null;
   subquery_id?: string | null;
+  block_type?: string | null;
+  section_heading?: string | null;
+  heading_path?: string[];
+  page_number?: number | null;
+  page_end?: number | null;
+  block_index?: number | null;
+  bounding_box?: [number, number, number, number] | null;
 };
 export type StoredMessage = Message & {
   id: string;

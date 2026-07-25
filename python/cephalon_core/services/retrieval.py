@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
@@ -457,6 +458,32 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         placeholders = ",".join("?" * len(doc_ids))
         rows = storage.fetchall(app_state.sqlite, f"SELECT id, path, display_name FROM documents WHERE id IN ({placeholders})", tuple(doc_ids))
         path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
+    chunk_ids = [res["id"] for res in results if res.get("doc_id") != "core_memory"]
+    provenance_map: dict[str, dict[str, Any]] = {}
+    if chunk_ids:
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = storage.fetchall(
+            app_state.sqlite,
+            f"""
+            SELECT id, block_type, section_heading, heading_path, page_number,
+                   page_end, block_index, bounding_box
+            FROM chunks
+            WHERE id IN ({placeholders})
+            """,
+            tuple(chunk_ids),
+        )
+        for row in rows:
+            heading_path = _json_metadata(row["heading_path"], [])
+            bounding_box = _json_metadata(row["bounding_box"], None)
+            provenance_map[row["id"]] = {
+                "block_type": row["block_type"],
+                "section_heading": row["section_heading"],
+                "heading_path": heading_path if isinstance(heading_path, list) else [],
+                "page_number": row["page_number"],
+                "page_end": row["page_end"],
+                "block_index": row["block_index"],
+                "bounding_box": tuple(bounding_box) if isinstance(bounding_box, list) and len(bounding_box) == 4 else None,
+            }
 
     sources: list[SourceChunk] = []
     for rank, res in enumerate(results, start=start_rank):
@@ -464,6 +491,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         doc_name = "Core Memory" if doc_id == "core_memory" else path_map.get(doc_id, "Unknown")
         text = res["text"].strip()
         source_id = f"S{rank}"
+        provenance = provenance_map.get(res["id"], {})
         sources.append(SourceChunk(
             rank=rank,
             source_id=source_id,
@@ -478,8 +506,34 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
             snippet=text[:500],
             subquery_id=subquery_id or ",".join(res.get("subquery_ids", [])) or None,
+            **provenance,
         ))
     return sources
+
+
+def _json_metadata(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def source_location_label(source: SourceChunk | None) -> str:
+    if source is None:
+        return ""
+    details: list[str] = []
+    if source.page_number is not None:
+        page_label = str(source.page_number)
+        if source.page_end is not None and source.page_end != source.page_number:
+            page_label = f"{page_label}-{source.page_end}"
+        details.append(f"page {page_label}")
+    if source.section_heading:
+        details.append(source.section_heading)
+    if source.block_type and source.block_type != "paragraph":
+        details.append(source.block_type)
+    return " | ".join(details)
 
 
 def _merge_candidates(target: dict[str, dict], results: list[dict], subquery_id: str) -> None:
@@ -938,6 +992,8 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                 context_chunks.append(format_source_context(source.source_id or "S1", "Past conversation", res["id"], res["text"]))
                 continue
             label = source.doc_name if source else "Unknown"
+            if location := source_location_label(source):
+                label = f"{label} | {location}"
             source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
             context_text = _parent_context(app_state, res) or res["text"]
             context_chunks.append(format_source_context(source_id, label, res["id"], context_text))

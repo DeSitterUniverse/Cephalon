@@ -431,6 +431,16 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "010_feedback_eval_cases")
 
+    if not migration_applied(conn, "011_structured_provenance"):
+        for column, definition in [
+            ("page_end", "INTEGER"),
+            ("block_index", "INTEGER"),
+            ("bounding_box", "TEXT"),
+            ("provenance_json", "TEXT"),
+        ]:
+            add_column_if_missing(conn, "chunks", column, definition)
+        mark_migration(conn, "011_structured_provenance")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -586,7 +596,9 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
     chunks = fetchall(
         conn,
         """
-        SELECT id, chunk_index, text, block_type, token_count, char_count, chunking_profile, embedding_status
+        SELECT id, chunk_index, text, block_type, section_heading, heading_path,
+               page_number, page_end, block_index, bounding_box, token_count,
+               char_count, chunking_profile, embedding_status
         FROM chunks
         WHERE doc_id = ?
         ORDER BY chunk_index
@@ -601,6 +613,12 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
             "index": chunk["chunk_index"],
             "text": chunk["text"][:500],
             "block_type": chunk["block_type"],
+            "section_heading": chunk["section_heading"],
+            "heading_path": _json_value(chunk["heading_path"], []),
+            "page_number": chunk["page_number"],
+            "page_end": chunk["page_end"],
+            "block_index": chunk["block_index"],
+            "bounding_box": _json_value(chunk["bounding_box"], None),
             "token_count": chunk["token_count"],
             "char_count": chunk["char_count"],
             "chunking_profile": chunk["chunking_profile"],
@@ -609,6 +627,15 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
         for chunk in chunks
     ]
     return payload
+
+
+def _json_value(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
 
 
 def active_vector_table_name(app_state=None) -> str:

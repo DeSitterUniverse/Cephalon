@@ -22,6 +22,14 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
               <span>{source.score.toFixed(3)}</span>
             </div>
             <div className="source-metrics">
+              {source.page_number != null && (
+                <span>
+                  page {source.page_number}
+                  {source.page_end != null && source.page_end !== source.page_number ? `-${source.page_end}` : ""}
+                </span>
+              )}
+              {source.section_heading && <span>{source.section_heading}</span>}
+              {source.block_type && source.block_type !== "paragraph" && <span>{source.block_type}</span>}
               {source.vector_score != null && <span>dense {source.vector_score.toFixed(3)}</span>}
               {source.lexical_score != null && <span>bm25 {source.lexical_score.toFixed(3)}</span>}
               {source.fusion_score != null && <span>rrf {source.fusion_score.toFixed(3)}</span>}
