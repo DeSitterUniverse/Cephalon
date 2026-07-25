@@ -192,12 +192,12 @@ def _vector_table_name(model_id: str, dimension: int) -> str:
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:
     active_settings = app_settings or settings
-    os.makedirs(active_settings.data_dir, exist_ok=True)
-    os.makedirs(active_settings.model_dir, exist_ok=True)
-    os.environ["HF_HOME"] = os.path.expanduser("~/.cephalon/models")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        os.makedirs(active_settings.data_dir, exist_ok=True)
+        os.makedirs(active_settings.model_dir, exist_ok=True)
+        os.environ["HF_HOME"] = os.path.expanduser("~/.cephalon/models")
         app.state.settings = active_settings
         app.state.architecture_context = load_architecture_context()
         app.state.llm = None

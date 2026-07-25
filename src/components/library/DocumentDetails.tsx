@@ -52,7 +52,7 @@ export function DocumentDetails({ document, onRename, onAddTag, onDeleteTag, onR
       {document.stale_embedding && (
         <div className="runtime-line warn">
           Reindex required: {(document.stale_reasons || ["index configuration changed"])
-            .map(reason => reason.replaceAll("_", " "))
+            .map(reason => reason.replace(/_/g, " "))
             .join(", ")}.
         </div>
       )}

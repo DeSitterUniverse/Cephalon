@@ -7,7 +7,10 @@ from ..schemas import SourceChunk
 
 
 SOURCE_TAG_PATTERN = re.compile(r"\[\[\s*src\s*:\s*([A-Za-z0-9_-]+)\s*\]\]", re.IGNORECASE)
-CLAIM_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
+CLAIM_SPLIT_PATTERN = re.compile(
+    r"(?<=[.!?])\s+(?!\[\[\s*src\s*:)|\n+",
+    re.IGNORECASE,
+)
 CLAIM_STOPWORDS = {
     "about", "after", "again", "also", "because", "before", "being", "between",
     "could", "does", "from", "have", "into", "more", "most", "other", "should",

@@ -12,7 +12,7 @@ from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
 from cephalon_core.schemas import Message, QueryRequest, RagSettings
 from cephalon_core.routes import _settings_for_retrieval_scope
-from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
+from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta, create_app
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
 from cephalon_core.services import generation, ingestion, metrics, pdf_parser, retrieval
@@ -121,6 +121,18 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.port == 9999
     assert settings.max_tokens == 64
     assert settings.cors_origins == ["http://localhost:1420", "http://tauri.localhost"]
+
+
+def test_create_app_defers_runtime_directory_writes_until_lifespan(monkeypatch, tmp_path):
+    data_dir = tmp_path / "read-only-host-data"
+    model_dir = tmp_path / "read-only-host-models"
+    monkeypatch.setenv("CEPHALON_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("CEPHALON_MODEL_DIR", str(model_dir))
+
+    create_app(Settings())
+
+    assert not data_dir.exists()
+    assert not model_dir.exists()
 
 
 def test_scope_modes_change_retrieval_not_model_style():
