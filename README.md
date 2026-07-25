@@ -4,13 +4,7 @@ Cephalon is a local-first desktop RAG workbench for indexing files, asking quest
 
 Recommended for use with LLMs fine-tuned for a specific domain, task, or behavior, such as, but not limited to, models fine-tuned on personal writing styles, programming conventions, academic subjects, technical terminology, document-extraction formats, accessibility preferences, creative genres, or specialized knowledge.
 
-## In Use
-
-Cephalon keeps the document library, cited answer, retrieval controls, and external-server status together in one workspace. This example is from the included live RAG validation corpus, with documents from the World Bank, NIST, arXiv, NOAA, USGS, Our World in Data, and W3C indexed locally.
-
 ![A cited answer to a question about the RATE paper](docs/screenshots/rag-cited-answer.png)
-
-Long-form answers retain citations and distinguish the roles of retrieval, reranking, source provenance, and refusing to answer when the evidence is weak.
 
 ![A cited long-form explanation of retrieval evidence, reranking, citations, and weak-evidence refusal](docs/screenshots/long-evidence-answer.png)
 
