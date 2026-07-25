@@ -30,6 +30,19 @@ export function AnswerSupportPanel({ support }: Props) {
             </div>
           </article>
         )}
+        {support.claim_validation && (
+          <article className="source-card">
+            <div className="source-head">
+              <strong>Claim validation</strong>
+              <span>{support.claim_validation.supported_claim_count}/{support.claim_validation.claim_count} supported</span>
+            </div>
+            <div className="source-metrics">
+              <span>{support.claim_validation.weak_claim_count} weak</span>
+              <span>{support.claim_validation.unsupported_claim_count} unsupported</span>
+              <span>{support.claim_validation.uncited_claim_count} uncited</span>
+            </div>
+          </article>
+        )}
         {support.citations.map(citation => (
           <article key={`${citation.source_id || "source"}:${citation.chunk_id}`} className="source-card">
             <div className="source-head">

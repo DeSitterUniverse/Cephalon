@@ -269,12 +269,15 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     ))
 
     assert tokens == ["Final ", "answer"]
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0]["stream"] is False
-    assert calls[1]["stream"] is True
+    assert calls[1]["stream"] is False
+    assert calls[2]["stream"] is True
     assert calls[0]["settings"].max_tokens == 6144
-    assert calls[1]["settings"].max_tokens == 6144
-    assert "Draft answer with one gap." in calls[1]["messages"][0]["content"]
+    assert calls[1]["settings"].max_tokens == 2048
+    assert calls[2]["settings"].max_tokens == 6144
+    assert "Draft answer with one gap." in calls[2]["messages"][0]["content"]
+    assert "--- CLAIM AUDIT ---" in calls[2]["messages"][0]["content"]
 
 
 def test_response_effort_reserves_thinking_capacity_separately_from_final_output():

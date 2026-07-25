@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 from contextlib import nullcontext
 import json
+import re
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -180,6 +181,61 @@ def _draft_answer(
     return _response_content(result)
 
 
+def validate_draft_claims(
+    app_state,
+    draft: str,
+    context: str,
+    settings: RagSettings,
+) -> dict[str, Any]:
+    _, bounded_context = budget_prompt(
+        [],
+        context,
+        context_window=getattr(app_state, "active_context_tokens", settings.context_tokens),
+        output_tokens=min(settings.max_tokens, 2048),
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Audit the candidate answer claim by claim against the supplied evidence. "
+                "Return JSON only with this shape: "
+                '{"claims":[{"claim":"...","source_ids":["S1"],'
+                '"status":"supported|weak|unsupported|uncited","reason":"..."}],'
+                '"overall":"supported|mixed|unsupported"}. '
+                "A citation tag alone is not proof; the cited evidence must support the claim. "
+                "Do not add new facts or expose chain-of-thought."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"--- EVIDENCE ---\n{bounded_context}\n--- END EVIDENCE ---\n\n"
+                f"--- CANDIDATE ANSWER ---\n{draft}\n--- END CANDIDATE ANSWER ---"
+            ),
+        },
+    ]
+    validation_settings = settings.model_copy(update={
+        "temperature": 0.0,
+        "max_tokens": min(settings.max_tokens, 2048),
+    })
+    runtime = getattr(app_state, "model_runtime", None)
+    guard = runtime.exclusive() if runtime is not None else nullcontext()
+    try:
+        with guard:
+            with _server_completion(app_state, messages, validation_settings, stream=False) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        content = _response_content(response_payload)
+        fenced = content.strip()
+        if fenced.startswith("```"):
+            fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", fenced, flags=re.IGNORECASE)
+        parsed = json.loads(fenced)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("claims"), list):
+            raise ValueError("Validator response did not contain a claims list.")
+        return {"status": "completed", **parsed}
+    except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+        return {"status": "unavailable", "claims": [], "error": str(exc)}
+
+
 def stream_response_events(
     app_state,
     prompt: str,
@@ -198,11 +254,14 @@ def stream_response_events(
     elif effort == "thorough":
         yield "phase", "drafting"
         draft = _draft_answer(app_state, prompt, context, history, generation_settings, query_meta)
+        yield "phase", "validating"
+        validation = validate_draft_claims(app_state, draft, context, generation_settings)
         yield "phase", "refining"
         extra_instruction = (
             "Improve the candidate answer below. Correct unsupported claims, fill visible gaps, "
             "preserve valid source tags, and return only the final answer. Do not mention the candidate draft.\n\n"
-            f"--- CANDIDATE ANSWER ---\n{draft}\n--- END CANDIDATE ANSWER ---"
+            f"--- CANDIDATE ANSWER ---\n{draft}\n--- END CANDIDATE ANSWER ---\n\n"
+            f"--- CLAIM AUDIT ---\n{json.dumps(validation, ensure_ascii=False)}\n--- END CLAIM AUDIT ---"
         )
     else:
         yield "phase", "answering"

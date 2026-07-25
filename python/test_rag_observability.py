@@ -181,6 +181,32 @@ def test_answer_without_citations_is_not_marked_supported_by_unused_context():
     assert result["accounting"]["uncited_source_count"] == 1
 
 
+def test_claim_validation_checks_each_claim_against_its_cited_source():
+    sources = [
+        SourceChunk(
+            rank=1,
+            source_id="S1",
+            doc_id="doc-a",
+            doc_name="a",
+            chunk_id="a1",
+            score=0.9,
+            snippet="The RATE method improved retrieval recall to 81.7 percent.",
+            rerank_score=1.2,
+        ),
+    ]
+
+    result = support.validate_answer_claims(
+        "RATE improved retrieval recall to 81.7 percent. [[src:S1]] "
+        "It also reduced GPU use by half. [[src:S1]]",
+        sources,
+    )
+
+    assert result["claim_count"] == 2
+    assert result["supported_claim_count"] == 1
+    assert result["unsupported_claim_count"] == 1
+    assert [claim["status"] for claim in result["claims"]] == ["supported", "unsupported"]
+
+
 def test_schema_initialization_is_idempotent_and_observability_tables_exist():
     conn = build_conn()
     storage.run_migrations(conn, Settings())

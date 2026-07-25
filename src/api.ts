@@ -101,6 +101,23 @@ export type AnswerSupport = {
     uncited_source_count: number;
     citation_precision: number;
   };
+  claim_validation?: {
+    method: string;
+    claim_count: number;
+    supported_claim_count: number;
+    weak_claim_count: number;
+    unsupported_claim_count: number;
+    uncited_claim_count: number;
+    claims: Array<{
+      claim_id: string;
+      text: string;
+      source_ids: string[];
+      status: "supported" | "weak" | "unsupported" | "uncited";
+      reason: string;
+      coverage: number;
+      coverage_by_source: Record<string, number>;
+    }>;
+  };
 };
 export type RetrievalTraceSummary = {
   query_id: string;
