@@ -24,7 +24,9 @@ def build():
         "uvicorn",
         "docx",
         "openpyxl",
-        "pypdf"
+        "pypdf",
+        "pdfplumber",
+        "pdfminer"
     ]
     excluded_modules = [
         "torch",

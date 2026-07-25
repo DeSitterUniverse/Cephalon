@@ -1,4 +1,5 @@
 import csv
+from dataclasses import dataclass, field
 import hashlib
 import os
 import time
@@ -11,6 +12,7 @@ from pypdf import PdfReader
 
 from .. import storage
 from ..validators import is_supported_file
+from .pdf_parser import DocumentBlock, PARSER_VERSION as PDF_PARSER_VERSION, parse_pdf
 
 SKIPPED_DIRECTORY_NAMES = {
     ".git",
@@ -20,6 +22,16 @@ SKIPPED_DIRECTORY_NAMES = {
     "__pycache__",
     "node_modules",
 }
+
+
+@dataclass
+class ExtractedDocument:
+    text: str
+    extraction_mode: str
+    blocks: list[DocumentBlock] = field(default_factory=list)
+    page_count: int | None = None
+    warnings: list[str] = field(default_factory=list)
+    parser_version: str = "cephalon-basic-2026-05"
 
 
 def get_file_hash(path: str) -> str:
@@ -112,6 +124,30 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
     if not looks_like_text(path):
         raise ValueError("Unknown file type appears to be binary and cannot be safely imported as text.")
     return read_text_fallback(path), "text"
+
+
+def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf" and not force_text:
+        parsed = parse_pdf(path)
+        return ExtractedDocument(
+            text=parsed.text,
+            extraction_mode="native_structured",
+            blocks=parsed.blocks,
+            page_count=parsed.page_count,
+            warnings=parsed.warnings,
+            parser_version=parsed.parser_version,
+        )
+
+    text, extraction_mode = extract_text(path, force_text=force_text)
+    block = DocumentBlock(text=text, page_number=1) if text.strip() else None
+    return ExtractedDocument(
+        text=text,
+        extraction_mode=extraction_mode,
+        blocks=[block] if block else [],
+        page_count=1 if block else 0,
+        parser_version=PDF_PARSER_VERSION if ext == ".pdf" else "cephalon-basic-2026-05",
+    )
 
 
 def collect_supported_files(path: str, force_text: bool = False) -> list[str]:

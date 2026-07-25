@@ -15,7 +15,7 @@ from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import generation, ingestion, metrics, retrieval
+from cephalon_core.services import generation, ingestion, metrics, pdf_parser, retrieval
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -566,6 +566,129 @@ def test_document_readers_stream_hash_and_avoid_duplicate_extraction(monkeypatch
     monkeypatch.setattr(documents.openpyxl, "load_workbook", load_workbook)
     documents.extract_text("fixture.xlsx")
     assert calls[-1]["read_only"] is True
+
+
+def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_footer(monkeypatch):
+    def word(text, x0, top, x1, bottom, size=10, fontname="Regular"):
+        return {
+            "text": text,
+            "x0": x0,
+            "top": top,
+            "x1": x1,
+            "bottom": bottom,
+            "size": size,
+            "fontname": fontname,
+        }
+
+    class FakeTable:
+        bbox = (40, 180, 300, 240)
+
+        def extract(self):
+            return [["Model", "Recall"], ["Baseline", "72.4"], ["RATE", "81.7"]]
+
+    class FakePage:
+        width = 600
+        height = 800
+
+        def __init__(self, page_number):
+            self.page_number = page_number
+
+        def extract_words(self, **_kwargs):
+            heading = [
+                word("3", 40, 50, 50, 65, 16, "Bold"),
+                word("Results", 55, 50, 130, 65, 16, "Bold"),
+            ] if self.page_number == 1 else []
+            return heading + [
+                word("Retrieval", 40, 120, 95, 132),
+                word("improved", 100, 120, 155, 132),
+                word("substantially.", 160, 120, 235, 132),
+                word("Proceedings", 250, 760, 320, 770, 8),
+                word(str(self.page_number), 325, 760, 332, 770, 8),
+            ]
+
+        def find_tables(self, _settings):
+            return [FakeTable()] if self.page_number == 1 else []
+
+        def extract_text(self, **_kwargs):
+            return "fallback"
+
+        def close(self):
+            return None
+
+    class FakePdf:
+        pages = [FakePage(1), FakePage(2)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(pdf_parser.pdfplumber, "open", lambda *_args, **_kwargs: FakePdf())
+
+    parsed = pdf_parser.parse_pdf("fixture.pdf")
+
+    assert parsed.page_count == 2
+    assert "Proceedings" not in parsed.text
+    assert any(block.block_type == "table" and "RATE | 81.7" in block.text for block in parsed.blocks)
+    paragraph = next(block for block in parsed.blocks if "improved substantially" in block.text)
+    assert paragraph.page_number == 1
+    assert paragraph.heading_path == ["3 Results"]
+
+
+def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "paper.pdf"
+    file_path.write_bytes(b"%PDF fixture")
+    extracted = documents.ExtractedDocument(
+        text="4 Findings\n\nThe measured result was 81.7.",
+        extraction_mode="native_structured",
+        page_count=1,
+        parser_version=pdf_parser.PARSER_VERSION,
+        blocks=[
+            pdf_parser.DocumentBlock(
+                text="4 Findings",
+                page_number=1,
+                block_type="heading",
+                heading_path=["4 Findings"],
+                heading_level=1,
+                bounding_box=(40, 40, 180, 60),
+                block_index=0,
+            ),
+            pdf_parser.DocumentBlock(
+                text="The measured result was 81.7.",
+                page_number=1,
+                block_type="paragraph",
+                heading_path=["4 Findings"],
+                bounding_box=(40, 80, 280, 105),
+                block_index=1,
+            ),
+        ],
+    )
+    monkeypatch.setattr(documents, "extract_document", lambda *_args, **_kwargs: extracted)
+
+    async def fake_embedding(_app_state, _text):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    chunk = storage.fetchone(
+        state.sqlite,
+        """
+        SELECT block_type, section_heading, heading_path, page_number, page_end,
+               block_index, bounding_box, parser_version
+        FROM chunks WHERE doc_id = ?
+        """,
+        (result["doc_id"],),
+    )
+
+    assert result["status"] == "ready"
+    assert chunk["block_type"] == "paragraph"
+    assert chunk["section_heading"] == "4 Findings"
+    assert chunk["heading_path"] == '["4 Findings"]'
+    assert (chunk["page_number"], chunk["page_end"], chunk["block_index"]) == (1, 1, 1)
+    assert chunk["parser_version"] == pdf_parser.PARSER_VERSION
 
 
 def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):

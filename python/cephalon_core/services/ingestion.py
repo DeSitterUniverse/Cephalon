@@ -1,4 +1,6 @@
 import asyncio
+from dataclasses import dataclass, field
+import json
 import os
 import re
 import time
@@ -10,6 +12,7 @@ from ..schemas import RagSettings
 from . import documents
 from . import observability
 from .retrieval import ensure_vector_table, get_embedding, get_embeddings, vector_table_name
+from .pdf_parser import DocumentBlock
 
 PARENT_TARGET_TOKENS = 520
 PARENT_MAX_TOKENS = 650
@@ -20,6 +23,28 @@ CHUNKING_PROFILE = "semantic_parent_child_v1"
 
 
 ProgressCallback = Callable[[str, int], Awaitable[None]]
+
+
+@dataclass
+class ParentDraft:
+    text: str
+    blocks: list[DocumentBlock] = field(default_factory=list)
+
+
+@dataclass
+class ChildDraft:
+    text: str
+    block_type: str = "paragraph"
+    heading_path: list[str] = field(default_factory=list)
+    page_number: int | None = None
+    page_end: int | None = None
+    block_index: int | None = None
+    bounding_box: tuple[float, float, float, float] | None = None
+    provenance: dict = field(default_factory=dict)
+
+    @property
+    def section_heading(self) -> str | None:
+        return self.heading_path[-1] if self.heading_path else None
 
 
 async def process_single_file(
@@ -45,7 +70,11 @@ async def process_single_file(
             return {"status": "skipped", "path": file_path, "doc_id": existing["id"], "reason": "duplicate"}
 
         await _report_progress(progress, "extracting", 10)
-        raw_text, extraction_mode = await asyncio.to_thread(documents.extract_text, file_path, force_text=force_text)
+        extracted = await asyncio.to_thread(documents.extract_document, file_path, force_text=force_text)
+        raw_text = extracted.text
+        extraction_mode = extracted.extraction_mode
+        parser_version = extracted.parser_version
+        parse_warnings = extracted.warnings
         metadata = storage.active_embedding_metadata(app_state)
         chunking_config = _chunking_config(rag_settings)
         chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, chunking_config)
@@ -54,7 +83,10 @@ async def process_single_file(
             raise ValueError("No extractable text found.")
 
         await _report_progress(progress, "chunking", 35)
-        parents = build_parent_chunks(raw_text, rag_settings)
+        if extraction_mode == "native_structured":
+            parents = build_structured_parent_chunks(extracted.blocks, rag_settings)
+        else:
+            parents = [ParentDraft(text=text) for text in build_parent_chunks(raw_text, rag_settings)]
         if not parents:
             raise ValueError("No text chunks produced.")
 
@@ -66,7 +98,8 @@ async def process_single_file(
         fts_rows = []
         child_count = 0
         now = int(time.time())
-        for parent_index, parent_text in enumerate(parents):
+        for parent_index, parent in enumerate(parents):
+            parent_text = parent.text
             parent_id = f"{doc_id}_p{parent_index}"
             summary = summarize_parent(parent_text)
             summary_id = f"{parent_id}_s"
@@ -85,12 +118,26 @@ async def process_single_file(
                 "chunk_length": len(summary),
             })
 
-            child_chunks = await build_semantic_child_chunks(app_state, parent_text, rag_settings)
-            for child_text in child_chunks:
+            if parent.blocks:
+                child_chunks = await build_structured_child_chunks(app_state, parent.blocks, rag_settings)
+            else:
+                child_chunks = [
+                    ChildDraft(text=text)
+                    for text in await build_semantic_child_chunks(app_state, parent_text, rag_settings)
+                ]
+            for child in child_chunks:
+                child_text = child.text
                 chunk_id = f"{doc_id}_{child_count}"
                 token_count = estimate_tokens(child_text)
                 child_hash = observability.text_hash(child_text)
-                contextual_text = contextualize_chunk(child_text, os.path.basename(file_path), None, "paragraph")
+                contextual_text = contextualize_chunk(
+                    child_text,
+                    os.path.basename(file_path),
+                    " > ".join(child.heading_path) or None,
+                    child.block_type,
+                    page_number=child.page_number,
+                    page_end=child.page_end,
+                )
                 chunk_rows.append((
                     chunk_id,
                     doc_id,
@@ -103,16 +150,24 @@ async def process_single_file(
                     len(child_text),
                     metadata["embedding_model_id"],
                     metadata["embedding_dim"],
-                    "paragraph",
+                    child.block_type,
+                    child.section_heading,
+                    json.dumps(child.heading_path, ensure_ascii=False) if child.heading_path else None,
+                    child.page_number,
+                    child.page_end,
+                    child.block_index,
+                    json.dumps(child.bounding_box) if child.bounding_box else None,
+                    json.dumps(child.provenance, ensure_ascii=False) if child.provenance else None,
                     len(child_text),
                     child_hash,
                     child_hash,
                     observability.text_hash(contextual_text),
                     CHUNKING_PROFILE,
                     chunking_hash,
-                    PARSER_VERSION,
+                    parser_version,
                     now,
                     "embedded",
+                    json.dumps(parse_warnings, ensure_ascii=False) if parse_warnings else None,
                 ))
                 fts_rows.append((chunk_id, doc_id, child_text))
                 # Preserve raw text for FTS, source display, and parent context,
@@ -158,6 +213,8 @@ async def process_single_file(
                 text_hash=text_hash,
                 chunking_hash=chunking_hash,
                 embedding_config_hash=f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
+                parser_version=parser_version,
+                parse_warnings=parse_warnings,
             )
         except Exception:
             if existing_doc_id:
@@ -193,6 +250,8 @@ def _replace_document_rows(
     text_hash: str,
     chunking_hash: str,
     embedding_config_hash: str,
+    parser_version: str,
+    parse_warnings: list[str],
 ) -> None:
     with storage.SQLITE_LOCK:
         cursor = sqlite_conn.cursor()
@@ -221,10 +280,13 @@ def _replace_document_rows(
                 INSERT INTO chunks (
                     id, doc_id, chunk_index, text, parent_id, summary_id, token_count,
                     semantic_role, chunk_length, embedding_model_id, embedding_dim,
-                    block_type, char_count, text_hash, raw_text_hash, contextual_text_hash,
-                    chunking_profile, chunking_config_hash, parser_version, embedded_at, embedding_status
+                    block_type, section_heading, heading_path, page_number, page_end,
+                    block_index, bounding_box, provenance_json, char_count, text_hash,
+                    raw_text_hash, contextual_text_hash, chunking_profile,
+                    chunking_config_hash, parser_version, embedded_at, embedding_status,
+                    parse_warnings
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 chunk_rows,
             )
@@ -236,10 +298,18 @@ def _replace_document_rows(
                 """
                 UPDATE documents
                 SET text_hash = ?, parser_version = ?, chunking_profile = ?,
-                    chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = NULL
+                    chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = ?
                 WHERE id = ?
                 """,
-                (text_hash, PARSER_VERSION, CHUNKING_PROFILE, chunking_hash, embedding_config_hash, doc_id),
+                (
+                    text_hash,
+                    parser_version,
+                    CHUNKING_PROFILE,
+                    chunking_hash,
+                    embedding_config_hash,
+                    json.dumps(parse_warnings, ensure_ascii=False) if parse_warnings else None,
+                    doc_id,
+                ),
             )
             sqlite_conn.commit()
         except Exception:
@@ -329,6 +399,160 @@ def _chunking_config(settings: RagSettings) -> dict[str, int]:
     }
 
 
+def build_structured_parent_chunks(
+    blocks: list[DocumentBlock],
+    settings: RagSettings | None = None,
+) -> list[ParentDraft]:
+    target = settings.parent_target_tokens if settings else PARENT_TARGET_TOKENS
+    maximum = settings.parent_max_tokens if settings else PARENT_MAX_TOKENS
+    target = min(target, maximum)
+    eligible = [
+        block
+        for block in blocks
+        if block.text.strip() and block.block_type not in {"header", "footer"}
+    ]
+    parents: list[ParentDraft] = []
+    current: list[DocumentBlock] = []
+    current_tokens = 0
+    current_path: tuple[str, ...] = ()
+
+    def flush() -> None:
+        nonlocal current, current_tokens, current_path
+        if current:
+            parents.append(ParentDraft(
+                text="\n\n".join(block.text.strip() for block in current),
+                blocks=list(current),
+            ))
+        current = []
+        current_tokens = 0
+        current_path = ()
+
+    for block in eligible:
+        block_tokens = estimate_tokens(block.text)
+        block_path = tuple(block.heading_path)
+        section_changed = (
+            current
+            and block_path
+            and current_path
+            and block_path != current_path
+            and current_tokens >= max(64, target // 3)
+        )
+        if current and (current_tokens + block_tokens > maximum or section_changed):
+            flush()
+        current.append(block)
+        current_tokens += block_tokens
+        if block_path:
+            current_path = block_path
+        if current_tokens >= target and block.block_type not in {"title", "heading"}:
+            flush()
+    flush()
+    return parents
+
+
+async def build_structured_child_chunks(
+    app_state,
+    blocks: list[DocumentBlock],
+    settings: RagSettings | None = None,
+) -> list[ChildDraft]:
+    target = settings.child_target_tokens if settings else CHILD_TARGET_TOKENS
+    maximum = settings.child_max_tokens if settings else CHILD_MAX_TOKENS
+    target = min(target, maximum)
+    drafts: list[ChildDraft] = []
+    current: list[DocumentBlock] = []
+    current_tokens = 0
+
+    def flush() -> None:
+        nonlocal current, current_tokens
+        if current:
+            drafts.append(_child_from_blocks(current))
+        current = []
+        current_tokens = 0
+
+    for block in blocks:
+        if block.block_type in {"title", "heading", "header", "footer"}:
+            continue
+        if block.block_type == "table":
+            flush()
+            drafts.extend(_table_child_drafts(block, maximum))
+            continue
+        block_tokens = estimate_tokens(block.text)
+        if block_tokens > maximum:
+            flush()
+            pieces = await build_semantic_child_chunks(app_state, block.text, settings)
+            drafts.extend(_child_from_blocks([block], text=piece) for piece in pieces)
+            continue
+        incompatible = (
+            current
+            and (
+                current[-1].heading_path != block.heading_path
+                or current[-1].page_number != block.page_number
+                or current[-1].block_type != block.block_type
+                or current_tokens + block_tokens > maximum
+            )
+        )
+        if incompatible:
+            flush()
+        current.append(block)
+        current_tokens += block_tokens
+        if current_tokens >= target or block.block_type in {"caption", "footnote"}:
+            flush()
+    flush()
+    return drafts
+
+
+def _child_from_blocks(blocks: list[DocumentBlock], *, text: str | None = None) -> ChildDraft:
+    page_numbers = [block.page_number for block in blocks]
+    block_types = {block.block_type for block in blocks}
+    paths = [block.heading_path for block in blocks if block.heading_path]
+    same_page = len(set(page_numbers)) == 1
+    boxes = [block.bounding_box for block in blocks if block.bounding_box]
+    bounding_box = None
+    if same_page and boxes:
+        bounding_box = (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+    return ChildDraft(
+        text=(text if text is not None else "\n".join(block.text.strip() for block in blocks)).strip(),
+        block_type=next(iter(block_types)) if len(block_types) == 1 else "mixed",
+        heading_path=list(paths[0]) if paths else [],
+        page_number=min(page_numbers) if page_numbers else None,
+        page_end=max(page_numbers) if page_numbers else None,
+        block_index=min((block.block_index for block in blocks), default=None),
+        bounding_box=bounding_box,
+        provenance={
+            "source_block_indices": [block.block_index for block in blocks],
+            "source_block_types": [block.block_type for block in blocks],
+        },
+    )
+
+
+def _table_child_drafts(block: DocumentBlock, maximum: int) -> list[ChildDraft]:
+    lines = [line.strip() for line in block.text.splitlines() if line.strip()]
+    if not lines or estimate_tokens(block.text) <= maximum:
+        return [_child_from_blocks([block])]
+    header = lines[0]
+    drafts: list[ChildDraft] = []
+    rows: list[str] = []
+    tokens = estimate_tokens(header)
+    for row in lines[1:]:
+        row_tokens = estimate_tokens(row)
+        if rows and tokens + row_tokens > maximum:
+            drafts.append(_child_from_blocks([block], text="\n".join([header, *rows])))
+            rows = []
+            tokens = estimate_tokens(header)
+        rows.append(row)
+        tokens += row_tokens
+    if rows:
+        drafts.append(_child_from_blocks([block], text="\n".join([header, *rows])))
+    for index, draft in enumerate(drafts):
+        draft.provenance["table_part"] = index + 1
+        draft.provenance["table_parts"] = len(drafts)
+    return drafts
+
+
 def build_parent_chunks(text: str, settings: RagSettings | None = None) -> list[str]:
     target = settings.parent_target_tokens if settings else PARENT_TARGET_TOKENS
     maximum = settings.parent_max_tokens if settings else PARENT_MAX_TOKENS
@@ -411,10 +635,23 @@ def summarize_parent(text: str) -> str:
     return summary[:700]
 
 
-def contextualize_chunk(chunk_text: str, title: str, heading_path: str | None, block_type: str) -> str:
+def contextualize_chunk(
+    chunk_text: str,
+    title: str,
+    heading_path: str | None,
+    block_type: str,
+    *,
+    page_number: int | None = None,
+    page_end: int | None = None,
+) -> str:
     parts = [f"Document: {title}"]
     if heading_path:
         parts.append(f"Section: {heading_path}")
+    if page_number is not None:
+        page_label = str(page_number)
+        if page_end is not None and page_end != page_number:
+            page_label = f"{page_label}-{page_end}"
+        parts.append(f"Page: {page_label}")
     parts.append(f"Block type: {block_type}")
     return "\n".join(parts) + "\n\n" + chunk_text.strip()
 
