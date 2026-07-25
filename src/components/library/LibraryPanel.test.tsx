@@ -5,7 +5,7 @@ import { LibraryPanel } from "./LibraryPanel";
 import type { Document } from "../../api";
 
 const docs: Document[] = [
-  { id: "1", name: "stress.md", path: "C:/docs/stress.md", status: "ready", chunks: 2, tags: ["health"] },
+  { id: "1", name: "stress.md", path: "C:/docs/stress.md", status: "ready", chunks: 2, stale_embedding: true, stale_reasons: ["parser_version_changed"], tags: ["health"] },
   { id: "2", name: "broken.md", path: "C:/docs/broken.md", status: "failed", chunks: 0, tags: [] },
 ];
 
@@ -31,6 +31,7 @@ describe("LibraryPanel", () => {
 
     expect(screen.getByText("stress.md")).toBeInTheDocument();
     expect(screen.getByText("broken.md")).toBeInTheDocument();
+    expect(screen.getByText(/stale - reindex required/)).toBeInTheDocument();
     await user.click(screen.getByText("failed"));
     expect(setStatusFilter).toHaveBeenCalledWith("failed");
     await user.type(screen.getByPlaceholderText("Search path, name, tag"), "stress");

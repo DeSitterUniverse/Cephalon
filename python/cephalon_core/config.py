@@ -26,17 +26,12 @@ class RagDefaults:
     rerank_top_n: int = 3
     max_tokens: int = 4096
     temperature: float = 0.4
-    # Kept for compatibility with older stored settings. New indexing uses the
-    # explicit parent/child settings below.
-    chunk_size: int = 1500
-    chunk_overlap: int = 150
     parent_target_tokens: int = 520
     parent_max_tokens: int = 650
     child_target_tokens: int = 110
     child_max_tokens: int = 150
     child_overlap_tokens: int = 0
     context_tokens: int = 32768
-    full_context: bool = False
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
@@ -68,15 +63,12 @@ class Settings:
             rerank_top_n=int(os.getenv("CEPHALON_RERANK_TOP_N", "3")),
             max_tokens=int(os.getenv("CEPHALON_MAX_TOKENS", "4096")),
             temperature=float(os.getenv("CEPHALON_TEMPERATURE", "0.4")),
-            chunk_size=int(os.getenv("CEPHALON_CHUNK_SIZE", "1500")),
-            chunk_overlap=int(os.getenv("CEPHALON_CHUNK_OVERLAP", "150")),
             parent_target_tokens=int(os.getenv("CEPHALON_PARENT_TARGET_TOKENS", "520")),
             parent_max_tokens=int(os.getenv("CEPHALON_PARENT_MAX_TOKENS", "650")),
             child_target_tokens=int(os.getenv("CEPHALON_CHILD_TARGET_TOKENS", "110")),
             child_max_tokens=int(os.getenv("CEPHALON_CHILD_MAX_TOKENS", "150")),
             child_overlap_tokens=int(os.getenv("CEPHALON_CHILD_OVERLAP_TOKENS", "0")),
             context_tokens=int(os.getenv("CEPHALON_CONTEXT_TOKENS", "32768")),
-            full_context=os.getenv("CEPHALON_FULL_CONTEXT", "0") == "1",
             evidence_required=os.getenv("CEPHALON_EVIDENCE_REQUIRED", "0") == "1",
             conversation_memory=os.getenv("CEPHALON_CONVERSATION_MEMORY", "1") != "0",
             trace_persistence=os.getenv("CEPHALON_TRACE_PERSISTENCE", "1") != "0",

@@ -441,6 +441,10 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
             add_column_if_missing(conn, "chunks", column, definition)
         mark_migration(conn, "011_structured_provenance")
 
+    if not migration_applied(conn, "012_stale_index_reasons"):
+        add_column_if_missing(conn, "documents", "stale_reasons", "TEXT")
+        mark_migration(conn, "012_stale_index_reasons")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -572,6 +576,7 @@ def document_payload(conn: sqlite3.Connection, row: sqlite3.Row, tags: list[str]
         "embedding_model_id": row["embedding_model_id"] if "embedding_model_id" in row.keys() else None,
         "embedding_dim": row["embedding_dim"] if "embedding_dim" in row.keys() else None,
         "stale_embedding": bool(row["stale_embedding"]) if "stale_embedding" in row.keys() else False,
+        "stale_reasons": _json_value(row["stale_reasons"], []) if "stale_reasons" in row.keys() else [],
         "extraction_mode": row["extraction_mode"] if "extraction_mode" in row.keys() else None,
         "last_retrieved_at": row["last_retrieved_at"] if "last_retrieved_at" in row.keys() else None,
         "retrieval_count": row["retrieval_count"] if "retrieval_count" in row.keys() else 0,

@@ -14,6 +14,8 @@ export type Document = {
   modified_at?: number | null;
   last_error?: string | null;
   last_indexed_at?: number | null;
+  stale_embedding?: boolean;
+  stale_reasons?: string[];
   tags?: string[];
   chunk_preview?: Array<{
     id: string;
@@ -31,15 +33,12 @@ export type RagSettings = {
   rerank_top_n: number;
   max_tokens: number;
   temperature: number;
-  chunk_size: number;
-  chunk_overlap: number;
   parent_target_tokens: number;
   parent_max_tokens: number;
   child_target_tokens: number;
   child_max_tokens: number;
   child_overlap_tokens: number;
   context_tokens: number;
-  full_context: boolean;
   evidence_required: boolean;
   conversation_memory: boolean;
   trace_persistence: boolean;

@@ -17,7 +17,7 @@ from .events import EventBus
 from .runtime import ModelRuntime
 from .routes import router
 from .services.jobs import JobManager
-from .services import onnx_setup, retrieval
+from .services import ingestion, onnx_setup, retrieval
 
 
 def load_architecture_context() -> str:
@@ -212,6 +212,10 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.onnx_setup = onnx_setup.runtime_status(app.state)
         app.state.generated_index_backup = storage.clean_generated_vector_state(active_settings, app.state.lance)
         app.state.retrieval_index = retrieval.ensure_retrieval_index(app.state)
+        try:
+            app.state.index_staleness = ingestion.refresh_document_staleness(app.state)
+        except Exception as exc:
+            app.state.index_staleness = {"error": str(exc)}
         app.state.event_bus = EventBus(app.state.sqlite)
         app.state.job_manager = JobManager(app.state, app.state.event_bus)
         await app.state.job_manager.start()

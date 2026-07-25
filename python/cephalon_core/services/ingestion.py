@@ -399,6 +399,97 @@ def _chunking_config(settings: RagSettings) -> dict[str, int]:
     }
 
 
+def parser_version_for_path(path: str) -> str:
+    return documents.PDF_PARSER_VERSION if os.path.splitext(path)[1].lower() == ".pdf" else PARSER_VERSION
+
+
+def refresh_document_staleness(app_state, rag_settings: RagSettings | None = None) -> dict:
+    """Refresh persisted stale-index flags without reparsing or re-embedding files."""
+    rag_settings = rag_settings or storage.get_rag_settings(app_state.sqlite)
+    embedding_metadata_known = (
+        hasattr(app_state, "embedding_model_id")
+        and hasattr(app_state, "embedding_dim")
+    )
+    metadata = storage.active_embedding_metadata(app_state)
+    chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, _chunking_config(rag_settings))
+    embedding_config_hash = f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}"
+    rows = storage.fetchall(
+        app_state.sqlite,
+        "SELECT * FROM documents WHERE type = 'file' AND status = 'ready'",
+    )
+    stale_count = 0
+    reasons_by_document: dict[str, list[str]] = {}
+
+    for row in rows:
+        stored = storage.row_to_dict(row) or {}
+        path = str(stored.get("path") or "")
+        reasons: list[str] = []
+        current_size = stored.get("size_bytes")
+        current_modified = stored.get("modified_at")
+
+        if not os.path.isfile(path):
+            reasons.append("file_missing")
+            current_content_hash = stored.get("content_hash")
+        else:
+            try:
+                current_size, current_modified = documents.file_metadata(path)
+                metadata_changed = (
+                    current_size != stored.get("size_bytes")
+                    or current_modified != stored.get("modified_at")
+                )
+                current_content_hash = (
+                    documents.get_file_hash(path)
+                    if metadata_changed
+                    else stored.get("content_hash")
+                )
+            except OSError:
+                current_content_hash = stored.get("content_hash")
+                reasons.append("file_unreadable")
+
+        current = {
+            "content_hash": current_content_hash,
+            "chunking_config_hash": chunking_hash,
+            "parser_version": parser_version_for_path(path),
+            "embedding_model_id": (
+                metadata["embedding_model_id"]
+                if embedding_metadata_known
+                else stored.get("embedding_model_id")
+            ),
+            "embedding_config_hash": (
+                embedding_config_hash
+                if embedding_metadata_known
+                else stored.get("embedding_config_hash")
+            ),
+        }
+        detected = observability.detect_stale_state(stored, current)
+        reasons.extend(reason for reason in detected["reasons"] if reason not in reasons)
+        is_stale = bool(reasons)
+        if is_stale:
+            stale_count += 1
+            reasons_by_document[row["id"]] = reasons
+        storage.execute(
+            app_state.sqlite,
+            """
+            UPDATE documents
+            SET stale_embedding = ?, stale_reasons = ?, size_bytes = ?, modified_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(is_stale),
+                json.dumps(reasons, separators=(",", ":")) if reasons else None,
+                current_size,
+                current_modified,
+                row["id"],
+            ),
+        )
+
+    return {
+        "checked_document_count": len(rows),
+        "stale_document_count": stale_count,
+        "reasons_by_document": reasons_by_document,
+    }
+
+
 def build_structured_parent_chunks(
     blocks: list[DocumentBlock],
     settings: RagSettings | None = None,

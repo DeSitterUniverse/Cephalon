@@ -1,10 +1,12 @@
+import hashlib
 import sqlite3
 import time
+from types import SimpleNamespace
 
 from cephalon_core import storage
 from cephalon_core.config import Settings
-from cephalon_core.schemas import SourceChunk
-from cephalon_core.services import evaluation, observability, onnx_setup, support
+from cephalon_core.schemas import RagSettings, SourceChunk
+from cephalon_core.services import evaluation, ingestion, observability, onnx_setup, support
 
 
 def build_conn():
@@ -85,6 +87,87 @@ def test_stale_embedding_detection_uses_hashes_versions_and_models():
     assert observability.detect_stale_state(baseline, {**baseline, "chunking_config_hash": "chunk-b"})["reasons"] == ["chunking_config_changed"]
     assert observability.detect_stale_state(baseline, {**baseline, "parser_version": "parser-b"})["reasons"] == ["parser_version_changed"]
     assert observability.detect_stale_state(baseline, {**baseline, "embedding_model_id": "embed-b"})["reasons"] == ["embedding_model_changed"]
+
+
+def test_stale_document_refresh_tracks_parser_chunk_model_and_file_changes(tmp_path):
+    conn = build_conn()
+    path = tmp_path / "paper.pdf"
+    path.write_bytes(b"original machine PDF")
+    rag_settings = RagSettings()
+    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    size_bytes, modified_at = path.stat().st_size, int(path.stat().st_mtime)
+    embedding_model_id = "test/embedder"
+    embedding_dim = 1024
+    chunking_hash = observability.chunking_config_hash(
+        ingestion.CHUNKING_PROFILE,
+        ingestion._chunking_config(rag_settings),
+    )
+    storage.execute(
+        conn,
+        """
+        INSERT INTO documents (
+            id, path, display_name, content_hash, ingested_at, chunk_count, status,
+            type, size_bytes, modified_at, embedding_model_id, embedding_dim,
+            text_hash, parser_version, chunking_profile, chunking_config_hash,
+            embedding_config_hash, stale_embedding
+        )
+        VALUES (?, ?, ?, ?, ?, 1, 'ready', 'file', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (
+            "doc-stale",
+            str(path),
+            path.name,
+            content_hash,
+            int(time.time()),
+            size_bytes,
+            modified_at,
+            embedding_model_id,
+            embedding_dim,
+            "text-hash",
+            "old-pdf-parser",
+            ingestion.CHUNKING_PROFILE,
+            chunking_hash,
+            f"{embedding_model_id}:{embedding_dim}",
+        ),
+    )
+    app_state = SimpleNamespace(
+        sqlite=conn,
+        embedding_model_id=embedding_model_id,
+        embedding_dim=embedding_dim,
+    )
+
+    first = ingestion.refresh_document_staleness(app_state, rag_settings)
+    payload = storage.get_document_payload(conn, "doc-stale")
+    assert first["stale_document_count"] == 1
+    assert payload["stale_reasons"] == ["parser_version_changed"]
+
+    storage.execute(
+        conn,
+        "UPDATE documents SET parser_version = ? WHERE id = ?",
+        (ingestion.parser_version_for_path(str(path)), "doc-stale"),
+    )
+    second = ingestion.refresh_document_staleness(app_state, rag_settings)
+    assert second["stale_document_count"] == 0
+    assert storage.get_document_payload(conn, "doc-stale")["stale_embedding"] is False
+
+    path.write_bytes(b"changed machine PDF with a different size")
+    third = ingestion.refresh_document_staleness(app_state, rag_settings)
+    assert third["reasons_by_document"]["doc-stale"] == ["file_hash_changed"]
+
+
+def test_legacy_saved_rag_fields_are_ignored_and_not_resaved():
+    conn = build_conn()
+    storage.execute(
+        conn,
+        "UPDATE app_settings SET value = ? WHERE key = 'rag'",
+        ('{"top_k":12,"chunk_size":900,"chunk_overlap":90,"full_context":true}',),
+    )
+
+    loaded = storage.get_rag_settings(conn)
+    saved = storage.save_rag_settings(conn, loaded)
+
+    assert loaded.top_k == 12
+    assert {"chunk_size", "chunk_overlap", "full_context"}.isdisjoint(saved.model_dump())
 
 
 def test_eval_metrics_recall_and_mrr_are_deterministic():
@@ -226,4 +309,4 @@ def test_schema_initialization_is_idempotent_and_observability_tables_exist():
         "bounding_box",
         "provenance_json",
     } <= chunk_columns
-    assert {"text_hash", "chunking_config_hash", "parser_version", "embedding_config_hash", "parse_warnings"} <= document_columns
+    assert {"text_hash", "chunking_config_hash", "parser_version", "embedding_config_hash", "parse_warnings", "stale_reasons"} <= document_columns

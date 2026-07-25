@@ -14,15 +14,12 @@ class RagSettings(BaseModel):
     rerank_top_n: int = 3
     max_tokens: int = 4096
     temperature: float = 0.4
-    chunk_size: int = 1500
-    chunk_overlap: int = 150
     parent_target_tokens: int = 520
     parent_max_tokens: int = 650
     child_target_tokens: int = 110
     child_max_tokens: int = 150
     child_overlap_tokens: int = 0
     context_tokens: int = 32768
-    full_context: bool = False
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
@@ -57,20 +54,6 @@ class RagSettings(BaseModel):
     def validate_temperature(cls, value: float) -> float:
         if value < 0 or value > 2:
             raise ValueError("temperature must be between 0 and 2")
-        return value
-
-    @field_validator("chunk_size")
-    @classmethod
-    def validate_chunk_size(cls, value: int) -> int:
-        if value < 256 or value > 8000:
-            raise ValueError("chunk_size must be between 256 and 8000")
-        return value
-
-    @field_validator("chunk_overlap")
-    @classmethod
-    def validate_chunk_overlap(cls, value: int) -> int:
-        if value < 0 or value > 2000:
-            raise ValueError("chunk_overlap must be between 0 and 2000")
         return value
 
     @field_validator("parent_target_tokens", "parent_max_tokens", "child_target_tokens", "child_max_tokens")

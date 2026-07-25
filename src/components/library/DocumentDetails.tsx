@@ -49,6 +49,14 @@ export function DocumentDetails({ document, onRename, onAddTag, onDeleteTag, onR
         <span>Indexed</span><strong>{document.last_indexed_at ? new Date(document.last_indexed_at * 1000).toLocaleString() : "Never"}</strong>
       </div>
 
+      {document.stale_embedding && (
+        <div className="runtime-line warn">
+          Reindex required: {(document.stale_reasons || ["index configuration changed"])
+            .map(reason => reason.replaceAll("_", " "))
+            .join(", ")}.
+        </div>
+      )}
+
       <div className="tag-editor">
         <div className="tag-list">
           {(document.tags || []).map(existing => (

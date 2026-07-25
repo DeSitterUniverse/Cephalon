@@ -207,6 +207,7 @@ def register_ingesting_document(sqlite_conn, path: str, content_hash: str, extra
             embedding_model_id = excluded.embedding_model_id,
             embedding_dim = excluded.embedding_dim,
             stale_embedding = 0,
+            stale_reasons = NULL,
             last_error = NULL
         """,
         (
@@ -232,7 +233,7 @@ def register_ingesting_document(sqlite_conn, path: str, content_hash: str, extra
 def mark_document_ready(sqlite_conn, doc_id: str, chunk_count: int) -> None:
     storage.execute(
         sqlite_conn,
-        "UPDATE documents SET status = 'ready', chunk_count = ?, last_error = NULL, last_indexed_at = ? WHERE id = ?",
+        "UPDATE documents SET status = 'ready', chunk_count = ?, stale_embedding = 0, stale_reasons = NULL, last_error = NULL, last_indexed_at = ? WHERE id = ?",
         (chunk_count, int(time.time()), doc_id),
     )
 

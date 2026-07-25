@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from .. import storage
 from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
-from ..services import evaluation, generation, metrics, models, observability, onnx_setup, retrieval, support
+from ..services import evaluation, generation, ingestion, metrics, models, observability, onnx_setup, retrieval, support
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
 from .documents import delete_document, get_documents, router as documents_router
@@ -280,9 +280,15 @@ async def put_settings(request: Request, rag_settings: RagSettings):
     chunk_keys = ("parent_target_tokens", "parent_max_tokens", "child_target_tokens", "child_max_tokens", "child_overlap_tokens")
     reindex_required = any(getattr(previous, key) != getattr(rag_settings, key) for key in chunk_keys)
     saved = storage.save_rag_settings(app_state.sqlite, rag_settings)
-    if reindex_required:
-        storage.execute(app_state.sqlite, "UPDATE documents SET stale_embedding = 1 WHERE type = 'file'")
-    await app_state.event_bus.publish("settings", {**saved.model_dump(), "reindex_required": reindex_required})
+    stale_summary = ingestion.refresh_document_staleness(app_state, saved)
+    await app_state.event_bus.publish(
+        "settings",
+        {
+            **saved.model_dump(),
+            "reindex_required": reindex_required,
+            "stale_document_count": stale_summary["stale_document_count"],
+        },
+    )
     return saved
 
 
