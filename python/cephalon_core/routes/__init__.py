@@ -396,7 +396,7 @@ async def chat_and_remember(request: Request, req: QueryRequest):
             answer_text = "".join(answer_parts)
             generation_ms = round((time.perf_counter() - generation_started) * 1000, 2)
             quality = metrics.estimate_answer_quality(req.prompt, answer_text, context)
-            support_payload = support.classify_answer_support(sources)
+            support_payload = support.classify_answer_support(answer_text, sources)
             query_meta.update(quality)
             query_meta["support"] = support_payload
             query_meta["generation_latency_ms"] = generation_ms

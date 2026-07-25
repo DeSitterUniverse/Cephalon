@@ -84,6 +84,16 @@ export type CitationSupport = {
 export type AnswerSupport = {
   status: "supported" | "weak" | "unsupported";
   citations: CitationSupport[];
+  accounting?: {
+    citation_count: number;
+    unique_citation_count: number;
+    cited_source_ids: string[];
+    valid_source_ids: string[];
+    invalid_source_ids: string[];
+    available_source_count: number;
+    uncited_source_count: number;
+    citation_precision: number;
+  };
 };
 export type RetrievalTraceSummary = {
   query_id: string;

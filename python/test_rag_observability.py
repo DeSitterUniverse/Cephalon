@@ -137,6 +137,50 @@ def test_citation_support_classification_is_score_based():
     assert support.classify_citation_support("missing", final_context)["status"] == "unsupported"
 
 
+def test_answer_support_accounts_only_for_citations_used_in_the_answer():
+    final_context = [
+        SourceChunk(rank=1, source_id="S1", doc_id="doc-a", doc_name="a", chunk_id="a1", score=0.8, snippet="supported", rerank_score=0.9),
+        SourceChunk(rank=2, source_id="S2", doc_id="doc-b", doc_name="b", chunk_id="b1", score=0.3, snippet="unused", rerank_score=0.2),
+    ]
+
+    result = support.classify_answer_support(
+        "The supported fact appears here. [[src:S1]] Repeated. [[SRC:S1]] Unknown. [[src:S9]]",
+        final_context,
+    )
+
+    assert result["status"] == "unsupported"
+    assert [item["source_id"] for item in result["citations"]] == ["S1", "S9"]
+    assert result["accounting"] == {
+        "citation_count": 3,
+        "unique_citation_count": 2,
+        "cited_source_ids": ["S1", "S9"],
+        "valid_source_ids": ["S1"],
+        "invalid_source_ids": ["S9"],
+        "available_source_count": 2,
+        "uncited_source_count": 1,
+        "citation_precision": 0.5,
+    }
+
+
+def test_answer_without_citations_is_not_marked_supported_by_unused_context():
+    source = SourceChunk(
+        rank=1,
+        source_id="S1",
+        doc_id="doc-a",
+        doc_name="a",
+        chunk_id="a1",
+        score=0.9,
+        snippet="strong but uncited",
+        rerank_score=1.2,
+    )
+
+    result = support.classify_answer_support("An uncited answer.", [source])
+
+    assert result["status"] == "unsupported"
+    assert result["citations"] == []
+    assert result["accounting"]["uncited_source_count"] == 1
+
+
 def test_schema_initialization_is_idempotent_and_observability_tables_exist():
     conn = build_conn()
     storage.run_migrations(conn, Settings())

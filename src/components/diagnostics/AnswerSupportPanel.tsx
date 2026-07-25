@@ -15,8 +15,23 @@ export function AnswerSupportPanel({ support }: Props) {
         </div>
       </div>
       <div className="diagnostic-list">
+        {support.accounting && (
+          <article className="source-card">
+            <div className="source-head">
+              <strong>Citation accounting</strong>
+              <span>{support.accounting.valid_source_ids.length}/{support.accounting.unique_citation_count} valid</span>
+            </div>
+            <div className="source-metrics">
+              <span>{support.accounting.citation_count} uses</span>
+              <span>{support.accounting.uncited_source_count} retrieved but uncited</span>
+              {support.accounting.invalid_source_ids.length > 0 && (
+                <span>{support.accounting.invalid_source_ids.length} invalid</span>
+              )}
+            </div>
+          </article>
+        )}
         {support.citations.map(citation => (
-          <article key={citation.chunk_id} className="source-card">
+          <article key={`${citation.source_id || "source"}:${citation.chunk_id}`} className="source-card">
             <div className="source-head">
               <strong>{citation.source_id || citation.chunk_id}</strong>
               <span>{citation.status}</span>
