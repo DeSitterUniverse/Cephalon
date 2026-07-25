@@ -137,6 +137,19 @@ def test_scope_modes_change_retrieval_not_model_style():
     assert low.max_tokens == medium.max_tokens == high.max_tokens == 777
 
 
+def test_auto_retrieval_router_skips_clear_conversation_but_defaults_to_safe_recall():
+    assert routes.plan_retrieval_route("Hello!", "auto")["resolved"] == "off"
+    assert routes.plan_retrieval_route("Brainstorm names for a space game", "auto")["resolved"] == "off"
+    assert routes.plan_retrieval_route("What does the RATE paper report?", "auto")["resolved"] == "medium"
+    assert routes.plan_retrieval_route("Compare the projected growth rates for 2026 and 2027?", "auto")["resolved"] == "medium"
+    assert routes.plan_retrieval_route("Anything", "off")["retrieve"] is False
+    assert routes.plan_retrieval_route("Hello", "auto", evidence_required=True)["retrieve"] is True
+
+
+def test_query_request_defaults_to_auto_retrieval():
+    assert QueryRequest(prompt="Hello").retrieval_scope == "auto"
+
+
 def test_query_decomposition_keeps_the_original_question_and_deduplicates_candidates():
     subqueries = retrieval.plan_subqueries("Compare alpha versus beta")
     assert subqueries[0] == {"id": "q0", "text": "Compare alpha versus beta"}

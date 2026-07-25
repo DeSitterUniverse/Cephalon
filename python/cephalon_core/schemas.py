@@ -118,7 +118,7 @@ class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
     conversation_id: str | None = None
-    retrieval_scope: Literal["low", "medium", "high"] = "medium"
+    retrieval_scope: Literal["auto", "off", "low", "medium", "high"] = "auto"
     response_effort: Literal["quick", "balanced", "thorough"] = "balanced"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None

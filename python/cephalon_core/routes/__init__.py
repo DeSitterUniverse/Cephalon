@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -41,6 +42,94 @@ def _settings_for_retrieval_scope(settings: RagSettings, scope: str) -> RagSetti
             "rerank_top_n": max(settings.rerank_top_n, 6),
         })
     return settings
+
+
+def plan_retrieval_route(
+    prompt: str,
+    scope: str,
+    *,
+    evidence_required: bool = False,
+) -> dict:
+    requested = (scope or "auto").lower()
+    if requested in {"low", "medium", "high"}:
+        return {
+            "requested": requested,
+            "resolved": requested,
+            "retrieve": True,
+            "reason": "The user selected an explicit retrieval scope.",
+        }
+    if requested == "off":
+        return {
+            "requested": requested,
+            "resolved": "off",
+            "retrieve": False,
+            "reason": "Document retrieval was explicitly disabled.",
+        }
+    if evidence_required:
+        return {
+            "requested": "auto",
+            "resolved": "medium",
+            "retrieve": True,
+            "reason": "Evidence-required mode always searches local documents.",
+        }
+
+    clean = " ".join(prompt.lower().split())
+    document_cues = (
+        "according to", "citation", "cite ", "document", "file", "local source",
+        "my notes", "paper", "pdf", "report", "research", "source", "spreadsheet",
+        "table", "uploaded",
+    )
+    non_retrieval_cues = (
+        "brainstorm", "draft ", "help me write", "make up", "proofread", "rewrite",
+        "roleplay", "tell me a joke", "translate",
+    )
+    greeting = re.fullmatch(
+        r"(?:hi|hello|hey|thanks|thank you|good (?:morning|afternoon|evening))[!. ]*",
+        clean,
+    )
+    if any(cue in clean for cue in document_cues):
+        resolved = "medium"
+        reason = "The prompt refers to documents, sources, citations, or structured records."
+    elif greeting or any(cue in clean for cue in non_retrieval_cues):
+        resolved = "off"
+        reason = "The prompt is clearly conversational or generative rather than document-seeking."
+    elif len(clean.split()) <= 4 and not clean.endswith("?"):
+        resolved = "off"
+        reason = "The short prompt has no document-retrieval signal."
+    else:
+        resolved = "medium"
+        reason = "Auto mode defaults to retrieval when document relevance is uncertain."
+    return {
+        "requested": "auto",
+        "resolved": resolved,
+        "retrieve": resolved != "off",
+        "reason": reason,
+    }
+
+
+def _empty_retrieval_meta(route: dict, *, evidence_required: bool) -> dict:
+    no_answer = bool(evidence_required)
+    return {
+        "query_id": str(uuid.uuid4()),
+        "subqueries": [],
+        "retrieval_latency_ms": 0.0,
+        "search_modes": ["disabled"],
+        "metrics_path": None,
+        "confidence": 0.0,
+        "uncertainty": "not_applicable" if not no_answer else "high",
+        "no_answer": no_answer,
+        "reason": (
+            "Document retrieval is disabled."
+            if not no_answer
+            else "Evidence is required, but document retrieval is disabled."
+        ),
+        "reasons": ["retrieval_disabled"],
+        "thresholds": {},
+        "agreement": {"hybrid_overlap": False, "source_diversity": 0},
+        "top_scores": {},
+        "trace": None,
+        "retrieval_route": route,
+    }
 
 
 @router.get("/health")
@@ -337,7 +426,13 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     if not req.model.strip():
         raise HTTPException(status_code=400, detail="Connect to the configured external llama.cpp server before querying.")
 
-    rag_settings = _settings_for_retrieval_scope(req.settings or storage.get_rag_settings(app_state.sqlite), req.retrieval_scope)
+    base_rag_settings = req.settings or storage.get_rag_settings(app_state.sqlite)
+    retrieval_route = plan_retrieval_route(
+        req.prompt,
+        req.retrieval_scope,
+        evidence_required=base_rag_settings.evidence_required,
+    )
+    rag_settings = _settings_for_retrieval_scope(base_rag_settings, retrieval_route["resolved"])
     _ensure_query_model_loaded(app_state, req.model)
 
     async def response_stream():
@@ -345,9 +440,18 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         try:
             # Send an event immediately so slow embedding/retrieval cannot leave the UI
             # waiting for a response that has not begun streaming yet.
-            yield _sse("phase", {"phase": "retrieving"})
-            query_vector = await retrieval.get_embedding(app_state, req.prompt)
-            context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
+            yield _sse("phase", {"phase": "routing"})
+            if retrieval_route["retrieve"]:
+                yield _sse("phase", {"phase": "retrieving"})
+                query_vector = await retrieval.get_embedding(app_state, req.prompt)
+                context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
+                query_meta["retrieval_route"] = retrieval_route
+            else:
+                context, sources = "", []
+                query_meta = _empty_retrieval_meta(
+                    retrieval_route,
+                    evidence_required=rag_settings.evidence_required,
+                )
             query_meta["retrieval_scope"] = req.retrieval_scope
             query_meta["response_effort"] = req.response_effort
             if rag_settings.trace_persistence and query_meta.get("trace"):

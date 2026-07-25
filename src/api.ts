@@ -452,7 +452,7 @@ export async function queryModel(
   history: Message[],
   settings?: RagSettings,
   conversation_id?: string | null,
-  retrieval_scope = "medium",
+  retrieval_scope = "auto",
   response_effort = "balanced",
   signal?: AbortSignal,
 ): Promise<ReadableStream<Uint8Array>> {
