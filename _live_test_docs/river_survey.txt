@@ -1,0 +1,7 @@
+River Survey Field Guide
+
+The North River survey measures water temperature, turbidity, and dissolved oxygen at three stations: Pine Bend, Old Mill, and Harbor Gate. Measurements are collected at 08:00 and 16:00. A turbidity value above 30 NTU requires a repeat sample and a photograph of the shoreline.
+
+For the autumn survey, Harbor Gate recorded the highest turbidity value: 42 NTU on October 14. The team repeated the sample at 16:00 and confirmed 41 NTU. Pine Bend is not the station with the highest value.
+
+Sample bottles should be refrigerated after collection. Field teams must not use the deployment launch journal for survey records.

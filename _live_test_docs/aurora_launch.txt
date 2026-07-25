@@ -1,0 +1,7 @@
+Aurora Observatory Launch Notes
+
+The Aurora observatory project uses a blue-green deployment procedure. The blue environment remains live while the green environment receives the new release. Operators run a database migration in green, perform a health check, then shift traffic only after the scheduler confirms that 95 percent of jobs complete within twelve minutes.
+
+Rollback rule: if the scheduler success rate falls below 95 percent for two consecutive five-minute windows, route traffic back to blue and keep the failed green logs for incident review. The release coordinator must record the deployment number and the rollback reason in the launch journal.
+
+The cooling system is unrelated to deployment. Its maintenance interval is every ninety days, and replacement filters are stored in cabinet C-14.

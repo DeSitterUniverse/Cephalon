@@ -24,7 +24,7 @@ def run(*args: str, cwd: Path = REPO_ROOT) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.5.0", help="version label printed after a successful build")
+    parser.add_argument("--version", default="2.0.0", help="version label printed after a successful build")
     parser.add_argument("--with-model-export", action="store_true", help="export and validate ONNX models before packaging")
     args = parser.parse_args()
 

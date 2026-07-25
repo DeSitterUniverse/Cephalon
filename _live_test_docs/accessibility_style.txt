@@ -1,0 +1,7 @@
+Accessible Documentation Style Guide
+
+Technical documents should use descriptive headings, short paragraphs, and meaningful link text. Do not use color alone to communicate status. Tables need a header row and images need concise alternative text that explains their purpose.
+
+For error messages, state what failed, why it matters, and what the reader can do next. Example: "The upload failed because the file is larger than 20 MB. Choose a smaller file or split the document before uploading."
+
+Code examples should preserve whitespace and should name the expected output. A deployment rollback is a technical procedure, not an accessibility requirement.

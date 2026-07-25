@@ -90,7 +90,7 @@ export function SettingsPanel({
 
         <section className="settings-section">
           <h3>Chat model</h3>
-          <p className="settings-note">Cephalon does not select or load a GGUF. Start llama.cpp with the model you want, then save its endpoint here and use Connect in the title bar.</p>
+          <p className="settings-note">Start llama.cpp with the model you want, then save its endpoint here and use Connect in the title bar.</p>
           <label className="field compact-field">
             <span>llama.cpp URL</span>
             <input aria-label="llama.cpp URL" value={serverUrl} onChange={event => setServerUrl(event.target.value)} placeholder="http://127.0.0.1:8080" />

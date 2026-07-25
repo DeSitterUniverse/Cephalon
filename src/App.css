@@ -997,13 +997,18 @@ select, option { background: #050505; color: var(--text); }
 }
 .field input[type="range"] { width: 100%; accent-color: var(--accent); }
 .checkbox-field {
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  cursor: pointer;
+  line-height: 1.35;
 }
-.checkbox-field span { grid-column: 1 / -1; }
 .checkbox-field input[type="checkbox"] {
+  flex: 0 0 auto;
   width: 16px;
   height: 16px;
+  margin: 0;
   accent-color: var(--accent);
 }
 .meta-grid {
