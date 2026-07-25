@@ -158,8 +158,16 @@ def test_auto_retrieval_router_skips_clear_conversation_but_defaults_to_safe_rec
     assert routes.plan_retrieval_route("Hello", "auto", evidence_required=True)["retrieve"] is True
 
 
-def test_query_request_defaults_to_auto_retrieval():
-    assert QueryRequest(prompt="Hello").retrieval_scope == "auto"
+def test_query_request_keeps_retrieval_scope_and_response_effort_independent():
+    default = QueryRequest(prompt="Hello")
+    thorough = QueryRequest(
+        prompt="Compare the documents carefully.",
+        retrieval_scope="high",
+        response_effort="thorough",
+    )
+
+    assert (default.retrieval_scope, default.response_effort) == ("auto", "balanced")
+    assert (thorough.retrieval_scope, thorough.response_effort) == ("high", "thorough")
 
 
 def test_query_decomposition_keeps_the_original_question_and_deduplicates_candidates():
@@ -235,17 +243,6 @@ def test_embedding_runtime_uses_bounded_batches(monkeypatch):
 
     assert batch_sizes == [2, 2, 1]
     assert len(vectors) == 5
-
-
-def test_query_request_separates_retrieval_scope_and_response_effort():
-    request = QueryRequest(
-        prompt="Compare the documents carefully.",
-        retrieval_scope="high",
-        response_effort="thorough",
-    )
-
-    assert request.retrieval_scope == "high"
-    assert request.response_effort == "thorough"
 
 
 def test_thorough_response_effort_drafts_then_refines(monkeypatch):

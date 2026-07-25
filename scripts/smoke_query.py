@@ -7,7 +7,7 @@ BASE_URL = os.getenv("CEPHALON_TEST_BASE_URL", "http://127.0.0.1:8765")
 MODEL = os.getenv("CEPHALON_TEST_MODEL", "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf")
 
 
-def run_test():
+def main():
     print("\nQuerying: 'Tell me about the 4-7-8 method.'")
     with httpx.stream(
         "POST",
@@ -21,4 +21,4 @@ def run_test():
 
 
 if __name__ == "__main__":
-    run_test()
+    main()
