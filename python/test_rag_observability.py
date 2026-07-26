@@ -239,6 +239,9 @@ def test_answer_support_accounts_only_for_citations_used_in_the_answer():
         "cited_source_ids": ["S1", "S9"],
         "valid_source_ids": ["S1"],
         "invalid_source_ids": ["S9"],
+        "duplicate_source_ids": ["S1"],
+        "malformed_citations": [],
+        "uncited_source_ids": ["S2"],
         "available_source_count": 2,
         "uncited_source_count": 1,
         "citation_precision": 0.5,
@@ -288,6 +291,30 @@ def test_claim_validation_checks_each_claim_against_its_cited_source():
     assert result["supported_claim_count"] == 1
     assert result["unsupported_claim_count"] == 1
     assert [claim["status"] for claim in result["claims"]] == ["supported", "unsupported"]
+
+
+def test_answer_support_exposes_claim_evidence_and_malformed_tags():
+    source = SourceChunk(
+        rank=1,
+        source_id="S1",
+        doc_id="doc-a",
+        doc_name="a",
+        chunk_id="a1",
+        score=0.9,
+        snippet="A longer raw parent passage.",
+        evidence_text="RATE improved retrieval recall to 81.7 percent.",
+        rerank_score=1.2,
+    )
+
+    result = support.classify_answer_support(
+        "RATE improved retrieval recall to 81.7 percent. [[src:S1]] Broken [[src S2]]",
+        [source],
+    )
+
+    assert result["status"] == "unsupported"
+    assert result["accounting"]["malformed_citations"] == ["[[src S2]]"]
+    assert result["citations"][0]["claim_ids"] == ["C1"]
+    assert result["citations"][0]["evidence"] == source.evidence_text
 
 
 def test_schema_initialization_is_idempotent_and_observability_tables_exist():

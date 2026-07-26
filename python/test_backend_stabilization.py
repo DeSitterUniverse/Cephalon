@@ -12,10 +12,11 @@ from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
 from cephalon_core.schemas import Message, QueryRequest, RagSettings
 from cephalon_core.routes import _settings_for_retrieval_scope
+from cephalon_core.routes import documents as document_routes
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta, create_app
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import generation, ingestion, metrics, pdf_parser, retrieval
+from cephalon_core.services import document_assets, generation, ingestion, metrics, pdf_parser, retrieval
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -166,7 +167,7 @@ def test_query_request_keeps_retrieval_scope_and_response_effort_independent():
         response_effort="thorough",
     )
 
-    assert (default.retrieval_scope, default.response_effort) == ("auto", "balanced")
+    assert (default.retrieval_scope, default.response_effort) == ("medium", "balanced")
     assert (thorough.retrieval_scope, thorough.response_effort) == ("high", "thorough")
 
 
@@ -300,6 +301,7 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     assert calls[2]["settings"].max_tokens == 6144
     assert "Draft answer with one gap." in calls[2]["messages"][0]["content"]
     assert "--- CLAIM AUDIT ---" in calls[2]["messages"][0]["content"]
+    assert "deterministic_fallback" in calls[2]["messages"][0]["content"]
 
 
 def test_response_effort_reserves_thinking_capacity_separately_from_final_output():
@@ -576,15 +578,14 @@ def test_document_readers_stream_hash_and_avoid_duplicate_extraction(monkeypatch
 
     calls = []
 
-    class FakePage:
-        def extract_text(self):
-            calls.append("extract")
-            return "page text"
-
-    monkeypatch.setattr(documents, "PdfReader", lambda _path: SimpleNamespace(pages=[FakePage(), FakePage()]))
+    monkeypatch.setattr(
+        documents,
+        "parse_pdf",
+        lambda _path: (calls.append("extract"), SimpleNamespace(text="page text\npage text"))[1],
+    )
     text, _mode = documents.extract_text("fixture.pdf")
     assert text == "page text\npage text"
-    assert len(calls) == 2
+    assert calls == ["extract"]
 
     workbook = SimpleNamespace(worksheets=[])
     load_workbook = lambda *_args, **kwargs: (calls.append(kwargs), workbook)[1]
@@ -617,6 +618,7 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
 
         def __init__(self, page_number):
             self.page_number = page_number
+            self.images = [{"x0": 40, "top": 300, "x1": 220, "bottom": 400}]
 
         def extract_words(self, **_kwargs):
             heading = [
@@ -627,6 +629,10 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
                 word("Retrieval", 40, 120, 95, 132),
                 word("improved", 100, 120, 155, 132),
                 word("substantially.", 160, 120, 235, 132),
+                word("Figure", 40, 410, 75, 420, 9),
+                word("1:", 80, 410, 90, 420, 9),
+                word("Retrieval", 95, 410, 145, 420, 9),
+                word("pipeline", 150, 410, 195, 420, 9),
                 word("Proceedings", 250, 760, 320, 770, 8),
                 word(str(self.page_number), 325, 760, 332, 770, 8),
             ]
@@ -649,7 +655,19 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
         def __exit__(self, *_args):
             return False
 
+    fake_image = SimpleNamespace(
+        data=b"embedded-image",
+        name="figure.png",
+        image=SimpleNamespace(size=(180, 100)),
+    )
     monkeypatch.setattr(pdf_parser.pdfplumber, "open", lambda *_args, **_kwargs: FakePdf())
+    monkeypatch.setattr(
+        pdf_parser,
+        "PdfReader",
+        lambda _path: SimpleNamespace(
+            pages=[SimpleNamespace(images=[fake_image]), SimpleNamespace(images=[fake_image])]
+        ),
+    )
 
     parsed = pdf_parser.parse_pdf("fixture.pdf")
 
@@ -659,10 +677,17 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
     paragraph = next(block for block in parsed.blocks if "improved substantially" in block.text)
     assert paragraph.page_number == 1
     assert paragraph.heading_path == ["3 Results"]
+    assert paragraph.element_id.startswith("el-")
+    assert len(parsed.assets) == 2
+    assert parsed.assets[0].caption == "Figure 1: Retrieval pipeline"
+    assert parsed.assets[0].asset_id in next(
+        block for block in parsed.blocks if block.block_type == "caption"
+    ).asset_ids
 
 
 def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_path):
     state = build_memory_state()
+    state.settings.data_dir = str(tmp_path / "data")
     file_path = tmp_path / "paper.pdf"
     file_path.write_bytes(b"%PDF fixture")
     extracted = documents.ExtractedDocument(
@@ -670,6 +695,20 @@ def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_pa
         extraction_mode="native_structured",
         page_count=1,
         parser_version=pdf_parser.PARSER_VERSION,
+        assets=[
+            pdf_parser.PdfAsset(
+                asset_id="p1-img-0123456789abcdef",
+                page_number=1,
+                bounding_box=(40, 120, 240, 220),
+                data=b"fixture-image",
+                extension=".png",
+                mime_type="image/png",
+                sha256="0123456789abcdef",
+                caption="Figure 1: Measured result",
+                width=200,
+                height=100,
+            ),
+        ],
         blocks=[
             pdf_parser.DocumentBlock(
                 text="4 Findings",
@@ -687,6 +726,8 @@ def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_pa
                 heading_path=["4 Findings"],
                 bounding_box=(40, 80, 280, 105),
                 block_index=1,
+                element_id="el-measured-result",
+                asset_ids=["p1-img-0123456789abcdef"],
             ),
         ],
     )
@@ -702,7 +743,7 @@ def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_pa
         state.sqlite,
         """
         SELECT block_type, section_heading, heading_path, page_number, page_end,
-               block_index, bounding_box, parser_version
+               block_index, bounding_box, parser_version, provenance_json
         FROM chunks WHERE doc_id = ?
         """,
         (result["doc_id"],),
@@ -714,6 +755,68 @@ def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_pa
     assert chunk["heading_path"] == '["4 Findings"]'
     assert (chunk["page_number"], chunk["page_end"], chunk["block_index"]) == (1, 1, 1)
     assert chunk["parser_version"] == pdf_parser.PARSER_VERSION
+    assert '"element_ids": ["el-measured-result"]' in chunk["provenance_json"]
+    asset = storage.fetchone(
+        state.sqlite,
+        "SELECT id, filename, caption FROM document_assets WHERE doc_id = ?",
+        (result["doc_id"],),
+    )
+    assert asset["id"] == "p1-img-0123456789abcdef"
+    assert asset["caption"] == "Figure 1: Measured result"
+    assert (tmp_path / "data" / "document-assets" / result["doc_id"] / asset["filename"]).read_bytes() == b"fixture-image"
+    hydrated = retrieval.hydrate_sources(
+        state,
+        [{
+            "id": f"{result['doc_id']}_0",
+            "doc_id": result["doc_id"],
+            "text": "The measured result was 81.7.",
+            "score": 0.9,
+        }],
+    )
+    assert hydrated[0].element_ids == ["el-measured-result"]
+    assert hydrated[0].assets[0].url.endswith("/assets/p1-img-0123456789abcdef")
+    response = document_routes.get_document_asset(
+        SimpleNamespace(app=SimpleNamespace(state=state)),
+        result["doc_id"],
+        "p1-img-0123456789abcdef",
+    )
+    assert response.media_type == "image/png"
+    assert response.path.endswith(asset["filename"])
+
+
+def test_pdf_asset_reindex_rollback_restores_previous_files(tmp_path):
+    doc_id = "11111111-1111-1111-1111-111111111111"
+    old = pdf_parser.PdfAsset(
+        asset_id="p1-img-old",
+        page_number=1,
+        bounding_box=None,
+        data=b"old",
+        extension=".png",
+        mime_type="image/png",
+        sha256="old",
+    )
+    first = document_assets.AssetTransaction.prepare(str(tmp_path), doc_id, [old])
+    first.promote()
+    first.finalize()
+
+    new = pdf_parser.PdfAsset(
+        asset_id="p1-img-new",
+        page_number=1,
+        bounding_box=None,
+        data=b"new",
+        extension=".png",
+        mime_type="image/png",
+        sha256="new",
+    )
+    replacement = document_assets.AssetTransaction.prepare(str(tmp_path), doc_id, [new])
+    replacement.promote()
+    replacement.rollback()
+
+    active = tmp_path / "document-assets" / doc_id
+    assert (active / "p1-img-old.png").read_bytes() == b"old"
+    assert not (active / "p1-img-new.png").exists()
+    document_assets.delete_document_assets(str(tmp_path), doc_id)
+    assert not active.exists()
 
 
 def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
@@ -1115,10 +1218,15 @@ def test_context_compressor_keeps_relevant_cited_sentences():
         )
     ]
 
-    compressed, stats = retrieval.compress_context("stress supplements", sources, max_sentences=2)
+    compressed, stats, evidence_by_source = retrieval.compress_context(
+        "stress supplements",
+        sources,
+        max_sentences=2,
+    )
 
     assert "[[src:S1]]" in compressed
     assert "Ashwagandha" in compressed
+    assert evidence_by_source["S1"].startswith("Ashwagandha")
     assert stats["kept_sentences"] == 2
     assert 0 < stats["context_relevance"] <= 1
 
