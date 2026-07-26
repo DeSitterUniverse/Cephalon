@@ -1,4 +1,5 @@
 import type { SourceChunk } from "../../api";
+import { apiUrl } from "../../api/client";
 
 type Props = {
   sources: SourceChunk[];
@@ -35,7 +36,30 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
               {source.fusion_score != null && <span>rrf {source.fusion_score.toFixed(3)}</span>}
               {source.rerank_score != null && <span>rerank {source.rerank_score.toFixed(3)}</span>}
             </div>
-            <p>{source.snippet}</p>
+            {source.evidence_text && (
+              <div className="source-evidence">
+                <span>Evidence sent to model</span>
+                <p>{source.evidence_text}</p>
+              </div>
+            )}
+            {(!source.evidence_text || source.evidence_text !== source.snippet) && (
+              <details className="source-raw">
+                <summary>Retrieved chunk</summary>
+                <p>{source.snippet}</p>
+              </details>
+            )}
+            {source.assets?.map(asset => (
+              <figure className="source-asset" key={asset.asset_id}>
+                <img
+                  src={apiUrl(asset.url)}
+                  alt={asset.caption || `Extracted figure on page ${asset.page_number}`}
+                  loading="lazy"
+                />
+                <figcaption>
+                  {asset.caption || `Embedded image · page ${asset.page_number}`}
+                </figcaption>
+              </figure>
+            ))}
             {onOpenDocument && (
               <button className="source-document-link" type="button" onClick={() => onOpenDocument(source.doc_id)}>
                 Open document

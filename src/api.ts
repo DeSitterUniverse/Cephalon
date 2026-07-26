@@ -56,6 +56,7 @@ export type SourceChunk = {
   parent_id?: string | null;
   score: number;
   snippet: string;
+  evidence_text?: string | null;
   vector_score?: number | null;
   lexical_score?: number | null;
   fusion_score?: number | null;
@@ -68,6 +69,18 @@ export type SourceChunk = {
   page_end?: number | null;
   block_index?: number | null;
   bounding_box?: [number, number, number, number] | null;
+  element_ids?: string[];
+  provenance?: Record<string, unknown>;
+  assets?: Array<{
+    asset_id: string;
+    page_number: number;
+    bounding_box?: [number, number, number, number] | null;
+    mime_type: string;
+    caption?: string | null;
+    width?: number | null;
+    height?: number | null;
+    url: string;
+  }>;
 };
 export type StoredMessage = Message & {
   id: string;
@@ -86,9 +99,12 @@ export type CitationSupport = {
   reason: string;
   score?: number | null;
   rerank_score?: number | null;
+  claim_ids?: string[];
+  claims?: string[];
+  evidence?: string | null;
 };
 export type AnswerSupport = {
-  status: "supported" | "weak" | "unsupported";
+  status: "supported" | "weak" | "unsupported" | "not_applicable";
   citations: CitationSupport[];
   accounting?: {
     citation_count: number;
@@ -96,6 +112,9 @@ export type AnswerSupport = {
     cited_source_ids: string[];
     valid_source_ids: string[];
     invalid_source_ids: string[];
+    duplicate_source_ids: string[];
+    malformed_citations: string[];
+    uncited_source_ids: string[];
     available_source_count: number;
     uncited_source_count: number;
     citation_precision: number;
@@ -451,7 +470,7 @@ export async function queryModel(
   history: Message[],
   settings?: RagSettings,
   conversation_id?: string | null,
-  retrieval_scope = "auto",
+  retrieval_scope = "medium",
   response_effort = "balanced",
   signal?: AbortSignal,
 ): Promise<ReadableStream<Uint8Array>> {

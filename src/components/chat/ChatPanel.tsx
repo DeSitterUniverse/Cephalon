@@ -46,7 +46,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [retrievalScope, setRetrievalScope] = useState("auto");
+  const [retrievalScope, setRetrievalScope] = useState("medium");
   const [responseEffort, setResponseEffort] = useState("balanced");
   const [responsePhase, setResponsePhase] = useState("");
   const setSelectedSources = useUiStore(state => state.setSelectedSources);

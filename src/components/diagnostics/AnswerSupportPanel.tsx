@@ -27,6 +27,27 @@ export function AnswerSupportPanel({ support }: Props) {
               {support.accounting.invalid_source_ids.length > 0 && (
                 <span>{support.accounting.invalid_source_ids.length} invalid</span>
               )}
+              {support.accounting.duplicate_source_ids.length > 0 && (
+                <span>{support.accounting.duplicate_source_ids.length} duplicated</span>
+              )}
+              {support.accounting.malformed_citations.length > 0 && (
+                <span>{support.accounting.malformed_citations.length} malformed</span>
+              )}
+            </div>
+            {support.accounting.uncited_source_ids.length > 0 && (
+              <p>Unused evidence: {support.accounting.uncited_source_ids.join(", ")}</p>
+            )}
+            <div className="claim-list">
+              {support.claim_validation!.claims.map(claim => (
+                <div className="claim-row" key={claim.claim_id}>
+                  <div className="source-head">
+                    <strong>{claim.claim_id}</strong>
+                    <span>{claim.status}</span>
+                  </div>
+                  <p>{claim.text}</p>
+                  <small>{claim.reason}</small>
+                </div>
+              ))}
             </div>
           </article>
         )}
@@ -50,6 +71,18 @@ export function AnswerSupportPanel({ support }: Props) {
               <span>{citation.status}</span>
             </div>
             <p>{citation.reason}</p>
+            {citation.claims?.map((claim, index) => (
+              <div className="citation-claim" key={`${citation.chunk_id}:claim:${index}`}>
+                <span>Cited claim</span>
+                <p>{claim}</p>
+              </div>
+            ))}
+            {citation.evidence && (
+              <div className="source-evidence">
+                <span>Evidence</span>
+                <p>{citation.evidence}</p>
+              </div>
+            )}
             <div className="source-metrics">
               {citation.score != null && <span>score {citation.score.toFixed(3)}</span>}
               {citation.rerank_score != null && <span>rerank {citation.rerank_score.toFixed(3)}</span>}

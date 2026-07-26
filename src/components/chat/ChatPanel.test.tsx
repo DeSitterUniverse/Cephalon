@@ -72,7 +72,7 @@ describe("ChatPanel", () => {
   it("shows retrieval scope control next to the composer", () => {
     render(<ChatPanel selectedModel="local.gguf" modelReady settings={ragSettings} />);
 
-    expect(screen.getByLabelText("Retrieval scope")).toHaveValue("auto");
+    expect(screen.getByLabelText("Retrieval scope")).toHaveValue("medium");
     expect(screen.getByText("Low retrieval")).toBeInTheDocument();
     expect(screen.getByText("High retrieval")).toBeInTheDocument();
     expect(screen.getByLabelText("Response effort")).toHaveValue("balanced");
@@ -141,7 +141,7 @@ describe("ChatPanel", () => {
       [],
       ragSettings,
       undefined,
-      "auto",
+      "medium",
       "balanced",
       expect.any(AbortSignal),
     );
