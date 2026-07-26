@@ -460,13 +460,38 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
     chunk_ids = [res["id"] for res in results if res.get("doc_id") != "core_memory"]
     provenance_map: dict[str, dict[str, Any]] = {}
+    asset_map: dict[tuple[str, str], dict[str, Any]] = {}
+    if doc_ids:
+        placeholders = ",".join("?" * len(doc_ids))
+        asset_rows = storage.fetchall(
+            app_state.sqlite,
+            f"""
+            SELECT id, doc_id, page_number, bounding_box, mime_type, caption,
+                   width, height
+            FROM document_assets
+            WHERE doc_id IN ({placeholders})
+            """,
+            tuple(doc_ids),
+        )
+        for row in asset_rows:
+            bbox = _json_metadata(row["bounding_box"], None)
+            asset_map[(row["doc_id"], row["id"])] = {
+                "asset_id": row["id"],
+                "page_number": row["page_number"],
+                "bounding_box": tuple(bbox) if isinstance(bbox, list) and len(bbox) == 4 else None,
+                "mime_type": row["mime_type"],
+                "caption": row["caption"],
+                "width": row["width"],
+                "height": row["height"],
+                "url": f"/documents/{row['doc_id']}/assets/{row['id']}",
+            }
     if chunk_ids:
         placeholders = ",".join("?" * len(chunk_ids))
         rows = storage.fetchall(
             app_state.sqlite,
             f"""
             SELECT id, block_type, section_heading, heading_path, page_number,
-                   page_end, block_index, bounding_box
+                   page_end, block_index, bounding_box, provenance_json
             FROM chunks
             WHERE id IN ({placeholders})
             """,
@@ -475,6 +500,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         for row in rows:
             heading_path = _json_metadata(row["heading_path"], [])
             bounding_box = _json_metadata(row["bounding_box"], None)
+            provenance = _json_metadata(row["provenance_json"], {})
             provenance_map[row["id"]] = {
                 "block_type": row["block_type"],
                 "section_heading": row["section_heading"],
@@ -483,6 +509,8 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
                 "page_end": row["page_end"],
                 "block_index": row["block_index"],
                 "bounding_box": tuple(bounding_box) if isinstance(bounding_box, list) and len(bounding_box) == 4 else None,
+                "element_ids": provenance.get("element_ids", []) if isinstance(provenance, dict) else [],
+                "provenance": provenance if isinstance(provenance, dict) else {},
             }
 
     sources: list[SourceChunk] = []
@@ -492,6 +520,12 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         text = res["text"].strip()
         source_id = f"S{rank}"
         provenance = provenance_map.get(res["id"], {})
+        source_asset_ids = provenance.get("provenance", {}).get("asset_ids", [])
+        source_assets = [
+            asset_map[(doc_id, asset_id)]
+            for asset_id in source_asset_ids
+            if (doc_id, asset_id) in asset_map
+        ]
         sources.append(SourceChunk(
             rank=rank,
             source_id=source_id,
@@ -506,6 +540,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
             snippet=text[:500],
             subquery_id=subquery_id or ",".join(res.get("subquery_ids", [])) or None,
+            assets=source_assets,
             **provenance,
         ))
     return sources
@@ -810,7 +845,11 @@ def _sentence_relevance(query_terms: set[str], sentence: str) -> float:
     return len(query_terms & sentence_terms) / len(query_terms | sentence_terms)
 
 
-def compress_context(query: str, sources: list[CompressionSource], max_sentences: int = 10) -> tuple[str, dict[str, Any]]:
+def compress_context(
+    query: str,
+    sources: list[CompressionSource],
+    max_sentences: int = 10,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
     query_terms = _term_set(query)
     candidates: list[dict[str, Any]] = []
     for source in sources:
@@ -844,13 +883,19 @@ def compress_context(query: str, sources: list[CompressionSource], max_sentences
     total_sentences = len(candidates)
     relevant_total = sum(1 for item in candidates if item["relevant"])
     compressed = "\n".join(f"[[src:{item['source_id']}]] {item['sentence']}" for item in kept)
+    evidence_by_source: dict[str, list[str]] = {}
+    for item in kept:
+        evidence_by_source.setdefault(item["source_id"], []).append(item["sentence"])
     stats = {
         "input_sentences": total_sentences,
         "kept_sentences": len(kept),
         "relevant_sentence_count": relevant_total,
         "context_relevance": round(relevant_total / total_sentences, 6) if total_sentences else 0.0,
     }
-    return compressed, stats
+    return compressed, stats, {
+        source_id: "\n".join(evidence)
+        for source_id, evidence in evidence_by_source.items()
+    }
 
 
 def confidence_from_sources(sources: list[SourceChunk], settings: RagSettings | None = None) -> dict[str, Any]:
@@ -990,6 +1035,8 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             source = source_by_chunk.get(res["id"])
             if res["doc_id"] == CORE_MEMORY_DOC_ID:
                 context_chunks.append(format_source_context(source.source_id or "S1", "Past conversation", res["id"], res["text"]))
+                if source:
+                    source.evidence_text = res["text"].strip()
                 continue
             label = source.doc_name if source else "Unknown"
             if location := source_location_label(source):
@@ -1005,10 +1052,16 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             compression_inputs.append(CompressionSource(source_id=source_id, text=compression_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
 
     if compression_inputs:
-        compressed_context, compression_stats = compress_context(prompt, compression_inputs, max_sentences=max(6, settings.rerank_top_n * 3))
+        compressed_context, compression_stats, evidence_by_source = compress_context(
+            prompt,
+            compression_inputs,
+            max_sentences=max(6, settings.rerank_top_n * 3),
+        )
         if compressed_context:
             memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
             context_chunks = memory_context + [compressed_context]
+            for source in all_sources:
+                source.evidence_text = evidence_by_source.get(source.source_id or "")
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 

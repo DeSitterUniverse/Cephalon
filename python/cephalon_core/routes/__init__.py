@@ -533,7 +533,16 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                 },
                 meta=query_meta,
             )
-            storage.save_message_sources(app_state.sqlite, assistant_message["id"], [source.model_dump() for source in sources])
+            used_source_ids = set(support_payload["accounting"]["valid_source_ids"])
+            storage.save_message_sources(
+                app_state.sqlite,
+                assistant_message["id"],
+                [
+                    source.model_dump()
+                    for source in sources
+                    if source.source_id in used_source_ids
+                ],
+            )
             if rag_settings.conversation_memory and answer_text.strip():
                 await retrieval.save_permanent_memory(
                     app_state,

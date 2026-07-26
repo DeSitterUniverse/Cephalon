@@ -27,6 +27,11 @@ class RagSettings(BaseModel):
     no_answer_min_rerank_score: float = 0.15
     no_answer_min_vector_score: float = 0.05
     no_answer_min_source_count: int = 1
+    # Accepted for one compatibility release, but intentionally omitted from
+    # serialized settings and all active chunking/config hashes.
+    chunk_size: int | None = Field(default=None, exclude=True, deprecated=True)
+    chunk_overlap: int | None = Field(default=None, exclude=True, deprecated=True)
+    full_context: bool | None = Field(default=None, exclude=True, deprecated=True)
 
     @field_validator("top_k")
     @classmethod
@@ -101,7 +106,7 @@ class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
     conversation_id: str | None = None
-    retrieval_scope: Literal["auto", "off", "low", "medium", "high"] = "auto"
+    retrieval_scope: Literal["auto", "off", "low", "medium", "high"] = "medium"
     response_effort: Literal["quick", "balanced", "thorough"] = "balanced"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None
@@ -156,6 +161,17 @@ class TagRequest(BaseModel):
     tag: str
 
 
+class SourceAsset(BaseModel):
+    asset_id: str
+    page_number: int
+    bounding_box: tuple[float, float, float, float] | None = None
+    mime_type: str
+    caption: str | None = None
+    width: int | None = None
+    height: int | None = None
+    url: str
+
+
 class SourceChunk(BaseModel):
     rank: int
     source_id: str | None = None
@@ -165,6 +181,7 @@ class SourceChunk(BaseModel):
     parent_id: str | None = None
     score: float
     snippet: str
+    evidence_text: str | None = None
     vector_score: float | None = None
     lexical_score: float | None = None
     fusion_score: float | None = None
@@ -177,6 +194,9 @@ class SourceChunk(BaseModel):
     page_end: int | None = None
     block_index: int | None = None
     bounding_box: tuple[float, float, float, float] | None = None
+    element_ids: list[str] = Field(default_factory=list)
+    provenance: dict = Field(default_factory=dict)
+    assets: list[SourceAsset] = Field(default_factory=list)
 
 
 class QueryEnvelope(BaseModel):

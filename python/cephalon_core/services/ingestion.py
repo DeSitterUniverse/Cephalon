@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from .. import storage
 from ..schemas import RagSettings
 from . import documents
+from . import document_assets
 from . import observability
 from .retrieval import ensure_vector_table, get_embedding, get_embeddings, vector_table_name
 from .pdf_parser import DocumentBlock
@@ -63,6 +64,7 @@ async def process_single_file(
 
     doc_id = existing_doc_id or str(uuid.uuid4())
     persistence_started = False
+    asset_transaction = None
     try:
         content_hash = await asyncio.to_thread(documents.get_file_hash, file_path)
         existing = documents.find_existing_doc_by_hash(app_state.sqlite, content_hash)
@@ -194,6 +196,13 @@ async def process_single_file(
             row["vector"] = vector
 
         await _report_progress(progress, "persisting", 90)
+        if os.path.splitext(file_path)[1].lower() == ".pdf":
+            asset_transaction = await asyncio.to_thread(
+                document_assets.AssetTransaction.prepare,
+                app_state.settings.data_dir,
+                doc_id,
+                extracted.assets,
+            )
         previous_vectors = None
         if existing_doc_id:
             previous_vectors = await asyncio.to_thread(_replace_document_vectors, app_state, doc_id, lance_data)
@@ -215,8 +224,12 @@ async def process_single_file(
                 embedding_config_hash=f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
                 parser_version=parser_version,
                 parse_warnings=parse_warnings,
+                asset_rows=asset_transaction.rows if asset_transaction else [],
+                before_commit=asset_transaction.promote if asset_transaction else None,
             )
         except Exception:
+            if asset_transaction is not None:
+                asset_transaction.rollback()
             if existing_doc_id:
                 await asyncio.to_thread(_restore_document_vectors, app_state, doc_id, previous_vectors or [])
             else:
@@ -224,9 +237,13 @@ async def process_single_file(
             raise
 
         documents.mark_document_ready(app_state.sqlite, doc_id, child_count)
+        if asset_transaction is not None:
+            asset_transaction.finalize()
         await _report_progress(progress, "complete", 100)
         return {"status": "ready", "path": file_path, "doc_id": doc_id, "chunks": child_count, "extraction_mode": extraction_mode}
     except Exception as exc:
+        if asset_transaction is not None:
+            asset_transaction.rollback()
         if existing_doc_id:
             previous_count = storage.fetchone(app_state.sqlite, "SELECT COUNT(*) AS count FROM chunks WHERE doc_id = ?", (doc_id,))
             storage.execute(
@@ -252,6 +269,8 @@ def _replace_document_rows(
     embedding_config_hash: str,
     parser_version: str,
     parse_warnings: list[str],
+    asset_rows: list[tuple],
+    before_commit: Callable[[], None] | None = None,
 ) -> None:
     with storage.SQLITE_LOCK:
         cursor = sqlite_conn.cursor()
@@ -261,6 +280,7 @@ def _replace_document_rows(
             cursor.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
             cursor.execute("DELETE FROM summary_nodes WHERE doc_id = ?", (doc_id,))
             cursor.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM document_assets WHERE doc_id = ?", (doc_id,))
             cursor.executemany(
                 """
                 INSERT INTO parent_chunks (id, doc_id, parent_index, text, summary, token_count, created_at)
@@ -294,6 +314,16 @@ def _replace_document_rows(
                 "INSERT INTO chunks_fts (chunk_id, doc_id, text) VALUES (?, ?, ?)",
                 fts_rows,
             )
+            cursor.executemany(
+                """
+                INSERT INTO document_assets (
+                    id, doc_id, page_number, bounding_box, filename, mime_type,
+                    sha256, caption, width, height, size_bytes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                asset_rows,
+            )
             cursor.execute(
                 """
                 UPDATE documents
@@ -311,6 +341,8 @@ def _replace_document_rows(
                     doc_id,
                 ),
             )
+            if before_commit is not None:
+                before_commit()
             sqlite_conn.commit()
         except Exception:
             sqlite_conn.rollback()
@@ -616,6 +648,16 @@ def _child_from_blocks(blocks: list[DocumentBlock], *, text: str | None = None) 
         provenance={
             "source_block_indices": [block.block_index for block in blocks],
             "source_block_types": [block.block_type for block in blocks],
+            "element_ids": [
+                block.element_id
+                for block in blocks
+                if block.element_id
+            ],
+            "asset_ids": list(dict.fromkeys(
+                asset_id
+                for block in blocks
+                for asset_id in block.asset_ids
+            )),
         },
     )
 

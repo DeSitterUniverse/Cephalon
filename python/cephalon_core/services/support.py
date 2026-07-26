@@ -7,6 +7,7 @@ from ..schemas import SourceChunk
 
 
 SOURCE_TAG_PATTERN = re.compile(r"\[\[\s*src\s*:\s*([A-Za-z0-9_-]+)\s*\]\]", re.IGNORECASE)
+SOURCE_LIKE_PATTERN = re.compile(r"\[\[[^\]\n]*src[^\]\n]*(?:\]\]|$)", re.IGNORECASE | re.MULTILINE)
 CLAIM_SPLIT_PATTERN = re.compile(
     r"(?<=[.!?])\s+(?!\[\[\s*src\s*:)|\n+",
     re.IGNORECASE,
@@ -67,7 +68,13 @@ def classify_citation_support(
 
 
 def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dict[str, Any]:
+    raw_tags = [match.group(0) for match in SOURCE_TAG_PATTERN.finditer(answer_text or "")]
     cited_source_ids = extract_cited_source_ids(answer_text)
+    malformed_citations = [
+        match.group(0)
+        for match in SOURCE_LIKE_PATTERN.finditer(answer_text or "")
+        if SOURCE_TAG_PATTERN.fullmatch(match.group(0)) is None
+    ]
     source_by_id = {
         source.source_id.upper(): source
         for source in sources
@@ -86,7 +93,11 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         else:
             citations.append(classify_citation_support(source.chunk_id, sources))
 
-    if not citations:
+    if malformed_citations:
+        status = "unsupported"
+    elif not citations and not sources:
+        status = "not_applicable"
+    elif not citations:
         status = "unsupported"
     elif any(item["status"] == "unsupported" for item in citations):
         status = "unsupported"
@@ -106,17 +117,38 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         if str(citation["chunk_id"]).startswith("unknown:")
     ]
     available_source_ids = [source_id for source_id in source_by_id]
+    duplicate_source_ids = sorted({
+        source_id
+        for source_id in cited_source_ids
+        if sum(1 for raw in raw_tags if SOURCE_TAG_PATTERN.fullmatch(raw).group(1).upper() == source_id) > 1
+    })
+    uncited_source_ids = sorted(set(available_source_ids) - set(cited_source_ids))
+    claim_validation = validate_answer_claims(answer_text, sources)
+    claim_ids_by_source: dict[str, list[str]] = {}
+    claim_text_by_source: dict[str, list[str]] = {}
+    for claim in claim_validation["claims"]:
+        for source_id in claim["source_ids"]:
+            claim_ids_by_source.setdefault(source_id, []).append(claim["claim_id"])
+            claim_text_by_source.setdefault(source_id, []).append(claim["text"])
+    for citation in citations:
+        source_id = citation.get("source_id")
+        source = source_by_id.get(str(source_id).upper()) if source_id else None
+        citation["claim_ids"] = claim_ids_by_source.get(str(source_id), [])
+        citation["claims"] = claim_text_by_source.get(str(source_id), [])
+        citation["evidence"] = (source.evidence_text or source.snippet) if source else None
     accounting = {
-        "citation_count": len(SOURCE_TAG_PATTERN.findall(answer_text or "")),
+        "citation_count": len(raw_tags),
         "unique_citation_count": len(cited_source_ids),
         "cited_source_ids": cited_source_ids,
         "valid_source_ids": valid_source_ids,
         "invalid_source_ids": invalid_source_ids,
         "available_source_count": len(available_source_ids),
-        "uncited_source_count": len(set(available_source_ids) - set(cited_source_ids)),
+        "duplicate_source_ids": duplicate_source_ids,
+        "malformed_citations": malformed_citations,
+        "uncited_source_ids": uncited_source_ids,
+        "uncited_source_count": len(uncited_source_ids),
         "citation_precision": round(len(valid_source_ids) / len(cited_source_ids), 6) if cited_source_ids else 0.0,
     }
-    claim_validation = validate_answer_claims(answer_text, sources)
     if claim_validation["unsupported_claim_count"] > 0:
         status = "unsupported"
     elif claim_validation["weak_claim_count"] > 0 and status == "supported":
@@ -148,7 +180,10 @@ def validate_answer_claims(answer_text: str, sources: list[SourceChunk]) -> dict
         known_sources = [source_by_id[source_id] for source_id in cited_ids if source_id in source_by_id]
         unknown_ids = [source_id for source_id in cited_ids if source_id not in source_by_id]
         coverage_by_source = {
-            source.source_id or "unknown": _term_coverage(claim_terms, _claim_terms(source.snippet))
+            source.source_id or "unknown": _term_coverage(
+                claim_terms,
+                _claim_terms(source.evidence_text or source.snippet),
+            )
             for source in known_sources
         }
         best_coverage = max(coverage_by_source.values(), default=0.0)
@@ -189,6 +224,35 @@ def validate_answer_claims(answer_text: str, sources: list[SourceChunk]) -> dict
         "uncited_claim_count": sum(claim["status"] == "uncited" for claim in claims),
         "claims": claims,
     }
+
+
+def sources_from_context(context: str) -> list[SourceChunk]:
+    """Reconstruct only the evidence text actually present in a model prompt."""
+    matches = list(SOURCE_TAG_PATTERN.finditer(context or ""))
+    evidence_by_id: dict[str, list[str]] = {}
+    order: list[str] = []
+    for index, match in enumerate(matches):
+        source_id = match.group(1).upper()
+        if source_id not in evidence_by_id:
+            evidence_by_id[source_id] = []
+            order.append(source_id)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(context)
+        evidence = context[match.end():end].strip()
+        if evidence:
+            evidence_by_id[source_id].append(evidence)
+    return [
+        SourceChunk(
+            rank=index,
+            source_id=source_id,
+            doc_id=f"context:{source_id}",
+            doc_name="Model-visible evidence",
+            chunk_id=f"context:{source_id}",
+            score=1.0,
+            snippet="\n".join(evidence_by_id[source_id]),
+            evidence_text="\n".join(evidence_by_id[source_id]),
+        )
+        for index, source_id in enumerate(order, start=1)
+    ]
 
 
 def _claim_statements(answer_text: str) -> list[str]:

@@ -8,11 +8,9 @@ import uuid
 import docx
 import openpyxl
 import pptx
-from pypdf import PdfReader
-
 from .. import storage
 from ..validators import is_supported_file
-from .pdf_parser import DocumentBlock, PARSER_VERSION as PDF_PARSER_VERSION, parse_pdf
+from .pdf_parser import DocumentBlock, PdfAsset, PARSER_VERSION as PDF_PARSER_VERSION, parse_pdf
 
 SKIPPED_DIRECTORY_NAMES = {
     ".git",
@@ -32,6 +30,7 @@ class ExtractedDocument:
     page_count: int | None = None
     warnings: list[str] = field(default_factory=list)
     parser_version: str = "cephalon-basic-2026-05"
+    assets: list[PdfAsset] = field(default_factory=list)
 
 
 def get_file_hash(path: str) -> str:
@@ -86,12 +85,7 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
         return read_text_fallback(path), "text"
 
     if ext == ".pdf":
-        text_runs = []
-        for page in PdfReader(path).pages:
-            text = page.extract_text()
-            if text:
-                text_runs.append(text)
-        return "\n".join(text_runs), "native"
+        return parse_pdf(path).text, "native_structured"
     if ext == ".docx":
         doc = docx.Document(path)
         return "\n".join([para.text for para in doc.paragraphs]), "native"
@@ -137,6 +131,7 @@ def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
             page_count=parsed.page_count,
             warnings=parsed.warnings,
             parser_version=parsed.parser_version,
+            assets=parsed.assets,
         )
 
     text, extraction_mode = extract_text(path, force_text=force_text)

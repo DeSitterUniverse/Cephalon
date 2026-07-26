@@ -445,6 +445,27 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         add_column_if_missing(conn, "documents", "stale_reasons", "TEXT")
         mark_migration(conn, "012_stale_index_reasons")
 
+    if not migration_applied(conn, "013_document_assets"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS document_assets (
+                id TEXT NOT NULL,
+                doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                page_number INTEGER NOT NULL,
+                bounding_box TEXT,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                caption TEXT,
+                width INTEGER,
+                height INTEGER,
+                size_bytes INTEGER NOT NULL,
+                PRIMARY KEY (doc_id, id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_assets_doc_page
+                ON document_assets(doc_id, page_number);
+        """)
+        mark_migration(conn, "013_document_assets")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",

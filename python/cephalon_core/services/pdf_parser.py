@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import hashlib
+import os
 import re
 import statistics
 from typing import Any
 
 import pdfplumber
+from pypdf import PdfReader
 
 
 PARSER_VERSION = "cephalon-pdf-layout-2026-07"
@@ -29,6 +32,8 @@ class DocumentBlock:
     block_index: int = 0
     heading_level: int | None = None
     font_size: float | None = None
+    element_id: str | None = None
+    asset_ids: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -37,10 +42,25 @@ class DocumentBlock:
 
 
 @dataclass
+class PdfAsset:
+    asset_id: str
+    page_number: int
+    bounding_box: tuple[float, float, float, float] | None
+    data: bytes = field(repr=False)
+    extension: str = ".bin"
+    mime_type: str = "application/octet-stream"
+    sha256: str = ""
+    caption: str | None = None
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass
 class ParsedPdf:
     text: str
     blocks: list[DocumentBlock]
     page_count: int
+    assets: list[PdfAsset] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     parser_version: str = PARSER_VERSION
 
@@ -60,6 +80,8 @@ class _Line:
 def parse_pdf(path: str) -> ParsedPdf:
     warnings: list[str] = []
     blocks: list[DocumentBlock] = []
+    assets_by_page, asset_warnings = _extract_embedded_images(path)
+    warnings.extend(asset_warnings)
     with pdfplumber.open(path, unicode_norm="NFKC") as pdf:
         page_count = len(pdf.pages)
         for page_number, page in enumerate(pdf.pages, start=1):
@@ -81,6 +103,7 @@ def parse_pdf(path: str) -> ParsedPdf:
                     f"Page {page_number}: no native text was found; OCR is disabled."
                 )
             blocks.extend(page_blocks)
+            _position_page_assets(assets_by_page.get(page_number, []), page)
             page.close()
 
     _mark_repeated_marginalia(blocks, page_count)
@@ -92,8 +115,133 @@ def parse_pdf(path: str) -> ParsedPdf:
     ]
     for index, block in enumerate(searchable):
         block.block_index = index
+        block.element_id = _element_id(block)
+        block.provenance["element_id"] = block.element_id
+    assets = [asset for page_assets in assets_by_page.values() for asset in page_assets]
+    _associate_asset_captions(searchable, assets)
     text = "\n\n".join(block.text.strip() for block in searchable)
-    return ParsedPdf(text=text, blocks=searchable, page_count=page_count, warnings=warnings)
+    return ParsedPdf(
+        text=text,
+        blocks=searchable,
+        page_count=page_count,
+        assets=assets,
+        warnings=warnings,
+    )
+
+
+def _extract_embedded_images(path: str) -> tuple[dict[int, list[PdfAsset]], list[str]]:
+    assets_by_page: dict[int, list[PdfAsset]] = {}
+    warnings: list[str] = []
+    try:
+        reader = PdfReader(path)
+    except Exception as exc:
+        return assets_by_page, [f"Embedded image extraction failed ({exc})."]
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        page_assets: list[PdfAsset] = []
+        try:
+            images = list(page.images)
+        except Exception as exc:
+            warnings.append(f"Page {page_number}: embedded image enumeration failed ({exc}).")
+            continue
+        for image_index, image in enumerate(images):
+            try:
+                data = bytes(image.data)
+                digest = hashlib.sha256(data).hexdigest()
+                extension = os.path.splitext(str(getattr(image, "name", "")))[1].lower()
+                if not re.fullmatch(r"\.[a-z0-9]{1,8}", extension):
+                    extension = ".bin"
+                pil_image = getattr(image, "image", None)
+                width, height = getattr(pil_image, "size", (None, None))
+                page_assets.append(PdfAsset(
+                    asset_id=f"p{page_number}-img-{digest[:20]}",
+                    page_number=page_number,
+                    bounding_box=None,
+                    data=data,
+                    extension=extension,
+                    mime_type=_image_mime_type(extension),
+                    sha256=digest,
+                    width=int(width) if width is not None else None,
+                    height=int(height) if height is not None else None,
+                ))
+            except Exception as exc:
+                warnings.append(
+                    f"Page {page_number}: embedded image {image_index + 1} could not be extracted ({exc})."
+                )
+        if page_assets:
+            assets_by_page[page_number] = page_assets
+    return assets_by_page, warnings
+
+
+def _position_page_assets(assets: list[PdfAsset], page) -> None:
+    """Attach layout coordinates when pdfplumber and pypdf enumerate the same images."""
+    layout_images = list(getattr(page, "images", []) or [])
+    for asset, layout in zip(assets, layout_images):
+        try:
+            asset.bounding_box = tuple(
+                round(float(layout[key]), 3)
+                for key in ("x0", "top", "x1", "bottom")
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+
+def _associate_asset_captions(blocks: list[DocumentBlock], assets: list[PdfAsset]) -> None:
+    captions = [block for block in blocks if block.block_type == "caption" and block.bounding_box]
+    for asset in assets:
+        candidates = [block for block in captions if block.page_number == asset.page_number]
+        if asset.bounding_box:
+            candidates.sort(key=lambda block: (
+                abs(block.bounding_box[1] - asset.bounding_box[3]),
+                abs(block.bounding_box[0] - asset.bounding_box[0]),
+            ))
+        if candidates:
+            caption = candidates[0]
+            asset.caption = caption.text
+            caption.asset_ids.append(asset.asset_id)
+            caption.provenance["asset_ids"] = list(caption.asset_ids)
+        for block in blocks:
+            if (
+                block.page_number == asset.page_number
+                and block.bounding_box
+                and asset.bounding_box
+                and _boxes_near(block.bounding_box, asset.bounding_box)
+                and asset.asset_id not in block.asset_ids
+            ):
+                block.asset_ids.append(asset.asset_id)
+                block.provenance["asset_ids"] = list(block.asset_ids)
+
+
+def _boxes_near(
+    block_box: tuple[float, float, float, float],
+    asset_box: tuple[float, float, float, float],
+) -> bool:
+    horizontal_overlap = min(block_box[2], asset_box[2]) - max(block_box[0], asset_box[0])
+    vertical_gap = min(abs(block_box[1] - asset_box[3]), abs(asset_box[1] - block_box[3]))
+    return horizontal_overlap > 0 and vertical_gap <= 72
+
+
+def _element_id(block: DocumentBlock) -> str:
+    payload = "|".join([
+        str(block.page_number),
+        block.block_type,
+        ",".join(str(value) for value in block.bounding_box or ()),
+        block.text.strip(),
+    ])
+    return f"el-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _image_mime_type(extension: str) -> str:
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".jp2": "image/jp2",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(extension, "application/octet-stream")
 
 
 def _parse_page(page, page_number: int, warnings: list[str]) -> list[DocumentBlock]:

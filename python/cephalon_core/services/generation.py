@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from ..schemas import Message, RagSettings
 from . import models
+from . import support
 from .prompt_budget import budget_prompt
 
 
@@ -233,7 +234,23 @@ def validate_draft_claims(
             raise ValueError("Validator response did not contain a claims list.")
         return {"status": "completed", **parsed}
     except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
-        return {"status": "unavailable", "claims": [], "error": str(exc)}
+        deterministic = support.validate_answer_claims(
+            draft,
+            support.sources_from_context(bounded_context),
+        )
+        return {
+            "status": "deterministic_fallback",
+            "overall": (
+                "unsupported"
+                if deterministic["unsupported_claim_count"] or deterministic["uncited_claim_count"]
+                else "mixed"
+                if deterministic["weak_claim_count"]
+                else "supported"
+            ),
+            "claims": deterministic["claims"],
+            "method": deterministic["method"],
+            "validator_error": str(exc),
+        }
 
 
 def stream_response_events(
