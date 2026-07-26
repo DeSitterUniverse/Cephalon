@@ -36,6 +36,7 @@ const answerSupport: AnswerSupport = {
     invalid_source_ids: [],
     duplicate_source_ids: ["S1"],
     malformed_citations: [],
+    unused_citation_source_ids: [],
     uncited_source_ids: ["S2"],
     available_source_count: 2,
     uncited_source_count: 1,

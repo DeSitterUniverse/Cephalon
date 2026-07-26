@@ -136,6 +136,11 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         citation["claim_ids"] = claim_ids_by_source.get(str(source_id), [])
         citation["claims"] = claim_text_by_source.get(str(source_id), [])
         citation["evidence"] = (source.evidence_text or source.snippet) if source else None
+    unused_citation_source_ids = [
+        source_id
+        for source_id in cited_source_ids
+        if not claim_ids_by_source.get(source_id)
+    ]
     accounting = {
         "citation_count": len(raw_tags),
         "unique_citation_count": len(cited_source_ids),
@@ -145,6 +150,7 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         "available_source_count": len(available_source_ids),
         "duplicate_source_ids": duplicate_source_ids,
         "malformed_citations": malformed_citations,
+        "unused_citation_source_ids": unused_citation_source_ids,
         "uncited_source_ids": uncited_source_ids,
         "uncited_source_count": len(uncited_source_ids),
         "citation_precision": round(len(valid_source_ids) / len(cited_source_ids), 6) if cited_source_ids else 0.0,

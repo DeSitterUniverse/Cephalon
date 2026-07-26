@@ -259,6 +259,14 @@ def _parse_page(page, page_number: int, warnings: list[str]) -> list[DocumentBlo
         if str(word.get("text") or "").strip()
         and not any(_inside_bbox(word, bbox) for bbox in table_boxes)
     ]
+    borderless_blocks, borderless_boxes = _extract_borderless_tables(words, page_number)
+    table_blocks.extend(borderless_blocks)
+    table_boxes.extend(borderless_boxes)
+    words = [
+        word
+        for word in words
+        if not any(_inside_bbox(word, bbox) for bbox in borderless_boxes)
+    ]
     lines = _words_to_lines(words)
     body_size = _body_font_size(lines)
     ordered_lines = _reading_order(lines, float(page.width))
@@ -324,7 +332,7 @@ def _inside_bbox(word: dict[str, Any], bbox: tuple[float, float, float, float]) 
     return bbox[0] <= center_x <= bbox[2] and bbox[1] <= center_y <= bbox[3]
 
 
-def _words_to_lines(words: list[dict[str, Any]], tolerance: float = 3.0) -> list[_Line]:
+def _word_rows(words: list[dict[str, Any]], tolerance: float = 3.0) -> list[list[dict[str, Any]]]:
     rows: list[list[dict[str, Any]]] = []
     for word in sorted(words, key=lambda item: (float(item["top"]), float(item["x0"]))):
         top = float(word["top"])
@@ -340,26 +348,124 @@ def _words_to_lines(words: list[dict[str, Any]], tolerance: float = 3.0) -> list
             target = []
             rows.append(target)
         target.append(word)
+    for row in rows:
+        row.sort(key=lambda item: float(item["x0"]))
+    return rows
+
+
+def _split_word_row(row: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    sizes = [float(item.get("size") or 0) for item in row if float(item.get("size") or 0) > 0]
+    gap_threshold = max(24.0, (statistics.median(sizes) if sizes else 10.0) * 2.4)
+    cells: list[list[dict[str, Any]]] = []
+    for word in row:
+        if cells and float(word["x0"]) - float(cells[-1][-1]["x1"]) > gap_threshold:
+            cells.append([])
+        if not cells:
+            cells.append([])
+        cells[-1].append(word)
+    return cells
+
+
+def _extract_borderless_tables(
+    words: list[dict[str, Any]],
+    page_number: int,
+) -> tuple[list[DocumentBlock], list[tuple[float, float, float, float]]]:
+    candidates: list[tuple[list[list[dict[str, Any]]], float]] = []
+    for row in _word_rows(words):
+        cells = _split_word_row(row)
+        if 2 <= len(cells) <= 12:
+            candidates.append((cells, min(float(word["top"]) for word in row)))
+
+    groups: list[list[list[list[dict[str, Any]]]]] = []
+    current: list[list[list[dict[str, Any]]]] = []
+    previous_top: float | None = None
+    for cells, top in candidates:
+        aligned = (
+            current
+            and len(cells) == len(current[-1])
+            and all(
+                abs(float(cell[0]["x0"]) - float(previous[0]["x0"])) <= 16
+                for cell, previous in zip(cells, current[-1], strict=True)
+            )
+            and previous_top is not None
+            and top - previous_top <= 32
+        )
+        if current and not aligned:
+            groups.append(current)
+            current = []
+        current.append(cells)
+        previous_top = top
+    if current:
+        groups.append(current)
+
+    blocks: list[DocumentBlock] = []
+    boxes: list[tuple[float, float, float, float]] = []
+    for table_index, group in enumerate(groups):
+        if len(group) < 2:
+            continue
+        text_rows = [
+            [_join_words([str(word["text"]) for word in cell]) for cell in row]
+            for row in group
+        ]
+        cell_lengths = [len(cell) for row in text_rows for cell in row if cell]
+        numeric_data_rows = sum(
+            any(re.search(r"\d", cell) for cell in row)
+            for row in text_rows[1:]
+        )
+        if (
+            not cell_lengths
+            or statistics.median(cell_lengths) > 32
+            or (
+                statistics.median(cell_lengths) > 20
+                and numeric_data_rows != len(text_rows) - 1
+            )
+        ):
+            continue
+        flat_words = [word for row in group for cell in row for word in cell]
+        bbox = (
+            round(min(float(word["x0"]) for word in flat_words), 3),
+            round(min(float(word["top"]) for word in flat_words), 3),
+            round(max(float(word["x1"]) for word in flat_words), 3),
+            round(max(float(word["bottom"]) for word in flat_words), 3),
+        )
+        boxes.append(bbox)
+        blocks.append(DocumentBlock(
+            text="\n".join(" | ".join(row) for row in text_rows),
+            page_number=page_number,
+            block_type="table",
+            bounding_box=bbox,
+            provenance={
+                "table_index": table_index,
+                "row_count": len(text_rows),
+                "column_count": len(text_rows[0]),
+                "table_settings": "text_alignment",
+            },
+        ))
+    return blocks, boxes
+
+
+def _words_to_lines(words: list[dict[str, Any]], tolerance: float = 3.0) -> list[_Line]:
+    rows = _word_rows(words, tolerance)
 
     lines: list[_Line] = []
     for row in rows:
-        row.sort(key=lambda item: float(item["x0"]))
-        text = _join_words([str(item["text"]) for item in row])
-        if not text:
-            continue
-        sizes = [float(item.get("size") or 0) for item in row if float(item.get("size") or 0) > 0]
-        fonts = " ".join(str(item.get("fontname") or "") for item in row).lower()
-        lines.append(
-            _Line(
-                text=text,
-                x0=min(float(item["x0"]) for item in row),
-                top=min(float(item["top"]) for item in row),
-                x1=max(float(item["x1"]) for item in row),
-                bottom=max(float(item["bottom"]) for item in row),
-                font_size=statistics.median(sizes) if sizes else 0.0,
-                bold="bold" in fonts or "black" in fonts or "semibold" in fonts,
+        for segment in _split_word_row(row):
+            text = _join_words([str(item["text"]) for item in segment])
+            if not text:
+                continue
+            sizes = [float(item.get("size") or 0) for item in segment if float(item.get("size") or 0) > 0]
+            fonts = " ".join(str(item.get("fontname") or "") for item in segment).lower()
+            lines.append(
+                _Line(
+                    text=text,
+                    x0=min(float(item["x0"]) for item in segment),
+                    top=min(float(item["top"]) for item in segment),
+                    x1=max(float(item["x1"]) for item in segment),
+                    bottom=max(float(item["bottom"]) for item in segment),
+                    font_size=statistics.median(sizes) if sizes else 0.0,
+                    bold="bold" in fonts or "black" in fonts or "semibold" in fonts,
+                )
             )
-        )
     return lines
 
 

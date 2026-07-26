@@ -112,9 +112,10 @@ export type AnswerSupport = {
     cited_source_ids: string[];
     valid_source_ids: string[];
     invalid_source_ids: string[];
-    duplicate_source_ids: string[];
-    malformed_citations: string[];
-    uncited_source_ids: string[];
+    duplicate_source_ids?: string[];
+    malformed_citations?: string[];
+    unused_citation_source_ids?: string[];
+    uncited_source_ids?: string[];
     available_source_count: number;
     uncited_source_count: number;
     citation_precision: number;

@@ -27,15 +27,18 @@ export function AnswerSupportPanel({ support }: Props) {
               {support.accounting.invalid_source_ids.length > 0 && (
                 <span>{support.accounting.invalid_source_ids.length} invalid</span>
               )}
-              {support.accounting.duplicate_source_ids.length > 0 && (
-                <span>{support.accounting.duplicate_source_ids.length} duplicated</span>
+              {(support.accounting.duplicate_source_ids?.length || 0) > 0 && (
+                <span>{support.accounting.duplicate_source_ids!.length} duplicated</span>
               )}
-              {support.accounting.malformed_citations.length > 0 && (
-                <span>{support.accounting.malformed_citations.length} malformed</span>
+              {(support.accounting.malformed_citations?.length || 0) > 0 && (
+                <span>{support.accounting.malformed_citations!.length} malformed</span>
+              )}
+              {(support.accounting.unused_citation_source_ids?.length || 0) > 0 && (
+                <span>{support.accounting.unused_citation_source_ids!.length} unattached</span>
               )}
             </div>
-            {support.accounting.uncited_source_ids.length > 0 && (
-              <p>Unused evidence: {support.accounting.uncited_source_ids.join(", ")}</p>
+            {(support.accounting.uncited_source_ids?.length || 0) > 0 && (
+              <p>Unused evidence: {support.accounting.uncited_source_ids!.join(", ")}</p>
             )}
             <div className="claim-list">
               {support.claim_validation!.claims.map(claim => (

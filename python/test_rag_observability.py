@@ -241,6 +241,7 @@ def test_answer_support_accounts_only_for_citations_used_in_the_answer():
         "invalid_source_ids": ["S9"],
         "duplicate_source_ids": ["S1"],
         "malformed_citations": [],
+        "unused_citation_source_ids": ["S9"],
         "uncited_source_ids": ["S2"],
         "available_source_count": 2,
         "uncited_source_count": 1,
@@ -315,6 +316,8 @@ def test_answer_support_exposes_claim_evidence_and_malformed_tags():
     assert result["accounting"]["malformed_citations"] == ["[[src S2]]"]
     assert result["citations"][0]["claim_ids"] == ["C1"]
     assert result["citations"][0]["evidence"] == source.evidence_text
+    unattached = support.classify_answer_support("[[src:S1]]", [source])
+    assert unattached["accounting"]["unused_citation_source_ids"] == ["S1"]
 
 
 def test_schema_initialization_is_idempotent_and_observability_tables_exist():
