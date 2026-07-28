@@ -180,12 +180,15 @@ class SourceChunk(BaseModel):
     chunk_id: str
     parent_id: str | None = None
     score: float
+    final_score: float | None = None
     snippet: str
     evidence_text: str | None = None
     vector_score: float | None = None
     lexical_score: float | None = None
     fusion_score: float | None = None
     rerank_score: float | None = None
+    reranker_raw_score: float | None = None
+    listwise_rank: int | None = None
     subquery_id: str | None = None
     block_type: str | None = None
     section_heading: str | None = None

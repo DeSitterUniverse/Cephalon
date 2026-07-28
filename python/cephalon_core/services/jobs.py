@@ -6,7 +6,7 @@ import uuid
 from .. import storage
 from ..events import EventBus
 from .documents import collect_obsidian_files, collect_supported_files
-from .ingestion import process_single_file
+from .ingestion import process_single_file, refresh_document_staleness
 
 
 class JobManager:
@@ -35,16 +35,16 @@ class JobManager:
             except asyncio.CancelledError:
                 pass
 
-    async def enqueue_ingest(self, path: str, kind: str = "ingest", *, target_doc_id: str | None = None, force_text: bool = False) -> dict:
+    async def enqueue_ingest(self, path: str, kind: str = "ingest", *, target_doc_id: str | None = None, force_text: bool = False, reindex_run_id: str | None = None) -> dict:
         now = int(time.time())
         job_id = str(uuid.uuid4())
         storage.execute(
             self.app_state.sqlite,
             """
-            INSERT INTO jobs (id, kind, path, status, total_files, processed_files, skipped_files, created_at, updated_at, target_doc_id, force_text)
-            VALUES (?, ?, ?, 'queued', 0, 0, 0, ?, ?, ?, ?)
+            INSERT INTO jobs (id, kind, path, status, total_files, processed_files, skipped_files, created_at, updated_at, target_doc_id, force_text, reindex_run_id)
+            VALUES (?, ?, ?, 'queued', 0, 0, 0, ?, ?, ?, ?, ?)
             """,
-            (job_id, kind, path, now, now, target_doc_id, 1 if force_text else 0),
+            (job_id, kind, path, now, now, target_doc_id, 1 if force_text else 0, reindex_run_id),
         )
         await self.event_bus.publish("job", self.get_job(job_id), job_id)
         await self.queue.put(job_id)
@@ -174,10 +174,16 @@ class JobManager:
                 stage="complete",
                 stage_progress=100,
             )
+            if job["kind"] == "reindex":
+                stale = refresh_document_staleness(self.app_state)
+                self.app_state.reindex_required = bool(stale["stale_document_count"])
 
     async def _update_job(self, job_id: str, **fields) -> None:
         fields["updated_at"] = int(time.time())
         assignments = ", ".join(f"{key} = ?" for key in fields)
         params = tuple(fields.values()) + (job_id,)
         storage.execute(self.app_state.sqlite, f"UPDATE jobs SET {assignments} WHERE id = ?", params)
-        await self.event_bus.publish("job", self.get_job(job_id), job_id)
+        job = self.get_job(job_id)
+        if job.get("reindex_run_id"):
+            storage.refresh_reindex_run(self.app_state.sqlite, job["reindex_run_id"])
+        await self.event_bus.publish("job", job, job_id)

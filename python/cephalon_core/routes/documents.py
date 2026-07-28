@@ -102,6 +102,8 @@ async def delete_tag(request: Request, doc_id: str, tag: str):
 
 @router.post("/documents/{doc_id}/reindex")
 async def reindex_document(request: Request, doc_id: str):
+    if getattr(request.app.state, "retrieval_error", None):
+        raise HTTPException(status_code=503, detail=request.app.state.retrieval_error)
     doc_id = validate_document_id(doc_id)
     row = storage.fetchone(
         request.app.state.sqlite,

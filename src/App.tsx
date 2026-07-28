@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,7 +9,8 @@ import {
   deleteConversation,
   deleteDocument,
   deleteDocumentTag,
-  downloadOnnxModels,
+  deleteFixedModel,
+  downloadFixedModel,
   exportMetrics,
   getConversation,
   getConversations,
@@ -19,23 +20,27 @@ import {
   getIndexHealth,
   getLlamaServerSettings,
   getModels,
-  getOnnxSetupStatus,
+  getFixedRetrievalStatus,
+  getReindexProgress,
   getEvalRuns,
   getRetrievalTrace,
   getRetrievalTraces,
   getSettings,
   ingestPath,
-  installLocalOnnxModel,
   loadModel,
   reindexDocument,
+  reindexAllDocuments,
+  reindexStaleDocuments,
   renameConversation,
   runEval,
   updateDocument,
   updateLlamaServerSettings,
   updateSettings,
+  verifyFixedModel,
+  openFixedModelDirectory,
   type Document,
   type HealthResponse,
-  type OnnxModelKind,
+  type FixedModelKind,
 } from "./api";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { ConfirmDialog } from "./components/feedback/ConfirmDialog";
@@ -85,6 +90,7 @@ export default function App() {
   const rightPanel = useUiStore(state => state.rightPanel);
   const setRightPanel = useUiStore(state => state.setRightPanel);
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const completedReindexRunId = useRef<string | undefined>(undefined);
 
   useEventStream();
 
@@ -93,7 +99,8 @@ export default function App() {
   const documentsQuery = useQuery({ queryKey: ["documents"], queryFn: getDocuments, enabled: bootReady });
   const conversationsQuery = useQuery({ queryKey: ["conversations"], queryFn: getConversations, enabled: bootReady });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: bootReady });
-  const onnxStatusQuery = useQuery({ queryKey: ["onnx-setup"], queryFn: getOnnxSetupStatus, enabled: bootReady && rightPanel === "settings" });
+  const retrievalStatusQuery = useQuery({ queryKey: ["retrieval-stack"], queryFn: getFixedRetrievalStatus, enabled: bootReady && rightPanel === "settings", refetchInterval: 4000 });
+  const reindexProgressQuery = useQuery({ queryKey: ["reindex-progress"], queryFn: getReindexProgress, enabled: bootReady && rightPanel === "settings", refetchInterval: 1500 });
   const tracesQuery = useQuery({ queryKey: ["retrieval-traces"], queryFn: getRetrievalTraces, enabled: bootReady && rightPanel === "trace" });
   const traceQuery = useQuery({
     queryKey: ["retrieval-trace", selectedTraceId],
@@ -132,8 +139,23 @@ export default function App() {
     mutationFn: (doc: Document) => reindexDocument(doc.id),
     onSuccess: data => {
       notify(data.message || "Reindex queued.", "success");
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      queryClient.invalidateQueries({ queryKey: ["reindex-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["retrieval-stack"] });
     },
   });
+
+  useEffect(() => {
+    const progress = reindexProgressQuery.data;
+    if (
+      !progress?.run_id
+      || !["completed", "completed_with_errors"].includes(progress.status)
+      || completedReindexRunId.current === progress.run_id
+    ) return;
+    completedReindexRunId.current = progress.run_id;
+    void queryClient.invalidateQueries({ queryKey: ["documents"] });
+    void queryClient.invalidateQueries({ queryKey: ["retrieval-stack"] });
+  }, [queryClient, reindexProgressQuery.data]);
 
   const loadModelMutation = useMutation({
     mutationFn: () => loadModel(),
@@ -173,25 +195,31 @@ export default function App() {
     onError: error => notify(error instanceof Error ? error.message : "Failed to export metrics.", "error"),
   });
 
-  const onnxDownloadMutation = useMutation({
-    mutationFn: (kind: OnnxModelKind) => downloadOnnxModels(kind),
-    onMutate: (kind) => notify(kind === "all" ? "Downloading ONNX engines..." : `Downloading ${kind} ONNX engine...`),
-    onSuccess: () => {
-      notify("ONNX model setup finished. Restart the backend to load the new engines.", "success");
-      queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
-    },
-    onError: error => notify(error instanceof Error ? error.message : "Failed to set up ONNX models.", "error"),
+  const modelDownloadMutation = useMutation({
+    mutationFn: (kind: FixedModelKind) => downloadFixedModel(kind),
+    onSuccess: () => { notify("Model downloaded and verified. Restart Cephalon to start its dedicated runtime.", "success"); queryClient.invalidateQueries({ queryKey: ["retrieval-stack"] }); },
+    onError: error => notify(error instanceof Error ? error.message : "Model download failed.", "error"),
   });
-
-  const onnxInstallMutation = useMutation({
-    mutationFn: ({ kind, path }: { kind: "embedder" | "reranker"; path: string }) => installLocalOnnxModel(kind, path),
-    onSuccess: () => {
-      notify("ONNX model folder installed. Restart the backend to load the new engine.", "success");
-      queryClient.invalidateQueries({ queryKey: ["onnx-setup"] });
-      queryClient.invalidateQueries({ queryKey: ["health"] });
+  const modelVerifyMutation = useMutation({
+    mutationFn: (kind: FixedModelKind) => verifyFixedModel(kind),
+    onSuccess: data => notify(data.verified ? "Model integrity verified." : "Model integrity check failed.", data.verified ? "success" : "error"),
+    onError: error => notify(error instanceof Error ? error.message : "Verification failed.", "error"),
+  });
+  const modelOpenMutation = useMutation({ mutationFn: (kind: FixedModelKind) => openFixedModelDirectory(kind), onError: error => notify(error instanceof Error ? error.message : "Could not open model directory.", "error") });
+  const modelDeleteMutation = useMutation({
+    mutationFn: (kind: FixedModelKind) => deleteFixedModel(kind),
+    onSuccess: () => { notify("Model cache removed.", "success"); queryClient.invalidateQueries({ queryKey: ["retrieval-stack"] }); },
+    onError: error => notify(error instanceof Error ? error.message : "Could not delete model cache.", "error"),
+  });
+  const bulkReindexMutation = useMutation({
+    mutationFn: (mode: "full" | "stale") => mode === "full" ? reindexAllDocuments() : reindexStaleDocuments(),
+    onSuccess: data => {
+      notify(`${data.total} document${data.total === 1 ? "" : "s"} queued for reindexing.`, "success");
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      queryClient.invalidateQueries({ queryKey: ["reindex-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["retrieval-stack"] });
     },
-    onError: error => notify(error instanceof Error ? error.message : "Failed to install ONNX model folder.", "error"),
+    onError: error => notify(error instanceof Error ? error.message : "Could not queue reindexing.", "error"),
   });
 
   const newConversationMutation = useMutation({
@@ -236,7 +264,7 @@ export default function App() {
           const health = await getHealth();
           setBootHealth(health);
           setBootStatus(health.startup_error ? "Local backend reached; retrieval setup needs attention." : "Local backend is ready.");
-          if (!health.engines_ready || health.onnx_setup?.startup_error) {
+          if (!health.engines_ready) {
             setRightPanel("settings");
             notify("Embedding and reranking setup needed.", "error");
           }
@@ -339,16 +367,6 @@ export default function App() {
       .catch(error => notify(error instanceof Error ? error.message : "Failed to queue text import.", "error"));
   }
 
-  async function browseOnnxFolder(kind: "embedder" | "reranker") {
-    if (!isTauriRuntime()) {
-      notify("Model folder browsing is available in the Tauri app.");
-      return;
-    }
-    const defaultPath = onnxStatusQuery.data?.[kind]?.path || onnxStatusQuery.data?.model_dir;
-    const selectedPath = await openDialog({ directory: true, multiple: false, defaultPath });
-    if (selectedPath && typeof selectedPath === "string") onnxInstallMutation.mutate({ kind, path: selectedPath });
-  }
-
   function removeDocument(doc: Document) {
     confirm({
       title: "Delete document?",
@@ -367,10 +385,14 @@ export default function App() {
         ragSettings={settingsQuery.data}
         onSaveRagSettings={(settings) => settingsMutation.mutate(settings)}
         isSavingRagSettings={settingsMutation.isPending}
-        onnxStatus={onnxStatusQuery.data}
-        isDownloadingModels={onnxDownloadMutation.isPending || onnxInstallMutation.isPending}
-        onDownloadOnnx={(kind) => onnxDownloadMutation.mutate(kind)}
-        onBrowseOnnx={browseOnnxFolder}
+        retrievalStatus={retrievalStatusQuery.data}
+        reindexProgress={reindexProgressQuery.data}
+        isDownloadingModels={modelDownloadMutation.isPending || modelVerifyMutation.isPending || modelDeleteMutation.isPending}
+        onDownloadModel={(kind) => modelDownloadMutation.mutate(kind)}
+        onVerifyModel={(kind) => modelVerifyMutation.mutate(kind)}
+        onOpenModel={(kind) => modelOpenMutation.mutate(kind)}
+        onDeleteModel={(kind) => confirm({ title: "Delete model cache?", message: `Delete the local ${kind} model cache? Retrieval will be unavailable until it is downloaded again.`, confirmLabel: "Delete cache", onConfirm: () => modelDeleteMutation.mutate(kind) })}
+        onReindex={(mode) => bulkReindexMutation.mutate(mode)}
         onExportMetrics={() => metricsMutation.mutate()}
       />
     )

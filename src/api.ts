@@ -55,12 +55,15 @@ export type SourceChunk = {
   chunk_id: string;
   parent_id?: string | null;
   score: number;
+  final_score?: number | null;
   snippet: string;
   evidence_text?: string | null;
   vector_score?: number | null;
   lexical_score?: number | null;
   fusion_score?: number | null;
   rerank_score?: number | null;
+  reranker_raw_score?: number | null;
+  listwise_rank?: number | null;
   subquery_id?: string | null;
   block_type?: string | null;
   section_heading?: string | null;
@@ -99,6 +102,8 @@ export type CitationSupport = {
   reason: string;
   score?: number | null;
   rerank_score?: number | null;
+  reranker_raw_score?: number | null;
+  listwise_rank?: number | null;
   claim_ids?: string[];
   claims?: string[];
   evidence?: string | null;
@@ -225,6 +230,42 @@ export type HealthResponse = {
     table?: string;
   };
   embedding?: { model_id: string; dimension: number; table: string };
+  retrieval_error?: string | null;
+  retrieval_stack?: FixedRetrievalStatus;
+};
+
+export type FixedModelKind = "embedder" | "reranker";
+export type FixedModelInfo = {
+  kind: FixedModelKind;
+  name: string;
+  model_id: string;
+  revision: string;
+  path: string;
+  model_file?: string | null;
+  installed: boolean;
+  dimension?: number | null;
+  verified?: boolean;
+  sha256?: string | null;
+  sha256_expected?: string | null;
+  trust_remote_code?: boolean;
+  runtime: Record<string, unknown>;
+};
+export type FixedRetrievalStatus = {
+  fixed_stack: true;
+  embedder: FixedModelInfo;
+  reranker: FixedModelInfo;
+  reindex_required: boolean;
+};
+export type ReindexProgress = {
+  run_id?: string;
+  status: "idle" | "queued" | "running" | "completed" | "completed_with_errors";
+  processed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  stale_document_count: number;
+  reindex_required: boolean;
 };
 
 export type OnnxModelKind = "embedder" | "reranker" | "all";
@@ -340,6 +381,38 @@ export function installLocalOnnxModel(kind: Exclude<OnnxModelKind, "all">, path:
     method: "POST",
     body: JSON.stringify({ kind, path }),
   });
+}
+
+export function getFixedRetrievalStatus(): Promise<FixedRetrievalStatus> {
+  return requestJson<FixedRetrievalStatus>("/models/status");
+}
+
+export function downloadFixedModel(kind: FixedModelKind) {
+  return requestJson<{ status: string; restart_required: boolean; model: FixedModelInfo }>("/models/download", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function verifyFixedModel(kind: FixedModelKind): Promise<FixedModelInfo> {
+  return requestJson<FixedModelInfo>("/models/verify", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function deleteFixedModel(kind: FixedModelKind) {
+  return requestJson<{ status: string; kind: FixedModelKind; path: string }>("/models/delete", { method: "POST", body: JSON.stringify({ kind, confirmed: true }) });
+}
+
+export function openFixedModelDirectory(kind: FixedModelKind) {
+  return requestJson<{ status: string; path: string }>("/models/open", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function getReindexProgress(): Promise<ReindexProgress> {
+  return requestJson<ReindexProgress>("/reindex/progress");
+}
+
+export function reindexAllDocuments() {
+  return requestJson<{ status: string; total: number }>("/reindex/full", { method: "POST" });
+}
+
+export function reindexStaleDocuments() {
+  return requestJson<{ status: string; total: number }>("/reindex/stale", { method: "POST" });
 }
 
 export function getDocuments(): Promise<DocumentsResponse> {

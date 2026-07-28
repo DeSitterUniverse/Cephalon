@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from .. import storage
 from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
-from ..services import evaluation, generation, ingestion, metrics, models, observability, onnx_setup, retrieval, support
+from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, onnx_setup, retrieval, support
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
 from .documents import delete_document, get_documents, router as documents_router
@@ -135,12 +135,13 @@ def _empty_retrieval_meta(route: dict, *, evidence_required: bool) -> dict:
 @router.get("/health")
 def health(request: Request):
     app_state = state(request)
+    retrieval_error = getattr(app_state, "retrieval_error", None)
     return {
         "service": "cephalon",
         "api_version": 1,
-        "status": "degraded" if app_state.startup_error else "ok",
+        "status": "degraded" if app_state.startup_error or retrieval_error else "ok",
         "startup_error": app_state.startup_error,
-        "engines_ready": app_state.startup_error is None,
+        "engines_ready": app_state.startup_error is None and retrieval_error is None,
         "data_dir": app_state.settings.data_dir,
         "model_dir": app_state.settings.model_dir,
         "metrics_dir": app_state.settings.metrics_dir,
@@ -150,8 +151,8 @@ def health(request: Request):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
-        "onnx_warmup": getattr(app_state, "onnx_warmup", None),
-        "onnx_setup": onnx_setup.runtime_status(app_state),
+        "retrieval_error": retrieval_error,
+        "onnx_setup": {"legacy": True, "active": False},
         "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
@@ -161,40 +162,77 @@ def health(request: Request):
             "dimension": storage.active_embedding_metadata(app_state)["embedding_dim"],
             "table": retrieval.vector_table_name(app_state),
         },
+        "retrieval_stack": jina_runtime.model_status(app_state),
     }
 
 
 @router.get("/models/onnx/status")
 def get_onnx_status(request: Request):
-    app_state = state(request)
-    return onnx_setup.runtime_status(app_state)
+    # Legacy migration surface only: ONNX models cannot be activated.
+    return {"legacy": True, "active": False, "message": "Cephalon now uses the fixed Jina Nano + Jina v3.5 stack."}
 
 
 @router.post("/models/onnx/install-local")
 def install_local_onnx(request: Request, req: OnnxInstallLocalRequest):
-    app_state = state(request)
-    try:
-        payload = onnx_setup.install_local(app_state.settings, req.kind, req.path)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    app_state.onnx_setup = onnx_setup.runtime_status(app_state)
-    return {"status": "installed", "kind": req.kind, "restart_required": True, "model": payload, "setup": app_state.onnx_setup}
+    raise HTTPException(status_code=410, detail="Local ONNX installation is retired; only the fixed Jina models are supported.")
 
 
 @router.post("/models/onnx/download")
 def download_onnx(request: Request, req: OnnxDownloadRequest):
+    raise HTTPException(status_code=410, detail="ONNX retrieval setup is retired. Use POST /models/download for the fixed Jina stack.")
+
+
+@router.get("/models/status")
+def get_model_status(request: Request):
+    return jina_runtime.model_status(state(request))
+
+
+@router.post("/models/download")
+def download_model(request: Request, body: dict):
     app_state = state(request)
     try:
-        if req.kind == "all":
-            payload = onnx_setup.install_all_from_download(app_state.settings)
-        else:
-            payload = onnx_setup.download(app_state.settings, req.kind, req.repo_id, req.subfolder)
+        payload = jina_runtime.download_model(app_state, str(body.get("kind", "")))
+        # Downloads are intentionally not hot-loaded: a restart provides a
+        # predictable model process boundary and avoids replacing active files.
+        return {"status": "downloaded", "restart_required": True, "model": payload}
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/models/verify")
+def verify_model(request: Request, body: dict):
+    try:
+        return jina_runtime.verify_model(state(request), str(body.get("kind", "")))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    app_state.onnx_setup = onnx_setup.runtime_status(app_state)
-    return {"status": "installed", "kind": req.kind, "restart_required": True, "model": payload, "setup": app_state.onnx_setup}
+
+
+@router.post("/models/delete")
+def delete_model(request: Request, body: dict):
+    if body.get("confirmed") is not True:
+        raise HTTPException(status_code=400, detail="Model deletion requires confirmed: true.")
+    try:
+        return jina_runtime.delete_model(state(request), str(body.get("kind", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/models/open")
+def open_model_directory(request: Request, body: dict):
+    try:
+        return jina_runtime.open_model_directory(state(request), str(body.get("kind", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/runtime/embedder/status")
+def get_embedder_runtime(request: Request):
+    return jina_runtime.embedder_status(state(request))
+
+
+@router.get("/runtime/reranker/status")
+def get_reranker_runtime(request: Request):
+    return jina_runtime.reranker_status(state(request))
 
 
 @router.get("/models")
@@ -294,9 +332,66 @@ async def put_settings(request: Request, rag_settings: RagSettings):
 
 @router.post("/ingest")
 async def ingest_endpoint(request: Request, req: IngestRequest):
+    if getattr(state(request), "retrieval_error", None):
+        raise HTTPException(status_code=503, detail=state(request).retrieval_error)
     target_path = normalize_existing_path(req.path)
     job = await state(request).job_manager.enqueue_ingest(target_path, force_text=req.force_text)
     return {"job_id": job["id"], "status": job["status"], "message": "Ingestion queued."}
+
+
+async def _queue_reindex(request: Request, *, stale_only: bool) -> dict:
+    app_state = state(request)
+    if getattr(app_state, "retrieval_error", None):
+        raise HTTPException(status_code=503, detail=app_state.retrieval_error)
+    ingestion.refresh_document_staleness(app_state)
+    clause = "AND stale_embedding = 1" if stale_only else ""
+    rows = storage.fetchall(
+        app_state.sqlite,
+        # A reindex must retain its previous searchable document on failure.
+        # Include earlier interrupted runs with existing chunks, but never use
+        # document status as a job-queue state.
+        f"SELECT id, path, extraction_mode FROM documents WHERE type = 'file' AND (status = 'ready' OR chunk_count > 0) {clause} ORDER BY display_name, path",
+    )
+    run = storage.create_reindex_run(app_state.sqlite, "stale" if stale_only else "full", len(rows))
+    job_ids = []
+    for row in rows:
+        job = await app_state.job_manager.enqueue_ingest(
+            row["path"], kind="reindex", target_doc_id=row["id"], force_text=row["extraction_mode"] == "text", reindex_run_id=run["id"],
+        )
+        job_ids.append(job["id"])
+    app_state.reindex_required = bool(rows)
+    return {"status": run["status"], "run_id": run["id"], "mode": run["mode"], "total": len(rows), "job_ids": job_ids}
+
+
+@router.post("/reindex/full")
+async def reindex_full(request: Request):
+    return await _queue_reindex(request, stale_only=False)
+
+
+@router.post("/reindex/stale")
+async def reindex_stale(request: Request):
+    return await _queue_reindex(request, stale_only=True)
+
+
+@router.get("/reindex/progress")
+def reindex_progress(request: Request):
+    app_state = state(request)
+    stale = ingestion.refresh_document_staleness(app_state)
+    run = storage.latest_reindex_run(app_state.sqlite)
+    app_state.reindex_required = bool(stale["stale_document_count"])
+    if run is None:
+        return {"status": "idle", "processed": 0, "total": 0, "succeeded": 0, "failed": 0, "cancelled": 0, "stale_document_count": stale["stale_document_count"], "reindex_required": app_state.reindex_required}
+    return {
+        "run_id": run["id"],
+        "status": run["status"],
+        "processed": run["processed_documents"],
+        "total": run["total_documents"],
+        "succeeded": run["succeeded_documents"],
+        "failed": run["failed_documents"],
+        "cancelled": run["cancelled_documents"],
+        "stale_document_count": stale["stale_document_count"],
+        "reindex_required": app_state.reindex_required,
+    }
 
 
 @router.get("/jobs")
@@ -358,6 +453,8 @@ async def create_eval_run(request: Request, body: EvalRunRequest):
     app_state = state(request)
     if app_state.startup_error:
         raise HTTPException(status_code=503, detail=app_state.startup_error)
+    if getattr(app_state, "retrieval_error", None) or getattr(app_state, "reindex_required", False):
+        raise HTTPException(status_code=503, detail=getattr(app_state, "retrieval_error", None) or "The 768-dimensional Jina index requires reindexing.")
     settings = storage.get_rag_settings(app_state.sqlite).model_copy(update={"top_k": body.top_k, "rerank_top_n": min(body.top_k, 10)})
     retrieved_by_id = {}
     for item in body.evals:
@@ -439,6 +536,10 @@ async def chat_and_remember(request: Request, req: QueryRequest):
         evidence_required=base_rag_settings.evidence_required,
     )
     rag_settings = _settings_for_retrieval_scope(base_rag_settings, retrieval_route["resolved"])
+    if retrieval_route["retrieve"] and getattr(app_state, "retrieval_error", None):
+        raise HTTPException(status_code=503, detail=app_state.retrieval_error)
+    if retrieval_route["retrieve"] and getattr(app_state, "reindex_required", False):
+        raise HTTPException(status_code=409, detail="The previous 1024-dimensional index is stale. Reindex documents before querying retrieval.")
     _ensure_query_model_loaded(app_state, req.model)
 
     async def response_stream():

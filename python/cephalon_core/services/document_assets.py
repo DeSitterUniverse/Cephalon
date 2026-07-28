@@ -37,9 +37,21 @@ class AssetTransaction:
         os.makedirs(staging)
 
         rows: list[tuple] = []
+        seen_assets: dict[str, str] = {}
         for asset in assets:
             if not ASSET_ID_PATTERN.fullmatch(asset.asset_id):
                 raise ValueError(f"Unsafe PDF asset identifier: {asset.asset_id!r}")
+            # PDFs may reference the same embedded image more than once on a
+            # page.  Its content-addressed ID remains the provenance key, so
+            # store it once rather than failing the entire reindex on a second
+            # identical image.  Different bytes under one ID would indicate a
+            # parser bug and must remain a hard failure.
+            prior_digest = seen_assets.get(asset.asset_id)
+            if prior_digest is not None:
+                if prior_digest != asset.sha256:
+                    raise ValueError(f"Conflicting PDF asset payload for {asset.asset_id!r}")
+                continue
+            seen_assets[asset.asset_id] = asset.sha256
             filename = f"{asset.asset_id}{asset.extension}"
             target = os.path.join(staging, filename)
             with open(target, "xb") as file:

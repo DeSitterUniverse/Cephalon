@@ -16,7 +16,7 @@ from cephalon_core.routes import documents as document_routes
 from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta, create_app
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import document_assets, generation, ingestion, metrics, pdf_parser, retrieval
+from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -113,6 +113,9 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CEPHALON_MODEL_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("CEPHALON_PORT", "9999")
     monkeypatch.setenv("CEPHALON_MAX_TOKENS", "64")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan2")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_GPU_LAYERS", "123")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE", "2048")
     monkeypatch.setenv("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://tauri.localhost")
 
     settings = Settings()
@@ -121,6 +124,9 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.model_dir.endswith("models")
     assert settings.port == 9999
     assert settings.max_tokens == 64
+    assert settings.embedder_device == "Vulkan2"
+    assert settings.embedder_gpu_layers == 123
+    assert settings.embedder_physical_batch_size == 2048
     assert settings.cors_origins == ["http://localhost:1420", "http://tauri.localhost"]
 
 
@@ -1133,34 +1139,22 @@ def test_hydrate_sources_adds_structured_provenance():
     assert retrieval.source_location_label(sources[0]) == "page 7-8 | Experimental Results | table"
 
 
-def test_reranker_scores_candidates_in_one_onnx_batch():
-    class BatchTokenizer:
-        def __call__(self, pairs, **_kwargs):
-            return {
-                "input_ids": np.ones((len(pairs), 8), dtype=np.int64),
-                "attention_mask": np.ones((len(pairs), 8), dtype=np.int64),
-            }
-
-    class BatchSession:
-        def __init__(self):
-            self.calls = 0
-
-        def get_inputs(self):
-            return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
-
-        def run(self, _output_names, ort_inputs):
-            self.calls += 1
-            batch_size = ort_inputs["input_ids"].shape[0]
-            return [np.asarray([[2.0 + index, 0.5] for index in range(batch_size)], dtype=np.float32)]
-
-    session = BatchSession()
+def test_reranker_uses_jina_v35_listwise_indices(monkeypatch):
     state = SimpleNamespace(
-        tokenizer=BatchTokenizer(),
-        reranker=session,
-        reranker_score_mode="logit_margin_0_minus_1",
-        reranker_batch_size=3,
         rerank_cache=OrderedDict(),
+        reranker_runtime_status={},
     )
+    calls = []
+
+    def fake_listwise(_state, query, documents):
+        calls.append((query, documents))
+        return [
+            {"index": 2, "relevance_score": 0.92},
+            {"index": 0, "relevance_score": 0.61},
+            {"index": 1, "relevance_score": -0.08},
+        ]
+
+    monkeypatch.setattr(jina_runtime, "rerank", fake_listwise)
     results = [
         {"id": "a", "text": "first candidate", "score": 0.0},
         {"id": "b", "text": "second candidate", "score": 0.0},
@@ -1169,43 +1163,137 @@ def test_reranker_scores_candidates_in_one_onnx_batch():
 
     ranked = retrieval.rerank(state, "query", results)
 
-    assert session.calls == 1
-    assert all("rerank_score" in item for item in ranked)
-    assert ranked[0]["rerank_score"] > ranked[-1]["rerank_score"]
+    assert calls == [("query", ["first candidate", "second candidate", "third candidate"])]
+    assert [item["id"] for item in ranked] == ["c", "a", "b"]
+    assert ranked[0]["listwise_rank"] == 1
+    assert ranked[0]["reranker_raw_score"] == 0.92
 
 
-def test_embedder_scores_texts_in_one_onnx_batch():
+def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatch):
+    state = build_memory_state()
+    state.rerank_cache = OrderedDict()
+    candidates = [
+        {"id": f"chunk-{index}", "doc_id": f"doc-{index}", "text": f"candidate {index}", "score": 1.0 - index / 100, "dense_rank": 1 if index == 0 else None}
+        for index in range(7)
+    ]
+    rerank_calls = []
+
+    async def fake_search(_state, _prompt, _vector, _settings):
+        return candidates, "dense", {"latency": {}}
+
+    def fake_rerank(_state, _query, rows):
+        rerank_calls.append([row["id"] for row in rows])
+        return [
+            {**row, "reranker_raw_score": 1.0 - rank / 10, "rerank_score": 1.0 - rank / 10, "final_score": 1.0 - rank / 10, "listwise_rank": rank + 1}
+            for rank, row in enumerate(rows)
+        ]
+
+    monkeypatch.setattr(retrieval, "plan_subqueries", lambda _prompt: [{"id": "q0", "text": "question"}])
+    monkeypatch.setattr(retrieval, "_search_once", fake_search)
+    monkeypatch.setattr(retrieval, "rerank", fake_rerank)
+    monkeypatch.setattr(retrieval.metrics, "append_retrieval_event", lambda *_args, **_kwargs: None)
+
+    _context, _sources, meta = asyncio.run(retrieval.retrieve_context(state, "question", [0.0] * 768, RagSettings(top_k=2, rerank_top_n=2)))
+
+    assert rerank_calls == [[f"chunk-{index}" for index in range(7)]]
+    assert len(meta["trace"]["reranked_candidates"]) == 7
+    assert meta["trace"]["reranked_candidates"][0]["reranker_raw_score"] == 1.0
+    assert meta["trace"]["reranked_candidates"][0]["listwise_rank"] == 1
+
+
+def test_reranker_verification_compares_files_with_official_manifest(monkeypatch, tmp_path):
+    model_dir = tmp_path / "reranker"
+    model_dir.mkdir()
+    for filename, content in (("config.json", b"config"), ("tokenizer.json", b"tokenizer")):
+        (model_dir / filename).write_bytes(content)
+    state = build_memory_state()
+    state.settings.reranker_model_dir = str(model_dir)
+    manifest = {
+        "repo_id": "jinaai/jina-reranker-v3.5",
+        "revision": "immutable-test-revision",
+        "files": {
+            filename: {"sha256": jina_runtime._sha256(model_dir / filename), "git_blob_sha1": jina_runtime._git_blob_sha1(model_dir / filename)}
+            for filename in ("config.json", "tokenizer.json")
+        },
+    }
+    monkeypatch.setattr(jina_runtime, "_official_manifest", lambda _repo: manifest)
+
+    assert jina_runtime.verify_model(state, "reranker")["verified"] is True
+    (model_dir / "config.json").write_bytes(b"tampered")
+    invalid = jina_runtime.verify_model(state, "reranker")
+
+    assert invalid["verified"] is False
+    assert "mismatch for config.json" in invalid["error"]
+    assert invalid["revision"] == "immutable-test-revision"
+
+
+def test_pdf_asset_transaction_deduplicates_repeated_content_addressed_asset(tmp_path):
+    asset = pdf_parser.PdfAsset(
+        asset_id="p1-img-0123456789abcdef0123",
+        page_number=1,
+        bounding_box=None,
+        data=b"same image bytes",
+        extension=".png",
+        mime_type="image/png",
+        sha256="0123456789abcdef",
+    )
+
+    transaction = document_assets.AssetTransaction.prepare(str(tmp_path), "doc-1", [asset, asset])
+
+    assert len(transaction.rows) == 1
+    assert len(list(__import__("pathlib").Path(transaction.staging).iterdir())) == 1
+    transaction.rollback()
+
+
+def test_boundaryless_text_is_split_before_embedding():
+    text = " ".join(f"token{index}" for index in range(401))
+    settings = RagSettings(parent_target_tokens=100, parent_max_tokens=100, child_target_tokens=32, child_max_tokens=32)
+
+    parents = ingestion.build_parent_chunks(text, settings)
+    children = asyncio.run(ingestion.build_semantic_child_chunks(build_memory_state(), text, settings))
+
+    assert max(ingestion.estimate_tokens(chunk) for chunk in parents) <= 100
+    assert max(ingestion.estimate_tokens(chunk) for chunk in children) <= 32
+    assert " ".join(parents) == text
+
+
+def test_completed_reindex_progress_is_persisted():
+    state = build_memory_state()
+    run = storage.create_reindex_run(state.sqlite, "full", 2)
+    now = 1778755000
+    for job_id, status in (("complete", "succeeded"), ("failure", "failed")):
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO jobs (id, kind, path, status, created_at, updated_at, reindex_run_id) VALUES (?, 'reindex', ?, ?, ?, ?, ?)",
+            (job_id, f"{job_id}.md", status, now, now, run["id"]),
+        )
+
+    completed = storage.refresh_reindex_run(state.sqlite, run["id"])
+
+    assert completed["status"] == "completed_with_errors"
+    assert completed["processed_documents"] == 2
+    assert completed["succeeded_documents"] == 1
+    assert completed["failed_documents"] == 1
+    assert storage.latest_reindex_run(state.sqlite)["id"] == run["id"]
+
+
+def test_embedder_calls_dedicated_server_in_one_batch(monkeypatch):
     state = build_memory_state()
     state.embedding_dim = storage.active_embedding_metadata()["embedding_dim"]
-    state.embedding_fixed_sequence_length = None
-    state.embedding_pooling = "embedding"
     calls = []
+    state.retrieval_error = None
 
-    class BatchTokenizer:
-        def __call__(self, texts, **_kwargs):
-            count = len(texts)
-            return {
-                "input_ids": np.ones((count, 3), dtype=np.int64),
-                "attention_mask": np.ones((count, 3), dtype=np.int64),
-            }
+    def fake_embed(_state, texts):
+        calls.append(list(texts))
+        return [[float(index + 1)] * state.embedding_dim for index, _ in enumerate(texts)]
 
-    class BatchEmbedder:
-        def run(self, _output_names, ort_inputs):
-            batch_size = ort_inputs["input_ids"].shape[0]
-            calls.append(batch_size)
-            return [np.asarray([
-                [float(index)] * state.embedding_dim
-                for index in range(batch_size)
-            ], dtype=np.float32)]
-
-    state.embed_tokenizer = BatchTokenizer()
-    state.embedder = BatchEmbedder()
+    monkeypatch.setattr(jina_runtime, "embed", fake_embed)
 
     vectors = asyncio.run(retrieval.get_embeddings(state, ["first", "second", "third"]))
 
-    assert calls == [3]
+    assert calls == [["first", "second", "third"]]
     assert len(vectors) == 3
-    assert vectors[1][0] == 1.0
+    assert vectors[1][0] == pytest.approx(1 / np.sqrt(state.embedding_dim))
 
 
 def test_context_compressor_keeps_relevant_cited_sentences():

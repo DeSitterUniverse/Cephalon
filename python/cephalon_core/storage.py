@@ -466,6 +466,26 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "013_document_assets")
 
+    if not migration_applied(conn, "014_reindex_runs"):
+        add_column_if_missing(conn, "jobs", "reindex_run_id", "TEXT")
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS reindex_runs (
+                id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_documents INTEGER NOT NULL,
+                processed_documents INTEGER NOT NULL DEFAULT 0,
+                succeeded_documents INTEGER NOT NULL DEFAULT 0,
+                failed_documents INTEGER NOT NULL DEFAULT 0,
+                cancelled_documents INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_reindex_runs_created ON reindex_runs(created_at DESC);
+        """)
+        mark_migration(conn, "014_reindex_runs")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -673,6 +693,62 @@ def active_embedding_metadata(app_state=None) -> dict[str, int | str]:
         "embedding_model_id": getattr(app_state, "embedding_model_id", EMBEDDING_MODEL_ID) if app_state is not None else EMBEDDING_MODEL_ID,
         "embedding_dim": getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION) if app_state is not None else EMBEDDING_DIMENSION,
     }
+
+
+def create_reindex_run(conn: sqlite3.Connection, mode: str, total_documents: int) -> dict[str, Any]:
+    import uuid
+
+    now = int(time.time())
+    run_id = str(uuid.uuid4())
+    status = "completed" if total_documents == 0 else "queued"
+    execute(
+        conn,
+        """
+        INSERT INTO reindex_runs (id, mode, status, total_documents, created_at, updated_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, mode, status, total_documents, now, now, now if total_documents == 0 else None),
+    )
+    return get_reindex_run(conn, run_id) or {}
+
+
+def get_reindex_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM reindex_runs WHERE id = ?", (run_id,))
+    return row_to_dict(row)
+
+
+def latest_reindex_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM reindex_runs ORDER BY created_at DESC LIMIT 1")
+    return row_to_dict(row)
+
+
+def refresh_reindex_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    run = get_reindex_run(conn, run_id)
+    if not run:
+        return None
+    rows = fetchall(conn, "SELECT status FROM jobs WHERE reindex_run_id = ?", (run_id,))
+    counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("queued", "running", "succeeded", "failed", "cancelled")}
+    processed = counts["succeeded"] + counts["failed"] + counts["cancelled"]
+    total = int(run["total_documents"])
+    terminal = processed >= total
+    if terminal:
+        status = "completed" if not counts["failed"] and not counts["cancelled"] else "completed_with_errors"
+    elif counts["running"]:
+        status = "running"
+    else:
+        status = "queued"
+    now = int(time.time())
+    execute(
+        conn,
+        """
+        UPDATE reindex_runs
+        SET status = ?, processed_documents = ?, succeeded_documents = ?, failed_documents = ?,
+            cancelled_documents = ?, updated_at = ?, completed_at = ?
+        WHERE id = ?
+        """,
+        (status, processed, counts["succeeded"], counts["failed"], counts["cancelled"], now, now if terminal else None, run_id),
+    )
+    return get_reindex_run(conn, run_id)
 
 
 def create_conversation(conn: sqlite3.Connection, title: str | None = None) -> dict[str, Any]:

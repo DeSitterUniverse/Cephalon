@@ -1,6 +1,6 @@
-import { Download, FolderOpen, Save } from "lucide-react";
+import { Download, FolderOpen, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { LlamaServerSettings, OnnxSetupStatus, RagSettings } from "../../api";
+import type { FixedModelInfo, FixedModelKind, FixedRetrievalStatus, LlamaServerSettings, RagSettings, ReindexProgress } from "../../api";
 import { useUiStore } from "../../store";
 
 type Props = {
@@ -10,10 +10,16 @@ type Props = {
   ragSettings?: RagSettings;
   onSaveRagSettings?: (settings: RagSettings) => void;
   isSavingRagSettings?: boolean;
-  onnxStatus?: OnnxSetupStatus;
+  retrievalStatus?: FixedRetrievalStatus;
+  reindexProgress?: ReindexProgress;
+  /** Deprecated test-harness compatibility; ONNX is never rendered or used. */
+  onnxStatus?: unknown;
   isDownloadingModels?: boolean;
-  onDownloadOnnx?: (kind: "embedder" | "reranker" | "all") => void;
-  onBrowseOnnx?: (kind: "embedder" | "reranker") => void;
+  onDownloadModel?: (kind: FixedModelKind) => void;
+  onVerifyModel?: (kind: FixedModelKind) => void;
+  onOpenModel?: (kind: FixedModelKind) => void;
+  onDeleteModel?: (kind: FixedModelKind) => void;
+  onReindex?: (mode: "full" | "stale") => void;
   onExportMetrics?: () => void;
 };
 
@@ -24,10 +30,14 @@ export function SettingsPanel({
   ragSettings,
   onSaveRagSettings,
   isSavingRagSettings,
-  onnxStatus,
+  retrievalStatus,
+  reindexProgress,
   isDownloadingModels,
-  onDownloadOnnx,
-  onBrowseOnnx,
+  onDownloadModel,
+  onVerifyModel,
+  onOpenModel,
+  onDeleteModel,
+  onReindex,
   onExportMetrics,
 }: Props) {
   const theme = useUiStore(state => state.theme);
@@ -108,44 +118,17 @@ export function SettingsPanel({
 
         <section className="settings-section">
           <h3>Embedding and reranking</h3>
-          <p className="settings-note">
-            These two ONNX engines power document search. They are separate from your chat model and external llama.cpp server: the Embedder finds relevant text and the Reranker puts the best matches first.
-          </p>
-          <div className="onnx-guide">
-            <strong>Choose one setup method for each engine:</strong>
-            <ol>
-              <li><b>Download default</b> fetches Cephalon’s configured Hugging Face export and replaces the engine in the shown destination.</li>
-              <li><b>Use local folder</b> copies a compatible exported ONNX folder from your computer. It must contain an ONNX model, <code>tokenizer.json</code>, and <code>tokenizer_config.json</code>.</li>
-            </ol>
-            <span>Restart Cephalon after installing or replacing either engine; the running backend does not reload ONNX models automatically. Rerankers are run one query/document pair at a time unless their export has been explicitly validated for larger batches.</span>
+          <p className="settings-note">Cephalon uses one fixed local retrieval stack. It is separate from your chat-generation server; switching backends or dimensions is not supported.</p>
+          <FixedModelRow info={retrievalStatus?.embedder} disabled={isDownloadingModels} onDownload={onDownloadModel} onVerify={onVerifyModel} onOpen={onOpenModel} onDelete={onDeleteModel} />
+          <FixedModelRow info={retrievalStatus?.reranker} disabled={isDownloadingModels} onDownload={onDownloadModel} onVerify={onVerifyModel} onOpen={onOpenModel} onDelete={onDeleteModel} />
+          <div className={retrievalStatus?.reindex_required ? "runtime-line warn" : "runtime-line ok"}>
+            {retrievalStatus?.reindex_required ? "Reindex required: old 1024-dimensional vectors are blocked." : "768-dimensional Jina Nano index is active."}
           </div>
-          {onnxStatus && (
-            <div className={onnxStatus.engines_ready ? "runtime-line ok" : "runtime-line warn"}>
-              {onnxStatus.engines_ready ? "Engines loaded in this backend session." : `Engines not loaded${onnxStatus.startup_error ? `: ${onnxStatus.startup_error}` : "."}`}
-            </div>
-          )}
-          <OnnxRow
-            title="Embedder"
-            info={onnxStatus?.embedder}
-            source={onnxStatus?.download_sources.embedder}
-            disabled={isDownloadingModels}
-            onDownload={() => onDownloadOnnx?.("embedder")}
-            onBrowse={() => onBrowseOnnx?.("embedder")}
-          />
-          <OnnxRow
-            title="Reranker"
-            info={onnxStatus?.reranker}
-            source={onnxStatus?.download_sources.reranker}
-            disabled={isDownloadingModels}
-            onDownload={() => onDownloadOnnx?.("reranker")}
-            onBrowse={() => onBrowseOnnx?.("reranker")}
-          />
           <div className="settings-actions">
-            <button type="button" onClick={() => onDownloadOnnx?.("all")} disabled={isDownloadingModels}>
-              <Download size={14} />
-              {isDownloadingModels ? "Installing" : "Download both defaults"}
-            </button>
+            <button type="button" disabled={isDownloadingModels} onClick={() => onReindex?.("stale")}>Reindex stale only</button>
+            <button type="button" disabled={isDownloadingModels} onClick={() => onReindex?.("full")}>Reindex all documents</button>
           </div>
+          {reindexProgress && <small>Reindex {reindexProgress.status}: {reindexProgress.processed} / {reindexProgress.total} · {reindexProgress.succeeded} succeeded · {reindexProgress.failed} failed · {reindexProgress.stale_document_count} stale document{reindexProgress.stale_document_count === 1 ? "" : "s"}</small>}
         </section>
 
         <section className="settings-section">
@@ -166,43 +149,44 @@ function NumberSetting({ label, value, onChange }: { label: string; value?: numb
   return <label className="field compact-field"><span>{label} tokens</span><input aria-label={label} inputMode="numeric" value={value ?? ""} onChange={event => onChange(Number(event.target.value.replace(/[^0-9]/g, "")) || 0)} /></label>;
 }
 
-function OnnxRow({
-  title,
+function FixedModelRow({
   info,
-  source,
   disabled,
   onDownload,
-  onBrowse,
+  onVerify,
+  onOpen,
+  onDelete,
 }: {
-  title: string;
-  info?: OnnxSetupStatus["embedder"];
-  source?: { repo_id: string; subfolder?: string };
+  info?: FixedModelInfo;
   disabled?: boolean;
-  onDownload: () => void;
-  onBrowse: () => void;
+  onDownload?: (kind: FixedModelKind) => void;
+  onVerify?: (kind: FixedModelKind) => void;
+  onOpen?: (kind: FixedModelKind) => void;
+  onDelete?: (kind: FixedModelKind) => void;
 }) {
-  const ready = info?.ok;
-  const loaded = info?.runtime_loaded;
+  if (!info) return <div className="onnx-row"><small>Checking fixed retrieval stack…</small></div>;
+  const runtime = info.runtime as { status?: string; last_error?: string; last_failure?: string; port?: number; pid?: number; queue_size?: number };
   return (
     <div className="onnx-row">
       <div className="onnx-main">
-        <strong>{title}</strong>
-        <small>{title === "Embedder" ? "Finds semantically relevant document chunks." : "Reorders retrieved chunks by relevance."}</small>
-        <span className={loaded ? "status-text ok" : ready ? "status-text warn" : "status-text warn"}>{loaded ? "loaded" : ready ? "installed, restart to load" : "setup needed"}</span>
-        <small>Default source: {source?.repo_id || "not configured"}{source?.subfolder ? ` / ${source.subfolder}` : ""}</small>
-        <small>Installed at: <code>{info?.path || "not checked"}</code></small>
-        {title === "Reranker" && <small>Validated batch size: {info?.max_batch_size || 1} pair{(info?.max_batch_size || 1) === 1 ? "" : "s"} per inference.</small>}
-        {!ready && <em>{info?.meta_error || (info?.missing?.length ? `missing ${info.missing.join(", ")}` : "status unavailable")}</em>}
+        <strong>{info.name}</strong>
+        <small>{info.kind === "embedder" ? "768-dimensional Nano Retrieval via dedicated llama.cpp." : "Jina v3.5 listwise custom Transformers worker."}</small>
+        <span className={runtime.status === "running" ? "status-text ok" : "status-text warn"}>{runtime.status || (info.installed ? "stopped" : "not installed")}</span>
+        <small>Revision: {info.revision} · Path: <code>{info.path}</code></small>
+        <small>{info.kind === "embedder" ? `Port ${runtime.port ?? "—"} · PID ${runtime.pid ?? "—"} · fixed ${info.dimension}-dim` : `Worker PID ${runtime.pid ?? "—"} · queue ${runtime.queue_size ?? 0} · trust_remote_code`}</small>
+        {(runtime.last_error || runtime.last_failure) && <em>{runtime.last_error || runtime.last_failure}</em>}
       </div>
       <div className="onnx-actions">
-        <button type="button" onClick={onDownload} disabled={disabled} title={`Download and install the default ${title.toLowerCase()} engine`}>
+        <button type="button" onClick={() => onDownload?.(info.kind)} disabled={disabled}>
           <Download size={14} />
-          Download default
+          Download
         </button>
-        <button type="button" onClick={onBrowse} disabled={disabled} title={`Copy an exported ${title.toLowerCase()} ONNX folder into Cephalon`}>
+        <button type="button" onClick={() => onVerify?.(info.kind)} disabled={disabled || !info.installed}><ShieldCheck size={14} />Verify</button>
+        <button type="button" onClick={() => onOpen?.(info.kind)} disabled={disabled}>
           <FolderOpen size={14} />
-          Use local folder
+          Open folder
         </button>
+        <button type="button" onClick={() => onDelete?.(info.kind)} disabled={disabled || !info.installed}><Trash2 size={14} />Delete cache</button>
       </div>
     </div>
   );

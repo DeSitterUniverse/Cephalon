@@ -57,12 +57,14 @@ async def process_single_file(
     existing_doc_id: str | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict:
-    if not os.path.isfile(file_path):
-        return {"status": "failed", "path": file_path, "error": "Path is not a file."}
-    if not documents.collect_supported_files(file_path, force_text=force_text):
-        return {"status": "failed", "path": file_path, "error": "Unsupported file type."}
-
     doc_id = existing_doc_id or str(uuid.uuid4())
+    if not os.path.isfile(file_path):
+        _restore_reindex_document_status(app_state, existing_doc_id, "Path is not a file.")
+        return {"status": "failed", "path": file_path, "doc_id": doc_id, "error": "Path is not a file."}
+    if not documents.collect_supported_files(file_path, force_text=force_text):
+        _restore_reindex_document_status(app_state, existing_doc_id, "Unsupported file type.")
+        return {"status": "failed", "path": file_path, "doc_id": doc_id, "error": "Unsupported file type."}
+
     persistence_started = False
     asset_transaction = None
     try:
@@ -256,6 +258,18 @@ async def process_single_file(
         return {"status": "failed", "path": file_path, "doc_id": doc_id, "error": str(exc)}
 
 
+def _restore_reindex_document_status(app_state, doc_id: str | None, error: str) -> None:
+    """Keep prior indexed documents visible when a source has disappeared."""
+    if not doc_id:
+        return
+    previous_count = storage.fetchone(app_state.sqlite, "SELECT COUNT(*) AS count FROM chunks WHERE doc_id = ?", (doc_id,))
+    storage.execute(
+        app_state.sqlite,
+        "UPDATE documents SET status = 'ready', chunk_count = ?, last_error = ? WHERE id = ?",
+        (previous_count["count"] if previous_count else 0, error, doc_id),
+    )
+
+
 def _replace_document_rows(
     sqlite_conn,
     doc_id: str,
@@ -419,6 +433,18 @@ def _looks_like_row_block(lines: list[str]) -> bool:
         if re.search(r"\d", line) and ("," in line or "\t" in line or "/" in line or re.search(r"\s+\d", line)):
             row_like += 1
     return row_like >= max(2, len(lines) // 2)
+
+
+def _split_units_to_token_limit(units: list[str], maximum: int) -> list[str]:
+    """Split boundary-less input deterministically without losing text."""
+    bounded: list[str] = []
+    for unit in units:
+        words = unit.split()
+        if len(words) <= maximum:
+            bounded.append(unit)
+            continue
+        bounded.extend(" ".join(words[start:start + maximum]) for start in range(0, len(words), maximum))
+    return bounded
 
 
 def _chunking_config(settings: RagSettings) -> dict[str, int]:
@@ -691,7 +717,10 @@ def build_parent_chunks(text: str, settings: RagSettings | None = None) -> list[
     maximum = settings.parent_max_tokens if settings else PARENT_MAX_TOKENS
     if target > maximum:
         target = maximum
-    units = split_text_units(text)
+    # JSON, HTML, CSVs, and malformed PDF fallbacks can contain a single
+    # enormous line with no sentence boundary. Bound it before batching so a
+    # malformed unit cannot make llama.cpp reject the entire document.
+    units = _split_units_to_token_limit(split_text_units(text), maximum)
     parents: list[str] = []
     current: list[str] = []
     current_tokens = 0
@@ -718,7 +747,7 @@ async def build_semantic_child_chunks(app_state, parent_text: str, settings: Rag
     overlap = settings.child_overlap_tokens if settings else 0
     if target > maximum:
         target = maximum
-    units = split_text_units(parent_text)
+    units = _split_units_to_token_limit(split_text_units(parent_text), maximum)
     if not units:
         return []
     # Keep child chunks aligned to sentence/paragraph units, but do not call
