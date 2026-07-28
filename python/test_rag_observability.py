@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from cephalon_core import storage
 from cephalon_core.config import Settings
 from cephalon_core.schemas import RagSettings, SourceChunk
-from cephalon_core.services import evaluation, ingestion, observability, onnx_setup, support
+from cephalon_core.services import evaluation, ingestion, observability, support
 
 
 def build_conn():
@@ -44,34 +44,6 @@ def test_retrieval_trace_persistence_roundtrip():
     assert loaded["candidates"]["fused"][0]["fusion_score"] == 0.032
     assert loaded["candidates"]["reranked"][0]["rerank_score"] == 1.7
     assert loaded["final_context"][0]["source_id"] == "S1"
-
-
-def test_onnx_setup_replaces_local_folder_without_retaining_a_backup(tmp_path, monkeypatch):
-    monkeypatch.setenv("CEPHALON_DATA_DIR", str(tmp_path / "data"))
-    settings = Settings()
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "model.onnx").write_bytes(b"fake")
-    (source / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (source / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-    (source / "onnx_profile.json").write_text(
-        '{"model_id":"jinaai/jina-embeddings-v5-text-small","kind":"embedder","dimension":1024,"validated":true}',
-        encoding="utf-8",
-    )
-    previous = tmp_path / "data" / "models" / "embedder"
-    previous.mkdir(parents=True)
-    (previous / "obsolete.txt").write_text("old engine", encoding="utf-8")
-
-    result = onnx_setup.install_local(settings, "embedder", str(source))
-    current = onnx_setup.status(settings)["embedder"]
-
-    assert result["restart_required"] is True
-    assert current["ok"] is True
-    assert (tmp_path / "data" / "models" / "embedder" / "model.onnx").exists()
-    assert (tmp_path / "data" / "models" / "embedder" / "onnx_profile.json").exists()
-    assert not (tmp_path / "data" / "models" / "embedder" / "obsolete.txt").exists()
-    assert result.get("backup_path") is None
-    assert not list((tmp_path / "data" / "models").glob("embedder.backup-*"))
 
 
 def test_stale_embedding_detection_uses_hashes_versions_and_models():

@@ -901,7 +901,7 @@ select, option { background: #050505; color: var(--text); }
 }
 .runtime-line.ok { color: var(--ok); }
 .runtime-line.warn { color: var(--warn); }
-.onnx-guide {
+.retrieval-guide {
   display: grid;
   gap: 6px;
   margin: 0 0 9px;
@@ -916,10 +916,10 @@ select, option { background: #050505; color: var(--text); }
 .thinking-trace { margin-top: 9px; color: var(--muted); font-size: .78rem; }
 .thinking-trace summary { cursor: pointer; }
 .thinking-trace pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #090909; }
-.onnx-guide strong,
-.onnx-guide b { color: var(--text); }
-.onnx-guide ol { display: grid; gap: 4px; margin: 0; padding-left: 18px; }
-.onnx-guide code { color: var(--text); font-size: inherit; }
+.retrieval-guide strong,
+.retrieval-guide b { color: var(--text); }
+.retrieval-guide ol { display: grid; gap: 4px; margin: 0; padding-left: 18px; }
+.retrieval-guide code { color: var(--text); font-size: inherit; }
 .theme-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -949,7 +949,7 @@ select, option { background: #050505; color: var(--text); }
 .compact-field {
   margin: 0;
 }
-.onnx-row {
+.retrieval-model-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -959,30 +959,30 @@ select, option { background: #050505; color: var(--text); }
   padding: 8px;
   margin-bottom: 7px;
 }
-.onnx-main {
+.retrieval-model-main {
   min-width: 0;
   display: grid;
   gap: 4px;
 }
-.onnx-main strong {
+.retrieval-model-main strong {
   font-size: 0.8rem;
 }
-.onnx-main code,
-.onnx-main small,
-.onnx-main em {
+.retrieval-model-main code,
+.retrieval-model-main small,
+.retrieval-model-main em {
   color: var(--muted);
   font-size: 0.68rem;
   overflow-wrap: anywhere;
   font-style: normal;
 }
-.onnx-main em {
+.retrieval-model-main em {
   color: var(--warn);
 }
-.onnx-main a {
+.retrieval-model-main a {
   color: #ffbd6b;
   text-decoration: none;
 }
-.onnx-main a:hover {
+.retrieval-model-main a:hover {
   color: var(--text);
   text-decoration: underline;
 }
@@ -991,12 +991,12 @@ select, option { background: #050505; color: var(--text); }
 }
 .status-text.ok { color: var(--ok); }
 .status-text.warn { color: var(--warn); }
-.onnx-actions {
+.retrieval-model-actions {
   display: grid;
   align-content: start;
   gap: 6px;
 }
-.onnx-actions button,
+.retrieval-model-actions button,
 .settings-actions button {
   display: inline-flex;
   align-items: center;
@@ -1009,17 +1009,17 @@ select, option { background: #050505; color: var(--text); }
   color: var(--text);
   cursor: pointer;
 }
-.onnx-actions button {
+.retrieval-model-actions button {
   min-width: 132px;
   padding: 0 8px;
   font-size: 0.7rem;
 }
-.onnx-actions button:hover:not(:disabled),
+.retrieval-model-actions button:hover:not(:disabled),
 .settings-actions button:hover:not(:disabled) {
   border-color: rgba(255, 154, 46, 0.55);
   background: #15100a;
 }
-.onnx-actions button:disabled,
+.retrieval-model-actions button:disabled,
 .settings-actions button:disabled {
   opacity: 0.55;
   cursor: not-allowed;

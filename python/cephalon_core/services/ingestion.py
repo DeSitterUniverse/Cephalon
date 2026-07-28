@@ -750,10 +750,8 @@ async def build_semantic_child_chunks(app_state, parent_text: str, settings: Rag
     units = _split_units_to_token_limit(split_text_units(parent_text), maximum)
     if not units:
         return []
-    # Keep child chunks aligned to sentence/paragraph units, but do not call
-    # the embedder while deciding their boundaries.  That used to add many
-    # duplicate ONNX passes before the final batched indexing pass and made
-    # large real-world documents impractically slow to ingest.
+    # Keep child chunks aligned to sentence/paragraph units. Embeddings are
+    # created only once during the final batched indexing pass.
     chunks: list[str] = []
     current: list[str] = []
     current_tokens = 0

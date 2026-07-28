@@ -1,41 +1,109 @@
 # Cephalon
 
-Cephalon is a local-first document search and answer workbench. It imports documents, retains PDF layout/provenance, indexes text locally, and produces answers with stable citations such as `[[src:S1]]`.
+Cephalon is a local-first desktop workbench for asking grounded questions about your own documents. Import a library, connect the local chat model you already use, and get answers with stable citations such as `[[src:S1]]`.
 
-Generation and retrieval are deliberately separate. A user-operated `llama-server` provides chat completion on port 8080. Cephalon uses a second, dedicated `llama-server` for embeddings on port 8090 and a separate Python process for reranking.
+It is designed for private research, technical documentation, notes, PDFs, and specialised collections where knowing *which source supports an answer* matters as much as the answer itself. Your documents, metadata, chat history, and retrieval index stay on your computer.
 
-## Fixed retrieval stack
+Recommended alongside a chat model fine-tuned for a particular domain, task, or voice—for example personal writing, programming conventions, academic terminology, accessibility work, creative genres, or a specialised knowledge base. Cephalon supplies the local evidence; your chosen llama.cpp model supplies the response.
 
-Cephalon supports one retrieval stack only:
+I built this originally for running LLM inference on a large corpus of scientific and technical papers. I improved the architecture by incorperating the best RAG techniques I found:
 
-| Role | Fixed model | Runtime | Output |
-| --- | --- | --- | --- |
-| Embedder | Jina Embeddings v5 Nano Retrieval, `Q8_0` GGUF | dedicated llama.cpp embeddings server | normalized 768-dimensional vectors |
-| Reranker | Jina Reranker v3.5 | isolated Transformers worker with `trust_remote_code=True` | listwise rank and raw relevance score |
+- Hybrid retrieval with independent signals
+- True full-set listwise reranking
+- Citation accounting and fail-safe behavior
+- Exact evidence and provenance
+- RATE-style validation
+- High document fidelity: PDF ingestion preserves page, layout, tables, captions, bounding boxes, and asset provenance.
+- Auditable retrieval
 
-The Nano vector table uses normalized 768-dimensional embeddings. Reindex documents after installing the retrieval stack.
+` `
 
-## Requirements
+![A cited answer to a question about the RATE paper](docs/screenshots/rag-cited-answer.png)
 
-- Windows or Linux
-- Node.js and npm
-- Python 3.14 (`py -3.14` on Windows)
-- A recent `llama-server` build with the required backend (Vulkan for the AMD GPU setup described below)
-- A chat GGUF chosen and started by the user
-- Internet access only when downloading the two fixed retrieval models from Hugging Face
+` ` 
 
-Install project dependencies:
+![A cited long-form explanation with evidence and citations](docs/screenshots/long-evidence-answer.png)
 
-```powershell
-py -3.14 -m pip install -r requirements.txt
-npm.cmd install
+## What it does
+
+- Imports common office, text, data, and PDF files into a searchable local library.
+- Preserves useful PDF provenance, including pages, layout, tables, captions, and bounding boxes when available.
+- Combines semantic and keyword search, then shows sources and retrieval diagnostics alongside answers.
+- Validates evidence and claim coverage before presenting citations.
+- Keeps chat generation separate from document retrieval, so you stay in control of the chat GGUF and llama.cpp server.
+- Provides a focused desktop workflow: library, chat, sources, trace, health, evaluations, settings, and local model management.
+
+## The retrieval stack
+
+Cephalon intentionally uses one local retrieval stack:
+
+| Role | Model | Runtime |
+| --- | --- | --- |
+| Embedder | Jina Embeddings v5 Nano Retrieval `Q8_0` | dedicated llama.cpp embeddings server, normalized 768-dimensional vectors |
+| Reranker | Jina Reranker v3.5 | isolated Transformers worker using its official custom-code interface |
+
+Dense LanceDB retrieval and SQLite FTS5 keyword retrieval stay independent, are fused with reciprocal-rank fusion, and the full fused candidate set is listwise reranked when the reranker is available. If the reranker is unavailable, Cephalon continues in clearly marked degraded mode; if the embedder is unavailable, retrieval is safely disabled.
+
+## Quick start
+
+Cephalon supports Windows and Linux. The commands below use Windows PowerShell; see [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for Linux and detailed setup notes.
+
+1. Install Node.js, Python 3.14, and a recent llama.cpp build with `llama-server`.
+
+2. Install Cephalon dependencies:
+
+   ```powershell
+   py -3.14 scripts\setup_python.py
+   npm.cmd install
+   ```
+
+3. Start the chat server with the GGUF you want to use. Cephalon does not choose or load this model for you:
+
+   ```powershell
+   & "C:\AI\llama.cpp\build\bin\Release\llama-server.exe" `
+     -m "C:\AI\models\your-chat-model.gguf" `
+     --device Vulkan0 --gpu-layers 999 `
+     --ctx-size 8192 --host 127.0.0.1 --port 8080 --no-webui
+   ```
+
+4. Start the desktop app:
+
+   ```powershell
+   npm.cmd run tauri dev
+   ```
+
+5. In **Settings → Fixed retrieval stack**, download the embedder and reranker. Restart Cephalon, then run **Reindex all documents**.
+
+6. Press **Connect** for the chat server, import a few documents, and ask a question. Open **Sources** or **Trace** whenever you want to inspect the supporting evidence.
+
+## Everyday use
+
+For the best results:
+
+1. Import the documents that should be treated as your reference set.
+2. Reindex after installing the retrieval models or after intentionally changing the document collection.
+3. Ask focused questions and request citations when the wording must be auditable.
+4. Use the source drawer to jump from an answer to the exact document chunk and provenance.
+5. Treat a weak-support indicator as a prompt to refine the question or inspect the evidence rather than as a confident answer.
+
+Saved chats are local searchable memory, not model training data.
+
+## How the local services fit together
+
+```text
+Your chat GGUF ── llama-server :8080 ──> answer generation
+                                                ▲
+Documents ──> Nano embedder :8090 ──> LanceDB ─┼──> Cephalon desktop app
+                  GPU by default               │
+FTS5 keyword search ───────────────────────────┤
+Jina Reranker v3.5 worker ─────────────────────┘
 ```
 
-The desktop package bundles the application backend, but not llama.cpp, a chat GGUF, or the retrieval model files.
+The chat and embedding servers must remain separate. On Windows, Cephalon automatically starts its managed Nano embedder with `Vulkan0` and full layer offload after the model is installed. If your llama.cpp device name differs, set `CEPHALON_EMBEDDER_DEVICE` and `CEPHALON_EMBEDDER_GPU_LAYERS` before launch.
 
-## Model locations
+## Local data and model files
 
-By default, Cephalon stores retrieval models below `~/cephalon-data/models`:
+By default, Cephalon uses `~/cephalon-data` (for example, `C:\Users\<you>\cephalon-data` on Windows). Retrieval models live under:
 
 ```text
 ~/cephalon-data/models/
@@ -44,180 +112,64 @@ By default, Cephalon stores retrieval models below `~/cephalon-data/models`:
   jina-reranker-v3.5/
     config.json
     tokenizer.json
-    ... official Hugging Face files and manifest
+    ... official model files
 ```
 
-Use `CEPHALON_DATA_DIR` or `CEPHALON_MODEL_DIR` to change those locations. The embedder checksum is checked against the fixed official SHA-256. Reranker verification compares local files to the official revision manifest; a mismatch fails verification.
+Settings can download, verify, open, or remove either model cache. The Nano GGUF is checked against its fixed SHA-256; reranker verification checks the pinned Hugging Face revision manifest. Use `CEPHALON_DATA_DIR` or `CEPHALON_MODEL_DIR` to place this data elsewhere.
 
-## First-time setup
+## Running and building
 
-1. Start your chat-generation server (separate from retrieval).
-2. Start Cephalon.
-3. Open **Settings → Fixed retrieval stack** and download the embedder and reranker.
-4. Restart Cephalon so it can start its owned embedder and reranker processes.
-5. Run **Reindex all documents** after installing the fixed retrieval stack.
+| Goal | Windows command |
+| --- | --- |
+| Desktop development | `npm.cmd run tauri dev` |
+| Browser development | `npm.cmd run dev:full` |
+| Backend only | `py -3.14 python\main.py` |
+| Frontend build | `npm.cmd run build` |
+| Desktop package | `npm.cmd run tauri build` |
 
-The Settings panel provides download, integrity verification, folder opening, confirmed cache deletion, process health, model paths, the fixed 768-dimension value, and reindex status.
+The packaged app only includes Cephalon's backend.You need llama.cpp, a chat GGUF, and the retrieval model files (download the retrieval models from settings or by setting them up yourself).
 
-## Start the chat server
+## Useful configuration
 
-Cephalon never loads the chat GGUF itself. Start the server separately and configure `CEPHALON_LLAMA_SERVER_URL` if it is not `http://127.0.0.1:8080`.
-
-Windows example with Vulkan GPU offload:
+Most users only need the default localhost ports. These are the settings worth changing when your machine uses different paths or ports:
 
 ```powershell
-& "C:\AI\llama.cpp\build\bin\Release\llama-server.exe" `
-  -m "C:\AI\models\your-chat-model.gguf" `
-  --device Vulkan0 --gpu-layers 999 `
-  --ctx-size 8192 --host 127.0.0.1 --port 8080 --no-webui
-```
-
-Linux example:
-
-```bash
-llama-server -m "$HOME/models/your-chat-model.gguf" \
-  --ctx-size 8192 --host 127.0.0.1 --port 8080 --no-webui
-```
-
-Keep the server bound to `127.0.0.1` unless remote access is deliberate. Confirm it is ready with `http://127.0.0.1:8080/health`.
-
-## Embedding server
-
-After the Nano GGUF is installed, Cephalon normally starts its dedicated server automatically when the backend starts. It uses:
-
-```text
---embedding --pooling last --embd-normalize 2
---device Vulkan0 --gpu-layers 999
---batch-size 4096 --ubatch-size 4096
---host 127.0.0.1 --port 8090 --no-webui
-```
-
-It calls `/v1/embeddings` in batches during ingestion and for query embedding, validates response ordering, and rejects any output that is not exactly 768-dimensional.
-
-### Vulkan GPU embedder (Windows)
-
-Cephalon starts its managed embedding server with `--device Vulkan0 --gpu-layers 999`. Override those values with `CEPHALON_EMBEDDER_DEVICE` and `CEPHALON_EMBEDDER_GPU_LAYERS` when your llama.cpp device has a different name or offload target. You can also start the dedicated server yourself before Cephalon; it detects the healthy endpoint and reuses it:
-
-```powershell
-& "C:\AI\llama.cpp\build\bin\Release\llama-server.exe" `
-  -m "$env:USERPROFILE\cephalon-data\models\jina-v5-nano-retrieval-q8_0\v5-nano-retrieval-Q8_0.gguf" `
-  --embedding --pooling last --embd-normalize 2 `
-  --device Vulkan0 --gpu-layers 999 `
-  --batch-size 4096 --ubatch-size 4096 `
-  --host 127.0.0.1 --port 8090 --no-webui
-```
-
-Set `CEPHALON_EMBEDDER_SERVER_URL` and `CEPHALON_EMBEDDER_SERVER_PORT` if using a different localhost endpoint. Set `CEPHALON_LLAMA_SERVER_BIN` if Cephalon should auto-start the dedicated server from a different llama.cpp path.
-
-The chat and embedding servers must remain separate; never point the embedding client at the chat server.
-
-## Reranker worker and degraded mode
-
-When the official v3.5 model directory is installed, Cephalon starts `jina_reranker_worker` in a separate Python process. It loads the model through the official Transformers custom-code interface and calls `model.rerank(query, documents, top_n=None)` once for the complete fused candidate set.
-
-The worker returns the original candidate index, raw v3.5 relevance score, and listwise order. Cephalon maps those results back to source IDs, chunk IDs, document IDs, provenance, and the original dense/lexical/fusion scores.
-
-- Missing or failed embedder: retrieval is disabled and queries are blocked.
-- Missing or failed reranker: retrieval continues in visible degraded mode with dense-plus-FTS5/RRF results only.
-- The installed Windows PyTorch runtime may be CPU-only. A CPU-only reranker is valid but will be shown by the process status; do not describe it as GPU accelerated.
-
-## Start Cephalon
-
-### Browser development
-
-Start backend and Vite together:
-
-```powershell
-npm.cmd run dev:full
-```
-
-Open `http://127.0.0.1:1420`.
-
-Or run separately:
-
-```powershell
-py -3.14 python\main.py
-```
-
-```powershell
-npm.cmd run dev
-```
-
-### Tauri desktop development
-
-```powershell
-npm.cmd run tauri dev
-```
-
-### Installed desktop release
-
-Launch Cephalon from its shortcut. The bundled sidecar starts at `127.0.0.1:8765`; chat generation remains the separately operated server on 8080.
-
-## Runtime configuration
-
-```powershell
-$env:CEPHALON_DATA_DIR="$env:USERPROFILE\cephalon-data"
-$env:CEPHALON_MODEL_DIR="$env:USERPROFILE\cephalon-data\models"
 $env:CEPHALON_LLAMA_SERVER_BIN="C:\AI\llama.cpp\build\bin\Release\llama-server.exe"
 $env:CEPHALON_LLAMA_SERVER_URL="http://127.0.0.1:8080"
 $env:CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS="8192"
-$env:CEPHALON_EMBEDDER_SERVER_URL="http://127.0.0.1:8090"
-$env:CEPHALON_EMBEDDER_SERVER_PORT="8090"
 $env:CEPHALON_EMBEDDER_DEVICE="Vulkan0"
 $env:CEPHALON_EMBEDDER_GPU_LAYERS="999"
-$env:CEPHALON_EMBEDDER_BATCH_SIZE="16"
-$env:CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE="4096"
 ```
-
-`CEPHALON_HOST` and `CEPHALON_PORT` control the Cephalon API itself (defaults: `127.0.0.1:8765`).
-
-Common ports:
 
 | Service | Default port |
 | --- | --- |
 | Cephalon backend | 8765 |
-| Vite development server | 1420 |
+| Browser development server | 1420 |
 | Chat llama.cpp server | 8080 |
-| Dedicated Nano embeddings server | 8090 |
+| Nano embeddings server | 8090 |
 
-## Retrieval and evidence flow
+For the full environment-variable list, manual embedding-server operation, release builds, and troubleshooting, use [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md).
 
-1. Documents are parsed with page/layout/table/caption/bounding-box provenance preserved where available. Malformed pages use a text-safe fallback.
-2. Chunks are embedded by Nano Retrieval and stored only in `vectors_jina_v5_nano_retrieval_768`.
-3. Dense LanceDB search and SQLite FTS5 BM25 search remain independent.
-4. Results are combined by reciprocal-rank fusion.
-5. The full fused set is listwise-reranked by Jina v3.5 when available.
-6. Evidence validation, claim coverage, citation accounting, retrieval traces, and frontend diagnostics retain source/chunk/document identities and provenance.
+## Diagnostics and local API
 
-Trace candidates expose `vector_score`, `lexical_score`, `fusion_score`, `reranker_raw_score`, `listwise_rank`, `final_score`, and retrieval rank. Raw v3.5 scores and listwise rank are distinct fields.
+Settings shows the active models, paths, health, process IDs, and reindex progress. The desktop diagnostics panels expose evidence, claims, retrieval candidates, and index health.
 
-## Model and reindex APIs
-
-All endpoints are local backend endpoints.
+These local endpoints are also useful for scripts and troubleshooting:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /models/status` | Fixed model identity, paths, integrity/install state, runtime state, and reindex requirement |
-| `POST /models/download` | Download `{ "kind": "embedder" }` or `{ "kind": "reranker" }`; restart required |
-| `POST /models/verify` | Verify model files; use the same `kind` body |
-| `POST /models/delete` | Delete a model cache; requires `{ "kind": "…", "confirmed": true }` |
-| `POST /models/open` | Open the model directory for a `kind` |
-| `GET /runtime/embedder/status` | Embedder port, PID, request/health times, and failure state |
-| `GET /runtime/reranker/status` | Worker PID, queue size, health time, and last failure |
-| `POST /reindex/full` | Queue every document for reindexing |
-| `POST /reindex/stale` | Queue only stale documents |
-| `GET /reindex/progress` | Current or last persisted run totals and stale-index state |
-
-Reindex progress remains available after a run completes. A successful reindex does not delete source documents or their PDF provenance.
+| `GET /models/status` | Installed models, integrity, runtime state, and reindex status |
+| `GET /runtime/embedder/status` | Embedder process, port, health, and errors |
+| `GET /runtime/reranker/status` | Reranker worker health and queue state |
+| `POST /reindex/full` | Reindex the complete document library |
+| `POST /reindex/stale` | Reindex only documents that need it |
+| `GET /reindex/progress` | Current or last completed reindex totals |
 
 ## Validation
 
-Run the backend and frontend checks:
-
 ```powershell
-py -3.14 -m pytest python\test_backend_stabilization.py -q
+py -3.14 -m pytest python\test_backend_stabilization.py python\test_rag_observability.py -q
 npm.cmd run test:frontend
 npm.cmd run build
+cargo check --manifest-path src-tauri\Cargo.toml
 ```
-
-For live checks, start the desired chat and embedding servers, start Cephalon, then inspect `GET /models/status`, `GET /runtime/embedder/status`, and `GET /runtime/reranker/status`. After local testing, stop only the servers you started and confirm their ports are closed.

@@ -9,8 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .. import storage
-from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, OnnxDownloadRequest, OnnxInstallLocalRequest, QueryRequest, RagSettings
-from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, onnx_setup, retrieval, support
+from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, QueryRequest, RagSettings
+from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, retrieval, support
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
 from .documents import delete_document, get_documents, router as documents_router
@@ -152,7 +152,6 @@ def health(request: Request):
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
         "retrieval_error": retrieval_error,
-        "onnx_setup": {"legacy": True, "active": False},
         "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
@@ -164,22 +163,6 @@ def health(request: Request):
         },
         "retrieval_stack": jina_runtime.model_status(app_state),
     }
-
-
-@router.get("/models/onnx/status")
-def get_onnx_status(request: Request):
-    # Legacy migration surface only: ONNX models cannot be activated.
-    return {"legacy": True, "active": False, "message": "Cephalon now uses the fixed Jina Nano + Jina v3.5 stack."}
-
-
-@router.post("/models/onnx/install-local")
-def install_local_onnx(request: Request, req: OnnxInstallLocalRequest):
-    raise HTTPException(status_code=410, detail="Local ONNX installation is retired; only the fixed Jina models are supported.")
-
-
-@router.post("/models/onnx/download")
-def download_onnx(request: Request, req: OnnxDownloadRequest):
-    raise HTTPException(status_code=410, detail="ONNX retrieval setup is retired. Use POST /models/download for the fixed Jina stack.")
 
 
 @router.get("/models/status")

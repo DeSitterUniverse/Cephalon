@@ -206,8 +206,6 @@ export type HealthResponse = {
   active_context_tokens?: number | null;
   active_model_context_tokens?: number | null;
   last_model_load_error?: string | null;
-  onnx_warmup?: { ready?: boolean; warmup_ms?: number } | null;
-  onnx_setup?: OnnxSetupStatus;
   llama_backend?: {
     provider?: "external_llama_server";
     server_url?: string;
@@ -266,39 +264,6 @@ export type ReindexProgress = {
   cancelled: number;
   stale_document_count: number;
   reindex_required: boolean;
-};
-
-export type OnnxModelKind = "embedder" | "reranker" | "all";
-export type OnnxModelInfo = {
-  kind: "embedder" | "reranker";
-  path: string;
-  display_path?: string;
-  ok: boolean;
-  runtime_loaded?: boolean;
-  active_model_id?: string | null;
-  missing: string[];
-  meta_error?: string | null;
-  model_file?: string | null;
-  model_id?: string | null;
-  validated?: boolean;
-  dimension?: number | null;
-  score_mode?: string | null;
-  max_batch_size?: number | null;
-};
-export type OnnxSetupStatus = {
-  model_dir: string;
-  engines_ready?: boolean;
-  startup_error?: string | null;
-  download_sources: Record<"embedder" | "reranker", { repo_id: string; subfolder?: string }>;
-  embedder: OnnxModelInfo;
-  reranker: OnnxModelInfo;
-};
-export type OnnxInstallResponse = {
-  status: string;
-  kind: OnnxModelKind;
-  restart_required: boolean;
-  model?: OnnxModelInfo | Record<string, OnnxModelInfo>;
-  setup: OnnxSetupStatus;
 };
 
 export type ModelsResponse = {
@@ -362,24 +327,6 @@ export function updateLlamaServerSettings(settings: LlamaServerSettings): Promis
   return requestJson<LlamaServerSettings>("/models/server", {
     method: "PUT",
     body: JSON.stringify(settings),
-  });
-}
-
-export function getOnnxSetupStatus(): Promise<OnnxSetupStatus> {
-  return requestJson<OnnxSetupStatus>("/models/onnx/status");
-}
-
-export function downloadOnnxModels(kind: OnnxModelKind = "all"): Promise<OnnxInstallResponse> {
-  return requestJson<OnnxInstallResponse>("/models/onnx/download", {
-    method: "POST",
-    body: JSON.stringify({ kind }),
-  });
-}
-
-export function installLocalOnnxModel(kind: Exclude<OnnxModelKind, "all">, path: string): Promise<OnnxInstallResponse> {
-  return requestJson<OnnxInstallResponse>("/models/onnx/install-local", {
-    method: "POST",
-    body: JSON.stringify({ kind, path }),
   });
 }
 

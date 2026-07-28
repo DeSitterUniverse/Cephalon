@@ -1,9 +1,4 @@
-"""Fixed local retrieval runtime: Jina Nano through llama.cpp and Jina v3.5.
-
-The old ONNX implementation remains in ``onnx_setup.py`` as migration
-reference only.  It must not be selected at runtime: this module owns the
-single supported 768-dimensional retrieval profile.
-"""
+"""Fixed local retrieval runtime: Jina Nano through llama.cpp and Jina v3.5."""
 
 from __future__ import annotations
 

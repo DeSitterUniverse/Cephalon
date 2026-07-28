@@ -12,8 +12,6 @@ type Props = {
   isSavingRagSettings?: boolean;
   retrievalStatus?: FixedRetrievalStatus;
   reindexProgress?: ReindexProgress;
-  /** Deprecated test-harness compatibility; ONNX is never rendered or used. */
-  onnxStatus?: unknown;
   isDownloadingModels?: boolean;
   onDownloadModel?: (kind: FixedModelKind) => void;
   onVerifyModel?: (kind: FixedModelKind) => void;
@@ -85,7 +83,7 @@ export function SettingsPanel({
           <p className="settings-note">These controls affect future queries. Changing chunk boundaries requires reindexing documents before the new settings take effect.</p>
           <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.evidence_required || false} onChange={event => setDraftRagSettings(current => current && { ...current, evidence_required: event.target.checked })} />Require local evidence for answers</label>
           <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.conversation_memory ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, conversation_memory: event.target.checked })} />Use past chats as local retrieval memory</label>
-          <details className="onnx-guide">
+          <details className="retrieval-guide">
             <summary>Advanced chunking</summary>
             <div className="settings-grid">
               <NumberSetting label="Parent target" value={draftRagSettings?.parent_target_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, parent_target_tokens: value })} />
@@ -164,11 +162,11 @@ function FixedModelRow({
   onOpen?: (kind: FixedModelKind) => void;
   onDelete?: (kind: FixedModelKind) => void;
 }) {
-  if (!info) return <div className="onnx-row"><small>Checking fixed retrieval stack…</small></div>;
+  if (!info) return <div className="retrieval-model-row"><small>Checking fixed retrieval stack…</small></div>;
   const runtime = info.runtime as { status?: string; last_error?: string; last_failure?: string; port?: number; pid?: number; queue_size?: number };
   return (
-    <div className="onnx-row">
-      <div className="onnx-main">
+    <div className="retrieval-model-row">
+      <div className="retrieval-model-main">
         <strong>{info.name}</strong>
         <small>{info.kind === "embedder" ? "768-dimensional Nano Retrieval via dedicated llama.cpp." : "Jina v3.5 listwise custom Transformers worker."}</small>
         <span className={runtime.status === "running" ? "status-text ok" : "status-text warn"}>{runtime.status || (info.installed ? "stopped" : "not installed")}</span>
@@ -176,7 +174,7 @@ function FixedModelRow({
         <small>{info.kind === "embedder" ? `Port ${runtime.port ?? "—"} · PID ${runtime.pid ?? "—"} · fixed ${info.dimension}-dim` : `Worker PID ${runtime.pid ?? "—"} · queue ${runtime.queue_size ?? 0} · trust_remote_code`}</small>
         {(runtime.last_error || runtime.last_failure) && <em>{runtime.last_error || runtime.last_failure}</em>}
       </div>
-      <div className="onnx-actions">
+      <div className="retrieval-model-actions">
         <button type="button" onClick={() => onDownload?.(info.kind)} disabled={disabled}>
           <Download size={14} />
           Download

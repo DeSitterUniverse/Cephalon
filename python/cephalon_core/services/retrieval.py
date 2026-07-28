@@ -6,7 +6,6 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -293,71 +292,9 @@ def _rerank_text(text: str) -> str:
     return cleaned[:RERANK_TEXT_LIMIT]
 
 
-def _score_rerank_pair(app_state, pair: list[str]) -> float:
-    # Legacy ONNX pairwise implementation retained for migration reference.
-    # The active Jina v3.5 path above never calls this function.
-    return float(_score_rerank_pairs(app_state, [pair])[0])
-
-
-def _score_rerank_pairs(app_state, pairs: list[list[str]]) -> np.ndarray:
-    if not pairs:
-        return np.asarray([], dtype=float)
-    batch_size = max(1, int(getattr(app_state, "reranker_batch_size", 1)))
-    batches = (pairs[index:index + batch_size] for index in range(0, len(pairs), batch_size))
-    return np.concatenate([_run_reranker_batch(app_state, batch) for batch in batches]).astype(float)
-
-
-def _run_reranker_batch(app_state, pairs: list[list[str]]) -> np.ndarray:
-    inputs = app_state.tokenizer(pairs, padding=True, truncation=True, return_tensors="np")
-    accepted_inputs = {item.name for item in app_state.reranker.get_inputs()} if hasattr(app_state.reranker, "get_inputs") else set()
-    ort_inputs = {}
-    if not accepted_inputs or "input_ids" in accepted_inputs:
-        ort_inputs["input_ids"] = inputs["input_ids"].astype(np.int64)
-    if not accepted_inputs or "attention_mask" in accepted_inputs:
-        ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
-    if "token_type_ids" in inputs and (not accepted_inputs or "token_type_ids" in accepted_inputs):
-        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
-    runtime = getattr(app_state, "reranker_runtime", None)
-    guard = runtime.exclusive() if runtime is not None else nullcontext()
-    with guard:
-        raw_scores = np.asarray(app_state.reranker.run(None, ort_inputs)[0])
-    scores = _reranker_scores(app_state, raw_scores)
-    if scores.size == 0:
-        raise RuntimeError("Reranker ONNX returned no score for a candidate pair.")
-    flattened = scores.reshape(-1)
-    if flattened.size != len(pairs):
-        raise RuntimeError(f"Reranker ONNX returned {flattened.size} scores for {len(pairs)} candidate pairs.")
-    return flattened.astype(float)
-
-
 def _rerank_cache_key(prompt: str, results: list[dict]) -> str:
     candidate_key = "|".join(f"{res.get('id')}:{hashlib.sha256(str(res.get('text', '')).encode('utf-8')).hexdigest()[:16]}" for res in results)
     return hashlib.sha256(f"{prompt.strip().lower()}::{candidate_key}".encode("utf-8")).hexdigest()
-
-
-def _reranker_scores(app_state, raw_scores: np.ndarray) -> np.ndarray:
-    mode = getattr(app_state, "reranker_score_mode", "auto")
-    if raw_scores.ndim == 2 and raw_scores.shape[1] == 2:
-        if mode == "logit_margin_0_minus_1":
-            return raw_scores[:, 0] - raw_scores[:, 1]
-        if mode == "logit_margin_1_minus_0":
-            return raw_scores[:, 1] - raw_scores[:, 0]
-        if mode == "class_0":
-            return raw_scores[:, 0]
-        if mode == "class_1":
-            return raw_scores[:, 1]
-        return raw_scores[:, 0] - raw_scores[:, 1]
-    if raw_scores.ndim == 2 and raw_scores.shape[1] > 1:
-        return raw_scores[:, -1]
-    return raw_scores.reshape(-1)
-
-
-def _bounded_rerank_score(raw_score: float) -> float:
-    return float(np.tanh(raw_score / 2.0))
-
-
-def _final_retrieval_score(prompt: str, result: dict, raw_rerank_score: float) -> float:
-    return round(_retrieval_prior_score(prompt, result) + _bounded_rerank_score(raw_rerank_score), 6)
 
 
 def _select_relevant_results(ranked: list[dict], limit: int) -> list[dict]:

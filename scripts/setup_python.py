@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import subprocess
 import sys
@@ -23,17 +22,11 @@ def run(*args: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--with-export-tools", action="store_true", help="also install the optional ONNX export toolchain")
-    args = parser.parse_args()
-
     require_python_314()
     os.environ["PYTHONNOUSERSITE"] = "1"
     run(sys.executable, "-m", "pip", "install", "--upgrade", "pip")
     run(sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt")
-    if args.with_export_tools:
-        run(sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements-export.txt")
-    run(sys.executable, "scripts/preflight_runtime.py", "--skip-onnx")
+    run(sys.executable, "scripts/preflight_runtime.py")
 
 
 if __name__ == "__main__":

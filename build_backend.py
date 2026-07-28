@@ -17,7 +17,6 @@ def build():
     
     hidden_imports = [
         "lancedb",
-        "onnxruntime",
         "transformers",
         "numpy",
         "huggingface_hub",

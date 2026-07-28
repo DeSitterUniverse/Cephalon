@@ -13,8 +13,7 @@ from cephalon_core.events import EventBus
 from cephalon_core.schemas import Message, QueryRequest, RagSettings
 from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.routes import documents as document_routes
-from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta, create_app
-from cephalon_core.app_factory import _read_model_meta
+from cephalon_core.app_factory import create_app
 from cephalon_core import routes
 from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval
 from cephalon_core.services import models
@@ -58,29 +57,6 @@ class FakeSearch:
 
     def to_list(self):
         return self.rows[:self.count]
-
-
-class FakeTokenizer:
-    def __call__(self, pairs, **_kwargs):
-        import numpy as np
-
-        return {
-            "input_ids": np.ones((len(pairs), 2), dtype="int64"),
-            "attention_mask": np.ones((len(pairs), 2), dtype="int64"),
-        }
-
-
-class FakeReranker:
-    def __init__(self):
-        self.batch_sizes = []
-
-    def get_inputs(self):
-        return []
-
-    def run(self, _outputs, inputs):
-        batch_size = len(inputs["input_ids"])
-        self.batch_sizes.append(batch_size)
-        return [np.arange(batch_size, dtype=float).reshape(batch_size, 1)]
 
 
 class FakeLance:
@@ -214,26 +190,6 @@ def test_candidate_merge_preserves_a_top_dense_rank_across_subqueries():
 
     assert merged["chunk-1"]["dense_rank"] == 1
     assert merged["chunk-1"]["lexical_rank"] == 1
-
-
-def test_reranker_uses_safe_single_pair_batches_by_default():
-    reranker = FakeReranker()
-    state = SimpleNamespace(tokenizer=FakeTokenizer(), reranker=reranker)
-
-    scores = retrieval._score_rerank_pairs(state, [["query", "one"], ["query", "two"], ["query", "three"]])
-
-    assert reranker.batch_sizes == [1, 1, 1]
-    assert scores.tolist() == [0.0, 0.0, 0.0]
-
-
-def test_reranker_uses_declared_validated_batch_size():
-    reranker = FakeReranker()
-    state = SimpleNamespace(tokenizer=FakeTokenizer(), reranker=reranker, reranker_batch_size=2)
-
-    scores = retrieval._score_rerank_pairs(state, [["query", "one"], ["query", "two"], ["query", "three"]])
-
-    assert reranker.batch_sizes == [2, 1]
-    assert scores.tolist() == [0.0, 1.0, 0.0]
 
 
 def test_embedding_runtime_uses_bounded_batches(monkeypatch):
@@ -989,23 +945,6 @@ def test_unknown_binary_file_fails_with_clear_reason(tmp_path):
     assert "binary" in result["error"].lower()
 
 
-def test_onnx_model_metadata_accepts_valid_non_jina_profiles():
-    assert _validate_embedder_meta({
-        "model_id": "jinaai/jina-embeddings-v5-text-small",
-        "dimension": 1024,
-        "validated": True,
-    }) is None
-    assert _validate_reranker_meta({
-        "model_id": "jinaai/jina-reranker-v3",
-        "validated": True,
-        "score_mode": "logit_margin_0_minus_1",
-    }) is None
-
-    assert _validate_embedder_meta({"model_id": "other/embedder", "kind": "embedder", "dimension": 768, "validated": True}) is None
-    assert _validate_reranker_meta({"model_id": "other/reranker", "kind": "reranker", "validated": True, "score_mode": "auto"}) is None
-    assert "score_mode" in _validate_reranker_meta({"model_id": "other/reranker", "kind": "reranker", "validated": True})
-
-
 def test_query_requires_connected_server(monkeypatch):
     app_state = SimpleNamespace(startup_error=None, active_model_name="loaded.gguf")
     monkeypatch.setattr(models, "_server_request", lambda _state, _path: {"status": "ok"})
@@ -1058,14 +997,6 @@ def test_generation_event_stream_stops_after_client_disconnect():
     assert closed is True
 
 
-def test_model_metadata_reader_rejects_non_object_json(tmp_path):
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    (model_dir / "cephalon_onnx_meta.json").write_text("null", encoding="utf-8")
-
-    assert _read_model_meta(str(model_dir)) == {}
-
-
 def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     state = build_memory_state()
     file_path = tmp_path / "fixture.md"
@@ -1076,10 +1007,6 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
 
     monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
-    state.tokenizer = FakeTokenizer()
-    state.reranker = SimpleNamespace(run=lambda *_args, **_kwargs: [__import__("numpy").array([[1.0, 0.0]])])
-    state.reranker_score_mode = "logit_margin_0_minus_1"
-
     context, sources, meta = asyncio.run(
         retrieval.retrieve_context(state, "sqlite lexical search", [0.0] * storage.active_embedding_metadata()["embedding_dim"], RagSettings())
     )
@@ -1333,16 +1260,6 @@ def test_fts_query_ignores_question_stopwords():
     assert "supplement*" in query
     assert "stress*" in query
     assert "advice*" in query
-
-
-def test_retrieval_prior_keeps_exact_lexical_matches_above_bad_raw_rerank():
-    lexical = {"text": "domain specific exact terms alpha beta gamma", "lexical_rank": 1}
-    unrelated = {"text": "distributed systems cap theorem consistency availability", "dense_rank": 1}
-
-    lexical_score = retrieval._final_retrieval_score("domain exact terms", lexical, -0.6)
-    unrelated_score = retrieval._final_retrieval_score("domain exact terms", unrelated, 1.9)
-
-    assert lexical_score > unrelated_score
 
 
 def test_relevant_selection_keeps_same_document_and_drops_weak_dense_strays():

@@ -35,7 +35,7 @@
 <body>
 <main>
   <h1>Cephalon Architecture Deep Dive</h1>
-  <p class="muted">Current architecture for the local-first desktop RAG workbench. This document describes how the app is built now, not a release checklist.</p>
+  <p class="muted">Current architecture for the local-first desktop RAG workbench.</p>
 
   <h2>System Overview</h2>
   <div class="diagram">
@@ -48,7 +48,8 @@ Tauri desktop shell
       -> FastAPI routes
       -> SQLite metadata / FTS5
       -> LanceDB dense vectors
-      -> ONNX Runtime embedder + reranker
+      -> dedicated llama.cpp Nano embedding server
+      -> isolated Jina v3.5 reranker worker
       -> external llama.cpp server generation
 </pre>
   </div>
@@ -72,12 +73,12 @@ Tauri desktop shell
     <thead><tr><th>Path</th><th>Role</th><th>Notes</th></tr></thead>
     <tbody>
       <tr><td><code>~/cephalon-data</code></td><td>Primary local app data</td><td>SQLite database, LanceDB directory, temporary downloads, and model directory live here by default.</td></tr>
-      <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td><code>embedder</code> and <code>reranker</code> ONNX Runtime folders. The external llama.cpp server owns the chat GGUF.</td></tr>
+      <tr><td><code>~/cephalon-data/models</code></td><td>Runtime models</td><td>The Jina Nano Q8_0 GGUF and Jina Reranker v3.5 files. The external llama.cpp server owns the chat GGUF.</td></tr>
       <tr><td><code>~/Documents/Cephalon Metrics</code></td><td>Analysis exports</td><td>Numeric-first JSONL/CSV files intended for spreadsheet or data-tool ingestion.</td></tr>
     </tbody>
   </table>
 
-  <h2>Storage Responsibilities</h2>
+  <h2>Storage</h2>
   <div class="two">
     <section class="card">
       <h3>SQLite</h3>
@@ -93,12 +94,12 @@ Tauri desktop shell
   <table>
     <thead><tr><th>Model</th><th>Runtime</th><th>Loaded From</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>Embedder</td><td>ONNX Runtime</td><td><code>models/embedder</code></td><td>Generates 1024-dimensional vectors for documents and queries.</td></tr>
-      <tr><td>Reranker</td><td>ONNX Runtime</td><td><code>models/reranker</code></td><td>Scores fused candidates with cross-encoder style relevance.</td></tr>
+      <tr><td>Embedder</td><td>Dedicated llama.cpp embeddings server</td><td><code>models/jina-v5-nano-retrieval-q8_0</code></td><td>Generates normalized 768-dimensional vectors for documents and queries.</td></tr>
+      <tr><td>Reranker</td><td>Isolated Transformers worker</td><td><code>models/jina-reranker-v3.5</code></td><td>Listwise-ranks the complete fused candidate set.</td></tr>
       <tr><td>Chat LLM</td><td>External llama.cpp server</td><td>User-operated server and its selected <code>.gguf</code> file</td><td>Generates responses after Cephalon connects to the server.</td></tr>
     </tbody>
   </table>
-  <p>The installer packages the app and backend runtime. Embedder/reranker artifacts are installed into the user model directory from Settings by using configured prepared ONNX repos or selecting exported local folders. A valid ONNX engine folder contains <code>model.onnx</code>, tokenizer files, <code>onnx_profile.json</code>, and any external ONNX data files referenced by the model.</p>
+  <p>The installer packages the app and backend runtime. Settings downloads and verifies the fixed Jina model files into the user model directory. The embedding server and the chat-generation server remain separate llama.cpp processes.</p>
 
   <h2>Ingestion Pipeline</h2>
   <div class="flow">
@@ -119,7 +120,7 @@ question
   -> dense child search in LanceDB
   -> lexical BM25 search in SQLite FTS5
   -> reciprocal rank fusion
-  -> Jina reranker
+  -> Jina v3.5 listwise reranker
   -> parent context reconstruction
   -> context compression
   -> typed source/meta/token stream
@@ -160,17 +161,17 @@ question
       <tr><td>Library</td><td><code>/documents</code></td><td>Search, filter, import, reindex, delete, and select documents.</td></tr>
       <tr><td>Chat</td><td><code>/query</code>, conversations APIs</td><td>Ask questions, stream answers, save chat history, and attach per-message sources.</td></tr>
       <tr><td>Sources</td><td>query stream/message sources</td><td>Inspect source scores, snippets, ranks, and document references.</td></tr>
-      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/onnx/status</code></td><td>Theme, external llama.cpp server connection, ONNX engine setup, and metrics export. Retrieval scope is selected from the chat composer.</td></tr>
+      <tr><td>Settings</td><td><code>/settings</code>, <code>/models/status</code></td><td>Theme, external llama.cpp server connection, fixed retrieval-model status and management, reindexing, and metrics export. Retrieval scope is selected from the chat composer.</td></tr>
       <tr><td>Diagnostics</td><td>trace, health, eval, support APIs</td><td>Debug retrieval quality and index state without leaving the app.</td></tr>
     </tbody>
   </table>
 
   <h2>Build And Packaging</h2>
-  <p>The development path uses the Python executable on PATH. The release path builds the frontend, checks Rust, builds a PyInstaller sidecar, and packages Tauri. The sidecar includes backend code and runtime libraries but intentionally excludes ONNX model artifacts. This keeps the installer smaller and lets model engines be updated separately from app releases.</p>
+  <p>The development path uses the Python executable on PATH. The release path builds the frontend, checks Rust, builds a PyInstaller sidecar, and packages Tauri. The sidecar intentionally excludes model artifacts so they can be managed locally from Settings.</p>
 
   <h2>Failure Handling</h2>
   <ul>
-    <li>Missing ONNX engines create a visible setup state; the app does not silently fall back to another embedder or reranker.</li>
+    <li>A missing Nano embedder disables retrieval; a missing reranker preserves dense and FTS5 retrieval with a visible degraded-mode warning.</li>
     <li>Querying without a connection to the configured external llama.cpp server returns a conflict response and the UI keeps the run action disabled.</li>
     <li>Model diagnostics report Python runtime, llama.cpp package path, backend libraries, active context, and load errors.</li>
     <li>Metrics and trace write failures are non-fatal where possible and surfaced through health or diagnostics.</li>

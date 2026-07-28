@@ -142,17 +142,6 @@ class LlamaServerSettings(BaseModel):
             raise ValueError("context_tokens must be between 4096 and 1000000.")
         return value
 
-class OnnxInstallLocalRequest(BaseModel):
-    kind: str
-    path: str
-
-
-class OnnxDownloadRequest(BaseModel):
-    kind: str = "all"
-    repo_id: str | None = None
-    subfolder: str | None = None
-
-
 class DocumentUpdateRequest(BaseModel):
     display_name: str | None = None
 
