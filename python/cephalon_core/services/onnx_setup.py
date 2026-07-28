@@ -16,16 +16,19 @@ def target_dir(settings: Settings, kind: str) -> Path:
 
 
 def status(settings: Settings) -> dict:
+    # Migration-only compatibility: Settings deliberately no longer exposes
+    # ONNX repository configuration because the fixed Jina stack is the only
+    # supported runtime.  Keep legacy inspection safe for old local folders.
     return {
         "model_dir": settings.model_dir,
         "download_sources": {
             "embedder": {
-                "repo_id": settings.embedder_onnx_repo,
-                "subfolder": settings.embedder_onnx_subfolder,
+                "repo_id": getattr(settings, "embedder_onnx_repo", None),
+                "subfolder": getattr(settings, "embedder_onnx_subfolder", None),
             },
             "reranker": {
-                "repo_id": settings.reranker_onnx_repo,
-                "subfolder": settings.reranker_onnx_subfolder,
+                "repo_id": getattr(settings, "reranker_onnx_repo", None),
+                "subfolder": getattr(settings, "reranker_onnx_subfolder", None),
             },
         },
         "embedder": inspect_model_dir(target_dir(settings, "embedder"), "embedder"),
@@ -92,9 +95,9 @@ def download(settings: Settings, kind: str, repo_id: str | None = None, subfolde
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for first-launch model downloads. Install requirements.txt and try again.") from exc
 
-    resolved_repo = repo_id or (settings.embedder_onnx_repo if kind == "embedder" else settings.reranker_onnx_repo)
+    resolved_repo = repo_id or getattr(settings, "embedder_onnx_repo" if kind == "embedder" else "reranker_onnx_repo", None)
     resolved_subfolder = subfolder if subfolder is not None else (
-        settings.embedder_onnx_subfolder if kind == "embedder" else settings.reranker_onnx_subfolder
+        getattr(settings, "embedder_onnx_subfolder" if kind == "embedder" else "reranker_onnx_subfolder", None)
     )
     if not resolved_repo:
         raise ValueError(f"No Hugging Face ONNX repo is configured for {kind}.")
