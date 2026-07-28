@@ -1,28 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { queryModel, type RagSettings } from "./api";
-
-const settings: RagSettings = {
-  top_k: 8,
-  rerank_top_n: 3,
-  max_tokens: 256,
-  temperature: 0.4,
-  chunk_size: 1500,
-  chunk_overlap: 150,
-  parent_target_tokens: 520,
-  parent_max_tokens: 650,
-  child_target_tokens: 110,
-  child_max_tokens: 150,
-  child_overlap_tokens: 0,
-  context_tokens: 32768,
-  full_context: false,
-  evidence_required: false,
-  conversation_memory: true,
-  trace_persistence: true,
-  no_answer_min_confidence: 0.35,
-  no_answer_min_rerank_score: 0.15,
-  no_answer_min_vector_score: 0.05,
-  no_answer_min_source_count: 1,
-};
+import { queryModel } from "./api";
+import { ragSettings } from "./test/fixtures";
 
 describe("api client", () => {
   afterEach(() => {
@@ -38,7 +16,7 @@ describe("api client", () => {
       "summarize this",
       "local.gguf",
       [{ role: "user", content: "previous" }],
-      settings,
+      ragSettings,
       "conversation-1",
       "high",
       "thorough",

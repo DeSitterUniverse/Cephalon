@@ -38,7 +38,7 @@ def main() -> None:
         run(sys.executable, "export_onnx.py")
         run(sys.executable, "scripts/validate_onnx_models.py", "--mark")
     run(sys.executable, "scripts/preflight_runtime.py", "--skip-onnx")
-    run(sys.executable, "-m", "py_compile", "python/main.py", "python/test_ingest_query.py", "python/test_query_only.py")
+    run(sys.executable, "-m", "py_compile", "python/main.py", "scripts/smoke_ingest_query.py", "scripts/smoke_query.py")
     run(sys.executable, "-m", "pytest")
     run(npm, "ci")
     run(npm, "run", "build")

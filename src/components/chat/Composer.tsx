@@ -59,6 +59,8 @@ export function Composer({
           disabled={isRunning}
           aria-label="Retrieval scope"
         >
+          <option value="auto">Auto retrieval</option>
+          <option value="off">Retrieval off</option>
           <option value="low">Low retrieval</option>
           <option value="medium">Medium retrieval</option>
           <option value="high">High retrieval</option>

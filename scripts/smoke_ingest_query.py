@@ -38,7 +38,7 @@ def wait_for_job(client: httpx.Client, job_id: str, timeout_s: int = 120) -> dic
     raise TimeoutError(f"Job {job_id} did not finish.")
 
 
-def run_test():
+def main():
     fixture_docs, temp_docs = build_fixture_docs()
     with httpx.Client(timeout=30) as client:
         print(f"Ingesting {fixture_docs}...")
@@ -65,4 +65,4 @@ def run_test():
 
 
 if __name__ == "__main__":
-    run_test()
+    main()

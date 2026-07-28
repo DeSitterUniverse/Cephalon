@@ -1,8 +1,11 @@
+import os
+
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from .. import storage
 from ..schemas import DocumentUpdateRequest, TagRequest
-from ..services import ingestion
+from ..services import document_assets, ingestion
 from ..validators import validate_document_id, validate_tag
 
 
@@ -21,6 +24,28 @@ def get_document(request: Request, doc_id: str):
     if not payload:
         raise HTTPException(status_code=404, detail="Document not found.")
     return payload
+
+
+@router.get("/documents/{doc_id}/assets/{asset_id}")
+def get_document_asset(request: Request, doc_id: str, asset_id: str):
+    doc_id = validate_document_id(doc_id)
+    if not document_assets.ASSET_ID_PATTERN.fullmatch(asset_id):
+        raise HTTPException(status_code=400, detail="Invalid asset identifier.")
+    row = storage.fetchone(
+        request.app.state.sqlite,
+        """
+        SELECT filename, mime_type
+        FROM document_assets
+        WHERE doc_id = ? AND id = ?
+        """,
+        (doc_id, asset_id),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Document asset not found.")
+    path = document_assets.asset_path(request.app.state.settings.data_dir, doc_id, row["filename"])
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Document asset file is unavailable.")
+    return FileResponse(path, media_type=row["mime_type"])
 
 
 @router.patch("/documents/{doc_id}")
@@ -77,6 +102,8 @@ async def delete_tag(request: Request, doc_id: str, tag: str):
 
 @router.post("/documents/{doc_id}/reindex")
 async def reindex_document(request: Request, doc_id: str):
+    if getattr(request.app.state, "retrieval_error", None):
+        raise HTTPException(status_code=503, detail=request.app.state.retrieval_error)
     doc_id = validate_document_id(doc_id)
     row = storage.fetchone(
         request.app.state.sqlite,
@@ -114,5 +141,6 @@ async def delete_document(request: Request, doc_id: str):
         raise HTTPException(status_code=404, detail="Document not found.")
     ingestion.delete_document_vectors(request.app.state, doc_id)
     ingestion.delete_document_rows(request.app.state, doc_id)
+    document_assets.delete_document_assets(request.app.state.settings.data_dir, doc_id)
     await request.app.state.event_bus.publish("document", {"id": doc_id, "status": "deleted"})
     return {"status": "success"}

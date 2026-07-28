@@ -1,4 +1,5 @@
 import csv
+from dataclasses import dataclass, field
 import hashlib
 import os
 import time
@@ -7,10 +8,9 @@ import uuid
 import docx
 import openpyxl
 import pptx
-from pypdf import PdfReader
-
 from .. import storage
 from ..validators import is_supported_file
+from .pdf_parser import DocumentBlock, PdfAsset, PARSER_VERSION as PDF_PARSER_VERSION, parse_pdf
 
 SKIPPED_DIRECTORY_NAMES = {
     ".git",
@@ -20,6 +20,17 @@ SKIPPED_DIRECTORY_NAMES = {
     "__pycache__",
     "node_modules",
 }
+
+
+@dataclass
+class ExtractedDocument:
+    text: str
+    extraction_mode: str
+    blocks: list[DocumentBlock] = field(default_factory=list)
+    page_count: int | None = None
+    warnings: list[str] = field(default_factory=list)
+    parser_version: str = "cephalon-basic-2026-05"
+    assets: list[PdfAsset] = field(default_factory=list)
 
 
 def get_file_hash(path: str) -> str:
@@ -74,12 +85,7 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
         return read_text_fallback(path), "text"
 
     if ext == ".pdf":
-        text_runs = []
-        for page in PdfReader(path).pages:
-            text = page.extract_text()
-            if text:
-                text_runs.append(text)
-        return "\n".join(text_runs), "native"
+        return parse_pdf(path).text, "native_structured"
     if ext == ".docx":
         doc = docx.Document(path)
         return "\n".join([para.text for para in doc.paragraphs]), "native"
@@ -112,6 +118,31 @@ def extract_text(path: str, force_text: bool = False) -> tuple[str, str]:
     if not looks_like_text(path):
         raise ValueError("Unknown file type appears to be binary and cannot be safely imported as text.")
     return read_text_fallback(path), "text"
+
+
+def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf" and not force_text:
+        parsed = parse_pdf(path)
+        return ExtractedDocument(
+            text=parsed.text,
+            extraction_mode="native_structured",
+            blocks=parsed.blocks,
+            page_count=parsed.page_count,
+            warnings=parsed.warnings,
+            parser_version=parsed.parser_version,
+            assets=parsed.assets,
+        )
+
+    text, extraction_mode = extract_text(path, force_text=force_text)
+    block = DocumentBlock(text=text, page_number=1) if text.strip() else None
+    return ExtractedDocument(
+        text=text,
+        extraction_mode=extraction_mode,
+        blocks=[block] if block else [],
+        page_count=1 if block else 0,
+        parser_version=PDF_PARSER_VERSION if ext == ".pdf" else "cephalon-basic-2026-05",
+    )
 
 
 def collect_supported_files(path: str, force_text: bool = False) -> list[str]:
@@ -171,6 +202,7 @@ def register_ingesting_document(sqlite_conn, path: str, content_hash: str, extra
             embedding_model_id = excluded.embedding_model_id,
             embedding_dim = excluded.embedding_dim,
             stale_embedding = 0,
+            stale_reasons = NULL,
             last_error = NULL
         """,
         (
@@ -196,7 +228,7 @@ def register_ingesting_document(sqlite_conn, path: str, content_hash: str, extra
 def mark_document_ready(sqlite_conn, doc_id: str, chunk_count: int) -> None:
     storage.execute(
         sqlite_conn,
-        "UPDATE documents SET status = 'ready', chunk_count = ?, last_error = NULL, last_indexed_at = ? WHERE id = ?",
+        "UPDATE documents SET status = 'ready', chunk_count = ?, stale_embedding = 0, stale_reasons = NULL, last_error = NULL, last_indexed_at = ? WHERE id = ?",
         (chunk_count, int(time.time()), doc_id),
     )
 

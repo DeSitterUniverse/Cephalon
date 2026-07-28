@@ -1,9 +1,9 @@
 Retrieval notes
 
-The current retrieval pipeline combines dense vector search with SQLite FTS5 lexical search. Results are merged with reciprocal rank fusion and reranked with a Jina reranker running through ONNX Runtime.
+Cephalon uses Jina Nano Retrieval Q8_0 to create normalized 768-dimensional vectors through a dedicated llama.cpp embeddings server. SQLite FTS5 lexical search remains independent from LanceDB dense search. Results are merged by reciprocal rank fusion, then the complete fused set is listwise reranked by Jina Reranker v3.5 when its worker is available.
 
 Low scope uses fewer retrieved candidates for quick checks.
 Medium scope uses the normal retrieval defaults.
 High scope reviews a wider candidate set before answering.
 
-The scope control changes retrieval breadth, not model intelligence.
+The scope control changes retrieval breadth, not model intelligence. A missing reranker causes visible degraded retrieval; a missing or unhealthy embedder blocks document retrieval.

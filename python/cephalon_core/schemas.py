@@ -14,15 +14,12 @@ class RagSettings(BaseModel):
     rerank_top_n: int = 3
     max_tokens: int = 4096
     temperature: float = 0.4
-    chunk_size: int = 1500
-    chunk_overlap: int = 150
     parent_target_tokens: int = 520
     parent_max_tokens: int = 650
     child_target_tokens: int = 110
     child_max_tokens: int = 150
     child_overlap_tokens: int = 0
     context_tokens: int = 32768
-    full_context: bool = False
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
@@ -30,6 +27,11 @@ class RagSettings(BaseModel):
     no_answer_min_rerank_score: float = 0.15
     no_answer_min_vector_score: float = 0.05
     no_answer_min_source_count: int = 1
+    # Accepted for one compatibility release, but intentionally omitted from
+    # serialized settings and all active chunking/config hashes.
+    chunk_size: int | None = Field(default=None, exclude=True, deprecated=True)
+    chunk_overlap: int | None = Field(default=None, exclude=True, deprecated=True)
+    full_context: bool | None = Field(default=None, exclude=True, deprecated=True)
 
     @field_validator("top_k")
     @classmethod
@@ -57,20 +59,6 @@ class RagSettings(BaseModel):
     def validate_temperature(cls, value: float) -> float:
         if value < 0 or value > 2:
             raise ValueError("temperature must be between 0 and 2")
-        return value
-
-    @field_validator("chunk_size")
-    @classmethod
-    def validate_chunk_size(cls, value: int) -> int:
-        if value < 256 or value > 8000:
-            raise ValueError("chunk_size must be between 256 and 8000")
-        return value
-
-    @field_validator("chunk_overlap")
-    @classmethod
-    def validate_chunk_overlap(cls, value: int) -> int:
-        if value < 0 or value > 2000:
-            raise ValueError("chunk_overlap must be between 0 and 2000")
         return value
 
     @field_validator("parent_target_tokens", "parent_max_tokens", "child_target_tokens", "child_max_tokens")
@@ -118,7 +106,7 @@ class QueryRequest(BaseModel):
     prompt: str
     model: str = ""
     conversation_id: str | None = None
-    retrieval_scope: Literal["low", "medium", "high"] = "medium"
+    retrieval_scope: Literal["auto", "off", "low", "medium", "high"] = "medium"
     response_effort: Literal["quick", "balanced", "thorough"] = "balanced"
     history: list[Message] = Field(default_factory=list)
     settings: RagSettings | None = None
@@ -173,6 +161,17 @@ class TagRequest(BaseModel):
     tag: str
 
 
+class SourceAsset(BaseModel):
+    asset_id: str
+    page_number: int
+    bounding_box: tuple[float, float, float, float] | None = None
+    mime_type: str
+    caption: str | None = None
+    width: int | None = None
+    height: int | None = None
+    url: str
+
+
 class SourceChunk(BaseModel):
     rank: int
     source_id: str | None = None
@@ -181,12 +180,26 @@ class SourceChunk(BaseModel):
     chunk_id: str
     parent_id: str | None = None
     score: float
+    final_score: float | None = None
     snippet: str
+    evidence_text: str | None = None
     vector_score: float | None = None
     lexical_score: float | None = None
     fusion_score: float | None = None
     rerank_score: float | None = None
+    reranker_raw_score: float | None = None
+    listwise_rank: int | None = None
     subquery_id: str | None = None
+    block_type: str | None = None
+    section_heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
+    page_number: int | None = None
+    page_end: int | None = None
+    block_index: int | None = None
+    bounding_box: tuple[float, float, float, float] | None = None
+    element_ids: list[str] = Field(default_factory=list)
+    provenance: dict = Field(default_factory=dict)
+    assets: list[SourceAsset] = Field(default_factory=list)
 
 
 class QueryEnvelope(BaseModel):

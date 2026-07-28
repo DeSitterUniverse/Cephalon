@@ -46,7 +46,9 @@ export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: 
                     <tr key={`${stage}-${index}`}>
                       <td>#{value(candidate, "rank")}</td>
                       <td>{value(candidate, "chunk_id")}</td>
-                      <td>{value(candidate, "score")}</td>
+                      <td>final {value(candidate, "final_score")}</td>
+                      <td>raw {value(candidate, "reranker_raw_score")}</td>
+                      <td>list #{value(candidate, "listwise_rank")}</td>
                     </tr>
                   ))}
                 </tbody>

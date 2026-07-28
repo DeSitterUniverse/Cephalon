@@ -807,6 +807,60 @@ select, option { background: #050505; color: var(--text); }
   gap: 8px;
   font-size: 0.82rem;
 }
+.source-evidence,
+.citation-claim {
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.source-evidence > span,
+.citation-claim > span,
+.source-raw summary {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.source-evidence p,
+.citation-claim p,
+.source-raw p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+.source-raw { margin-top: 10px; }
+.source-raw summary { cursor: pointer; }
+.source-asset { margin: 12px 0 0; }
+.source-asset img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+.source-asset figcaption {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.claim-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.claim-row {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.claim-row small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
 .field {
   display: grid;
   gap: 8px;

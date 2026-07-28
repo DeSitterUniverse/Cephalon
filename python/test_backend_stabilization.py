@@ -12,10 +12,11 @@ from cephalon_core.config import Settings
 from cephalon_core.events import EventBus
 from cephalon_core.schemas import Message, QueryRequest, RagSettings
 from cephalon_core.routes import _settings_for_retrieval_scope
-from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta
+from cephalon_core.routes import documents as document_routes
+from cephalon_core.app_factory import _validate_embedder_meta, _validate_reranker_meta, create_app
 from cephalon_core.app_factory import _read_model_meta
 from cephalon_core import routes
-from cephalon_core.services import generation, ingestion, metrics, retrieval
+from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -112,6 +113,9 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CEPHALON_MODEL_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("CEPHALON_PORT", "9999")
     monkeypatch.setenv("CEPHALON_MAX_TOKENS", "64")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan2")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_GPU_LAYERS", "123")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE", "2048")
     monkeypatch.setenv("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://tauri.localhost")
 
     settings = Settings()
@@ -120,7 +124,22 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.model_dir.endswith("models")
     assert settings.port == 9999
     assert settings.max_tokens == 64
+    assert settings.embedder_device == "Vulkan2"
+    assert settings.embedder_gpu_layers == 123
+    assert settings.embedder_physical_batch_size == 2048
     assert settings.cors_origins == ["http://localhost:1420", "http://tauri.localhost"]
+
+
+def test_create_app_defers_runtime_directory_writes_until_lifespan(monkeypatch, tmp_path):
+    data_dir = tmp_path / "read-only-host-data"
+    model_dir = tmp_path / "read-only-host-models"
+    monkeypatch.setenv("CEPHALON_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("CEPHALON_MODEL_DIR", str(model_dir))
+
+    create_app(Settings())
+
+    assert not data_dir.exists()
+    assert not model_dir.exists()
 
 
 def test_scope_modes_change_retrieval_not_model_style():
@@ -135,6 +154,27 @@ def test_scope_modes_change_retrieval_not_model_style():
     assert (high.top_k, high.rerank_top_n) == (28, 6)
     assert low.temperature == medium.temperature == high.temperature == 0.72
     assert low.max_tokens == medium.max_tokens == high.max_tokens == 777
+
+
+def test_auto_retrieval_router_skips_clear_conversation_but_defaults_to_safe_recall():
+    assert routes.plan_retrieval_route("Hello!", "auto")["resolved"] == "off"
+    assert routes.plan_retrieval_route("Brainstorm names for a space game", "auto")["resolved"] == "off"
+    assert routes.plan_retrieval_route("What does the RATE paper report?", "auto")["resolved"] == "medium"
+    assert routes.plan_retrieval_route("Compare the projected growth rates for 2026 and 2027?", "auto")["resolved"] == "medium"
+    assert routes.plan_retrieval_route("Anything", "off")["retrieve"] is False
+    assert routes.plan_retrieval_route("Hello", "auto", evidence_required=True)["retrieve"] is True
+
+
+def test_query_request_keeps_retrieval_scope_and_response_effort_independent():
+    default = QueryRequest(prompt="Hello")
+    thorough = QueryRequest(
+        prompt="Compare the documents carefully.",
+        retrieval_scope="high",
+        response_effort="thorough",
+    )
+
+    assert (default.retrieval_scope, default.response_effort) == ("medium", "balanced")
+    assert (thorough.retrieval_scope, thorough.response_effort) == ("high", "thorough")
 
 
 def test_query_decomposition_keeps_the_original_question_and_deduplicates_candidates():
@@ -212,17 +252,6 @@ def test_embedding_runtime_uses_bounded_batches(monkeypatch):
     assert len(vectors) == 5
 
 
-def test_query_request_separates_retrieval_scope_and_response_effort():
-    request = QueryRequest(
-        prompt="Compare the documents carefully.",
-        retrieval_scope="high",
-        response_effort="thorough",
-    )
-
-    assert request.retrieval_scope == "high"
-    assert request.response_effort == "thorough"
-
-
 def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     calls = []
 
@@ -269,12 +298,16 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     ))
 
     assert tokens == ["Final ", "answer"]
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0]["stream"] is False
-    assert calls[1]["stream"] is True
+    assert calls[1]["stream"] is False
+    assert calls[2]["stream"] is True
     assert calls[0]["settings"].max_tokens == 6144
-    assert calls[1]["settings"].max_tokens == 6144
-    assert "Draft answer with one gap." in calls[1]["messages"][0]["content"]
+    assert calls[1]["settings"].max_tokens == 2048
+    assert calls[2]["settings"].max_tokens == 6144
+    assert "Draft answer with one gap." in calls[2]["messages"][0]["content"]
+    assert "--- CLAIM AUDIT ---" in calls[2]["messages"][0]["content"]
+    assert "deterministic_fallback" in calls[2]["messages"][0]["content"]
 
 
 def test_response_effort_reserves_thinking_capacity_separately_from_final_output():
@@ -551,21 +584,245 @@ def test_document_readers_stream_hash_and_avoid_duplicate_extraction(monkeypatch
 
     calls = []
 
-    class FakePage:
-        def extract_text(self):
-            calls.append("extract")
-            return "page text"
-
-    monkeypatch.setattr(documents, "PdfReader", lambda _path: SimpleNamespace(pages=[FakePage(), FakePage()]))
+    monkeypatch.setattr(
+        documents,
+        "parse_pdf",
+        lambda _path: (calls.append("extract"), SimpleNamespace(text="page text\npage text"))[1],
+    )
     text, _mode = documents.extract_text("fixture.pdf")
     assert text == "page text\npage text"
-    assert len(calls) == 2
+    assert calls == ["extract"]
 
     workbook = SimpleNamespace(worksheets=[])
     load_workbook = lambda *_args, **kwargs: (calls.append(kwargs), workbook)[1]
     monkeypatch.setattr(documents.openpyxl, "load_workbook", load_workbook)
     documents.extract_text("fixture.xlsx")
     assert calls[-1]["read_only"] is True
+
+
+def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_footer(monkeypatch):
+    def word(text, x0, top, x1, bottom, size=10, fontname="Regular"):
+        return {
+            "text": text,
+            "x0": x0,
+            "top": top,
+            "x1": x1,
+            "bottom": bottom,
+            "size": size,
+            "fontname": fontname,
+        }
+
+    class FakeTable:
+        bbox = (40, 180, 300, 240)
+
+        def extract(self):
+            return [["Model", "Recall"], ["Baseline", "72.4"], ["RATE", "81.7"]]
+
+    class FakePage:
+        width = 600
+        height = 800
+
+        def __init__(self, page_number):
+            self.page_number = page_number
+            self.images = [{"x0": 40, "top": 300, "x1": 220, "bottom": 400}]
+
+        def extract_words(self, **_kwargs):
+            heading = [
+                word("3", 40, 50, 50, 65, 16, "Bold"),
+                word("Results", 55, 50, 130, 65, 16, "Bold"),
+            ] if self.page_number == 1 else []
+            return heading + [
+                word("Retrieval", 40, 120, 95, 132),
+                word("improved", 100, 120, 155, 132),
+                word("substantially.", 160, 120, 235, 132),
+                word("Figure", 40, 410, 75, 420, 9),
+                word("1:", 80, 410, 90, 420, 9),
+                word("Retrieval", 95, 410, 145, 420, 9),
+                word("pipeline", 150, 410, 195, 420, 9),
+                word("Proceedings", 250, 760, 320, 770, 8),
+                word(str(self.page_number), 325, 760, 332, 770, 8),
+            ]
+
+        def find_tables(self, _settings):
+            return [FakeTable()] if self.page_number == 1 else []
+
+        def extract_text(self, **_kwargs):
+            return "fallback"
+
+        def close(self):
+            return None
+
+    class FakePdf:
+        pages = [FakePage(1), FakePage(2)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    fake_image = SimpleNamespace(
+        data=b"embedded-image",
+        name="figure.png",
+        image=SimpleNamespace(size=(180, 100)),
+    )
+    monkeypatch.setattr(pdf_parser.pdfplumber, "open", lambda *_args, **_kwargs: FakePdf())
+    monkeypatch.setattr(
+        pdf_parser,
+        "PdfReader",
+        lambda _path: SimpleNamespace(
+            pages=[SimpleNamespace(images=[fake_image]), SimpleNamespace(images=[fake_image])]
+        ),
+    )
+
+    parsed = pdf_parser.parse_pdf("fixture.pdf")
+
+    assert parsed.page_count == 2
+    assert "Proceedings" not in parsed.text
+    assert any(block.block_type == "table" and "RATE | 81.7" in block.text for block in parsed.blocks)
+    paragraph = next(block for block in parsed.blocks if "improved substantially" in block.text)
+    assert paragraph.page_number == 1
+    assert paragraph.heading_path == ["3 Results"]
+    assert paragraph.element_id.startswith("el-")
+    assert len(parsed.assets) == 2
+    assert parsed.assets[0].caption == "Figure 1: Retrieval pipeline"
+    assert parsed.assets[0].asset_id in next(
+        block for block in parsed.blocks if block.block_type == "caption"
+    ).asset_ids
+
+
+def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_path):
+    state = build_memory_state()
+    state.settings.data_dir = str(tmp_path / "data")
+    file_path = tmp_path / "paper.pdf"
+    file_path.write_bytes(b"%PDF fixture")
+    extracted = documents.ExtractedDocument(
+        text="4 Findings\n\nThe measured result was 81.7.",
+        extraction_mode="native_structured",
+        page_count=1,
+        parser_version=pdf_parser.PARSER_VERSION,
+        assets=[
+            pdf_parser.PdfAsset(
+                asset_id="p1-img-0123456789abcdef",
+                page_number=1,
+                bounding_box=(40, 120, 240, 220),
+                data=b"fixture-image",
+                extension=".png",
+                mime_type="image/png",
+                sha256="0123456789abcdef",
+                caption="Figure 1: Measured result",
+                width=200,
+                height=100,
+            ),
+        ],
+        blocks=[
+            pdf_parser.DocumentBlock(
+                text="4 Findings",
+                page_number=1,
+                block_type="heading",
+                heading_path=["4 Findings"],
+                heading_level=1,
+                bounding_box=(40, 40, 180, 60),
+                block_index=0,
+            ),
+            pdf_parser.DocumentBlock(
+                text="The measured result was 81.7.",
+                page_number=1,
+                block_type="paragraph",
+                heading_path=["4 Findings"],
+                bounding_box=(40, 80, 280, 105),
+                block_index=1,
+                element_id="el-measured-result",
+                asset_ids=["p1-img-0123456789abcdef"],
+            ),
+        ],
+    )
+    monkeypatch.setattr(documents, "extract_document", lambda *_args, **_kwargs: extracted)
+
+    async def fake_embedding(_app_state, _text):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+
+    result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    chunk = storage.fetchone(
+        state.sqlite,
+        """
+        SELECT block_type, section_heading, heading_path, page_number, page_end,
+               block_index, bounding_box, parser_version, provenance_json
+        FROM chunks WHERE doc_id = ?
+        """,
+        (result["doc_id"],),
+    )
+
+    assert result["status"] == "ready"
+    assert chunk["block_type"] == "paragraph"
+    assert chunk["section_heading"] == "4 Findings"
+    assert chunk["heading_path"] == '["4 Findings"]'
+    assert (chunk["page_number"], chunk["page_end"], chunk["block_index"]) == (1, 1, 1)
+    assert chunk["parser_version"] == pdf_parser.PARSER_VERSION
+    assert '"element_ids": ["el-measured-result"]' in chunk["provenance_json"]
+    asset = storage.fetchone(
+        state.sqlite,
+        "SELECT id, filename, caption FROM document_assets WHERE doc_id = ?",
+        (result["doc_id"],),
+    )
+    assert asset["id"] == "p1-img-0123456789abcdef"
+    assert asset["caption"] == "Figure 1: Measured result"
+    assert (tmp_path / "data" / "document-assets" / result["doc_id"] / asset["filename"]).read_bytes() == b"fixture-image"
+    hydrated = retrieval.hydrate_sources(
+        state,
+        [{
+            "id": f"{result['doc_id']}_0",
+            "doc_id": result["doc_id"],
+            "text": "The measured result was 81.7.",
+            "score": 0.9,
+        }],
+    )
+    assert hydrated[0].element_ids == ["el-measured-result"]
+    assert hydrated[0].assets[0].url.endswith("/assets/p1-img-0123456789abcdef")
+    response = document_routes.get_document_asset(
+        SimpleNamespace(app=SimpleNamespace(state=state)),
+        result["doc_id"],
+        "p1-img-0123456789abcdef",
+    )
+    assert response.media_type == "image/png"
+    assert response.path.endswith(asset["filename"])
+
+
+def test_pdf_asset_reindex_rollback_restores_previous_files(tmp_path):
+    doc_id = "11111111-1111-1111-1111-111111111111"
+    old = pdf_parser.PdfAsset(
+        asset_id="p1-img-old",
+        page_number=1,
+        bounding_box=None,
+        data=b"old",
+        extension=".png",
+        mime_type="image/png",
+        sha256="old",
+    )
+    first = document_assets.AssetTransaction.prepare(str(tmp_path), doc_id, [old])
+    first.promote()
+    first.finalize()
+
+    new = pdf_parser.PdfAsset(
+        asset_id="p1-img-new",
+        page_number=1,
+        bounding_box=None,
+        data=b"new",
+        extension=".png",
+        mime_type="image/png",
+        sha256="new",
+    )
+    replacement = document_assets.AssetTransaction.prepare(str(tmp_path), doc_id, [new])
+    replacement.promote()
+    replacement.rollback()
+
+    active = tmp_path / "document-assets" / doc_id
+    assert (active / "p1-img-old.png").read_bytes() == b"old"
+    assert not (active / "p1-img-new.png").exists()
+    document_assets.delete_document_assets(str(tmp_path), doc_id)
+    assert not active.exists()
 
 
 def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
@@ -835,34 +1092,69 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     assert "Cephalon retrieval fixture" in context
 
 
-def test_reranker_scores_candidates_in_one_onnx_batch():
-    class BatchTokenizer:
-        def __call__(self, pairs, **_kwargs):
-            return {
-                "input_ids": np.ones((len(pairs), 8), dtype=np.int64),
-                "attention_mask": np.ones((len(pairs), 8), dtype=np.int64),
-            }
-
-    class BatchSession:
-        def __init__(self):
-            self.calls = 0
-
-        def get_inputs(self):
-            return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
-
-        def run(self, _output_names, ort_inputs):
-            self.calls += 1
-            batch_size = ort_inputs["input_ids"].shape[0]
-            return [np.asarray([[2.0 + index, 0.5] for index in range(batch_size)], dtype=np.float32)]
-
-    session = BatchSession()
-    state = SimpleNamespace(
-        tokenizer=BatchTokenizer(),
-        reranker=session,
-        reranker_score_mode="logit_margin_0_minus_1",
-        reranker_batch_size=3,
-        rerank_cache=OrderedDict(),
+def test_hydrate_sources_adds_structured_provenance():
+    state = build_memory_state()
+    doc_id = "11111111-1111-4111-8111-111111111111"
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type)
+        VALUES (?, ?, ?, ?, 1, 'ready', 'file')
+        """,
+        (doc_id, "paper.pdf", "Paper", "hash"),
     )
+    storage.execute(
+        state.sqlite,
+        """
+        INSERT INTO chunks (
+            id, doc_id, chunk_index, text, block_type, section_heading,
+            heading_path, page_number, page_end, block_index, bounding_box
+        )
+        VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chunk-1",
+            doc_id,
+            "Result table",
+            "table",
+            "Experimental Results",
+            '["Results","Experimental Results"]',
+            7,
+            8,
+            42,
+            "[72.0,145.0,510.0,260.0]",
+        ),
+    )
+
+    sources = retrieval.hydrate_sources(
+        state,
+        [{"id": "chunk-1", "doc_id": doc_id, "text": "Result table", "score": 0.9}],
+    )
+
+    assert sources[0].page_number == 7
+    assert sources[0].page_end == 8
+    assert sources[0].block_type == "table"
+    assert sources[0].heading_path == ["Results", "Experimental Results"]
+    assert sources[0].bounding_box == (72.0, 145.0, 510.0, 260.0)
+    assert retrieval.source_location_label(sources[0]) == "page 7-8 | Experimental Results | table"
+
+
+def test_reranker_uses_jina_v35_listwise_indices(monkeypatch):
+    state = SimpleNamespace(
+        rerank_cache=OrderedDict(),
+        reranker_runtime_status={},
+    )
+    calls = []
+
+    def fake_listwise(_state, query, documents):
+        calls.append((query, documents))
+        return [
+            {"index": 2, "relevance_score": 0.92},
+            {"index": 0, "relevance_score": 0.61},
+            {"index": 1, "relevance_score": -0.08},
+        ]
+
+    monkeypatch.setattr(jina_runtime, "rerank", fake_listwise)
     results = [
         {"id": "a", "text": "first candidate", "score": 0.0},
         {"id": "b", "text": "second candidate", "score": 0.0},
@@ -871,43 +1163,137 @@ def test_reranker_scores_candidates_in_one_onnx_batch():
 
     ranked = retrieval.rerank(state, "query", results)
 
-    assert session.calls == 1
-    assert all("rerank_score" in item for item in ranked)
-    assert ranked[0]["rerank_score"] > ranked[-1]["rerank_score"]
+    assert calls == [("query", ["first candidate", "second candidate", "third candidate"])]
+    assert [item["id"] for item in ranked] == ["c", "a", "b"]
+    assert ranked[0]["listwise_rank"] == 1
+    assert ranked[0]["reranker_raw_score"] == 0.92
 
 
-def test_embedder_scores_texts_in_one_onnx_batch():
+def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatch):
+    state = build_memory_state()
+    state.rerank_cache = OrderedDict()
+    candidates = [
+        {"id": f"chunk-{index}", "doc_id": f"doc-{index}", "text": f"candidate {index}", "score": 1.0 - index / 100, "dense_rank": 1 if index == 0 else None}
+        for index in range(7)
+    ]
+    rerank_calls = []
+
+    async def fake_search(_state, _prompt, _vector, _settings):
+        return candidates, "dense", {"latency": {}}
+
+    def fake_rerank(_state, _query, rows):
+        rerank_calls.append([row["id"] for row in rows])
+        return [
+            {**row, "reranker_raw_score": 1.0 - rank / 10, "rerank_score": 1.0 - rank / 10, "final_score": 1.0 - rank / 10, "listwise_rank": rank + 1}
+            for rank, row in enumerate(rows)
+        ]
+
+    monkeypatch.setattr(retrieval, "plan_subqueries", lambda _prompt: [{"id": "q0", "text": "question"}])
+    monkeypatch.setattr(retrieval, "_search_once", fake_search)
+    monkeypatch.setattr(retrieval, "rerank", fake_rerank)
+    monkeypatch.setattr(retrieval.metrics, "append_retrieval_event", lambda *_args, **_kwargs: None)
+
+    _context, _sources, meta = asyncio.run(retrieval.retrieve_context(state, "question", [0.0] * 768, RagSettings(top_k=2, rerank_top_n=2)))
+
+    assert rerank_calls == [[f"chunk-{index}" for index in range(7)]]
+    assert len(meta["trace"]["reranked_candidates"]) == 7
+    assert meta["trace"]["reranked_candidates"][0]["reranker_raw_score"] == 1.0
+    assert meta["trace"]["reranked_candidates"][0]["listwise_rank"] == 1
+
+
+def test_reranker_verification_compares_files_with_official_manifest(monkeypatch, tmp_path):
+    model_dir = tmp_path / "reranker"
+    model_dir.mkdir()
+    for filename, content in (("config.json", b"config"), ("tokenizer.json", b"tokenizer")):
+        (model_dir / filename).write_bytes(content)
+    state = build_memory_state()
+    state.settings.reranker_model_dir = str(model_dir)
+    manifest = {
+        "repo_id": "jinaai/jina-reranker-v3.5",
+        "revision": "immutable-test-revision",
+        "files": {
+            filename: {"sha256": jina_runtime._sha256(model_dir / filename), "git_blob_sha1": jina_runtime._git_blob_sha1(model_dir / filename)}
+            for filename in ("config.json", "tokenizer.json")
+        },
+    }
+    monkeypatch.setattr(jina_runtime, "_official_manifest", lambda _repo: manifest)
+
+    assert jina_runtime.verify_model(state, "reranker")["verified"] is True
+    (model_dir / "config.json").write_bytes(b"tampered")
+    invalid = jina_runtime.verify_model(state, "reranker")
+
+    assert invalid["verified"] is False
+    assert "mismatch for config.json" in invalid["error"]
+    assert invalid["revision"] == "immutable-test-revision"
+
+
+def test_pdf_asset_transaction_deduplicates_repeated_content_addressed_asset(tmp_path):
+    asset = pdf_parser.PdfAsset(
+        asset_id="p1-img-0123456789abcdef0123",
+        page_number=1,
+        bounding_box=None,
+        data=b"same image bytes",
+        extension=".png",
+        mime_type="image/png",
+        sha256="0123456789abcdef",
+    )
+
+    transaction = document_assets.AssetTransaction.prepare(str(tmp_path), "doc-1", [asset, asset])
+
+    assert len(transaction.rows) == 1
+    assert len(list(__import__("pathlib").Path(transaction.staging).iterdir())) == 1
+    transaction.rollback()
+
+
+def test_boundaryless_text_is_split_before_embedding():
+    text = " ".join(f"token{index}" for index in range(401))
+    settings = RagSettings(parent_target_tokens=100, parent_max_tokens=100, child_target_tokens=32, child_max_tokens=32)
+
+    parents = ingestion.build_parent_chunks(text, settings)
+    children = asyncio.run(ingestion.build_semantic_child_chunks(build_memory_state(), text, settings))
+
+    assert max(ingestion.estimate_tokens(chunk) for chunk in parents) <= 100
+    assert max(ingestion.estimate_tokens(chunk) for chunk in children) <= 32
+    assert " ".join(parents) == text
+
+
+def test_completed_reindex_progress_is_persisted():
+    state = build_memory_state()
+    run = storage.create_reindex_run(state.sqlite, "full", 2)
+    now = 1778755000
+    for job_id, status in (("complete", "succeeded"), ("failure", "failed")):
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO jobs (id, kind, path, status, created_at, updated_at, reindex_run_id) VALUES (?, 'reindex', ?, ?, ?, ?, ?)",
+            (job_id, f"{job_id}.md", status, now, now, run["id"]),
+        )
+
+    completed = storage.refresh_reindex_run(state.sqlite, run["id"])
+
+    assert completed["status"] == "completed_with_errors"
+    assert completed["processed_documents"] == 2
+    assert completed["succeeded_documents"] == 1
+    assert completed["failed_documents"] == 1
+    assert storage.latest_reindex_run(state.sqlite)["id"] == run["id"]
+
+
+def test_embedder_calls_dedicated_server_in_one_batch(monkeypatch):
     state = build_memory_state()
     state.embedding_dim = storage.active_embedding_metadata()["embedding_dim"]
-    state.embedding_fixed_sequence_length = None
-    state.embedding_pooling = "embedding"
     calls = []
+    state.retrieval_error = None
 
-    class BatchTokenizer:
-        def __call__(self, texts, **_kwargs):
-            count = len(texts)
-            return {
-                "input_ids": np.ones((count, 3), dtype=np.int64),
-                "attention_mask": np.ones((count, 3), dtype=np.int64),
-            }
+    def fake_embed(_state, texts):
+        calls.append(list(texts))
+        return [[float(index + 1)] * state.embedding_dim for index, _ in enumerate(texts)]
 
-    class BatchEmbedder:
-        def run(self, _output_names, ort_inputs):
-            batch_size = ort_inputs["input_ids"].shape[0]
-            calls.append(batch_size)
-            return [np.asarray([
-                [float(index)] * state.embedding_dim
-                for index in range(batch_size)
-            ], dtype=np.float32)]
-
-    state.embed_tokenizer = BatchTokenizer()
-    state.embedder = BatchEmbedder()
+    monkeypatch.setattr(jina_runtime, "embed", fake_embed)
 
     vectors = asyncio.run(retrieval.get_embeddings(state, ["first", "second", "third"]))
 
-    assert calls == [3]
+    assert calls == [["first", "second", "third"]]
     assert len(vectors) == 3
-    assert vectors[1][0] == 1.0
+    assert vectors[1][0] == pytest.approx(1 / np.sqrt(state.embedding_dim))
 
 
 def test_context_compressor_keeps_relevant_cited_sentences():
@@ -920,10 +1306,15 @@ def test_context_compressor_keeps_relevant_cited_sentences():
         )
     ]
 
-    compressed, stats = retrieval.compress_context("stress supplements", sources, max_sentences=2)
+    compressed, stats, evidence_by_source = retrieval.compress_context(
+        "stress supplements",
+        sources,
+        max_sentences=2,
+    )
 
     assert "[[src:S1]]" in compressed
     assert "Ashwagandha" in compressed
+    assert evidence_by_source["S1"].startswith("Ashwagandha")
     assert stats["kept_sentences"] == 2
     assert 0 < stats["context_relevance"] <= 1
 

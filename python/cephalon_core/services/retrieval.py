@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
@@ -16,6 +17,7 @@ from ..config import EMBEDDING_DIMENSION
 from ..schemas import RagSettings, SourceChunk
 from . import metrics
 from . import observability
+from . import jina_runtime
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -110,8 +112,8 @@ def _get_embedding_sync(app_state, text: str) -> list[float]:
 
 
 def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
-    if getattr(app_state, "embedder", None) is None:
-        raise RuntimeError("Embedding engine is not ready.")
+    if getattr(app_state, "retrieval_error", None):
+        raise RuntimeError(app_state.retrieval_error)
     if not texts:
         return []
 
@@ -160,63 +162,21 @@ def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
 
 
 def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
-    fixed_length = getattr(app_state, "embedding_fixed_sequence_length", None)
-    tokenizer_kwargs = {"truncation": True, "return_tensors": "np"}
-    if fixed_length:
-        tokenizer_kwargs.update({"padding": "max_length", "max_length": int(fixed_length)})
-    else:
-        tokenizer_kwargs["padding"] = True
-    inputs = app_state.embed_tokenizer(texts, **tokenizer_kwargs)
-    accepted_inputs = {item.name for item in app_state.embedder.get_inputs()} if hasattr(app_state.embedder, "get_inputs") else set()
-    ort_inputs = {"input_ids": inputs["input_ids"].astype(np.int64)}
-    if "attention_mask" in inputs and (not accepted_inputs or "attention_mask" in accepted_inputs):
-        ort_inputs["attention_mask"] = inputs["attention_mask"].astype(np.int64)
-    if "token_type_ids" in inputs and (not accepted_inputs or "token_type_ids" in accepted_inputs):
-        ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
-
-    runtime = getattr(app_state, "embedding_runtime", None)
-    guard = runtime.exclusive() if runtime is not None else nullcontext()
-    with guard:
-        outs = app_state.embedder.run(None, ort_inputs)
-    output = np.asarray(outs[0])
-    if output.ndim == 2:
-        batch_vectors = output
-    elif output.ndim == 3:
-        pooling = getattr(app_state, "embedding_pooling", "auto")
-        batch_vectors = []
-        if pooling == "last_token":
-            for index, hidden in enumerate(output):
-                seq_len = int(ort_inputs["attention_mask"][index].sum()) - 1
-                batch_vectors.append(hidden[max(seq_len, 0)])
-        elif pooling == "cls":
-            batch_vectors = [hidden[0] for hidden in output]
-        else:
-            masks = ort_inputs.get("attention_mask")
-            if masks is None:
-                batch_vectors = [hidden.mean(axis=0) for hidden in output]
-            else:
-                batch_vectors = [
-                    (hidden * masks[index][:, np.newaxis]).sum(axis=0) / max(int(masks[index].sum()), 1)
-                    for index, hidden in enumerate(output)
-                ]
-    else:
-        raise RuntimeError(f"Unsupported embedding output rank: {output.ndim}")
-
-    if getattr(app_state, "embedding_normalized", False):
-        batch_vectors = np.asarray([
-            vector / norm if (norm := np.linalg.norm(vector)) else vector
-            for vector in batch_vectors
-        ])
-
-    if len(batch_vectors) != len(texts):
-        raise RuntimeError(f"Embedding ONNX returned {len(batch_vectors)} vectors for {len(texts)} texts.")
-    expected_dim = getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)
-    vectors = []
-    for vector in batch_vectors:
-        if len(vector) != expected_dim:
-            raise RuntimeError(f"Embedding dimension mismatch: got {len(vector)}, expected {expected_dim}. Re-export ONNX models and rebuild the index.")
-        vectors.append(vector.tolist())
-    return vectors
+    # The dedicated llama.cpp service performs Nano's required last-token
+    # pooling.  Request batches are OpenAI-compatible and server-normalized;
+    # normalize once more here to keep persisted vectors unit length.
+    vectors = jina_runtime.embed(app_state, texts)
+    normalized = []
+    for vector in vectors:
+        array = np.asarray(vector, dtype=np.float32)
+        norm = np.linalg.norm(array)
+        if not norm:
+            raise RuntimeError("Jina Nano returned a zero embedding.")
+        array = array / norm
+        if array.size != EMBEDDING_DIMENSION:
+            raise RuntimeError(f"Jina Nano returned {array.size} dimensions; expected fixed {EMBEDDING_DIMENSION}.")
+        normalized.append(array.tolist())
+    return normalized
 
 
 async def save_permanent_memory(app_state, conversation_id: str, message_id: str, user_prompt: str, answer_text: str) -> None:
@@ -276,26 +236,54 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
     if not results:
         return []
     cache_key = _rerank_cache_key(prompt, results)
-    cache: OrderedDict[str, list[float]] = getattr(app_state, "rerank_cache", None)
+    cache: OrderedDict[str, list[dict]] = getattr(app_state, "rerank_cache", None)
     if cache is None:
         cache = OrderedDict()
         app_state.rerank_cache = cache
     cached_scores = cache.get(cache_key)
     if cached_scores is not None and len(cached_scores) == len(results):
         cache.move_to_end(cache_key)
-        scores = np.asarray(cached_scores, dtype=float)
+        listwise_results = cached_scores
     else:
-        pairs = [[prompt, _rerank_text(res.get("text", ""))] for res in results]
-        scores = _score_rerank_pairs(app_state, pairs)
-        cache[cache_key] = [float(score) for score in scores]
+        documents = [_rerank_text(res.get("text", "")) for res in results]
+        try:
+            listwise_results = jina_runtime.rerank(app_state, prompt, documents)
+        except RuntimeError as exc:
+            # Retrieval remains useful through its separately preserved dense
+            # and FTS5/RRF stages when the isolated worker is unavailable.
+            runtime_status = getattr(app_state, "reranker_runtime_status", None)
+            if runtime_status is None:
+                runtime_status = {}
+                app_state.reranker_runtime_status = runtime_status
+            runtime_status["last_failure"] = str(exc)
+            runtime_status["status"] = "error"
+            for res in results:
+                res["rerank_score"] = None
+                res["reranker_raw_score"] = None
+                res["listwise_rank"] = None
+                res["score"] = round(_retrieval_prior_score(prompt, res), 6)
+                res["final_score"] = res["score"]
+            return sorted(results, key=lambda item: item["score"], reverse=True)
+        cache[cache_key] = listwise_results
         cache.move_to_end(cache_key)
         while len(cache) > RERANK_CACHE_LIMIT:
             cache.popitem(last=False)
-    for idx, res in enumerate(results):
-        res["rerank_score"] = float(scores[idx])
+    by_index = {int(item["index"]): item for item in listwise_results}
+    for listwise_rank, item in enumerate(listwise_results, start=1):
+        input_index = int(item["index"])
+        if input_index not in by_index or not 0 <= input_index < len(results):
+            raise RuntimeError("Jina v3.5 returned an invalid listwise candidate index.")
+        res = results[input_index]
+        raw_score = float(item["relevance_score"])
+        res["reranker_raw_score"] = raw_score
+        res["listwise_rank"] = listwise_rank
+        res["rerank_score"] = raw_score
         res["retrieval_prior_score"] = _retrieval_prior_score(prompt, res)
-        res["score"] = _final_retrieval_score(prompt, res, float(scores[idx]))
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+        # v3.5 scores are cosine relevance values, not v3 logits.  Keep the
+        # raw value separately and use a deterministic bounded fusion.
+        res["score"] = round(0.75 * raw_score + 0.25 * res["retrieval_prior_score"], 6)
+        res["final_score"] = res["score"]
+    return sorted(results, key=lambda x: (x["score"], -int(x.get("listwise_rank") or 10**9)), reverse=True)
 
 
 def _rerank_text(text: str) -> str:
@@ -306,6 +294,8 @@ def _rerank_text(text: str) -> str:
 
 
 def _score_rerank_pair(app_state, pair: list[str]) -> float:
+    # Legacy ONNX pairwise implementation retained for migration reference.
+    # The active Jina v3.5 path above never calls this function.
     return float(_score_rerank_pairs(app_state, [pair])[0])
 
 
@@ -343,10 +333,6 @@ def _run_reranker_batch(app_state, pairs: list[list[str]]) -> np.ndarray:
 def _rerank_cache_key(prompt: str, results: list[dict]) -> str:
     candidate_key = "|".join(f"{res.get('id')}:{hashlib.sha256(str(res.get('text', '')).encode('utf-8')).hexdigest()[:16]}" for res in results)
     return hashlib.sha256(f"{prompt.strip().lower()}::{candidate_key}".encode("utf-8")).hexdigest()
-
-
-def _rerank_candidate_limit(settings: RagSettings) -> int:
-    return max(settings.rerank_top_n + 2, settings.rerank_top_n * 2)
 
 
 def _reranker_scores(app_state, raw_scores: np.ndarray) -> np.ndarray:
@@ -457,6 +443,60 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         placeholders = ",".join("?" * len(doc_ids))
         rows = storage.fetchall(app_state.sqlite, f"SELECT id, path, display_name FROM documents WHERE id IN ({placeholders})", tuple(doc_ids))
         path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
+    chunk_ids = [res["id"] for res in results if res.get("doc_id") != "core_memory"]
+    provenance_map: dict[str, dict[str, Any]] = {}
+    asset_map: dict[tuple[str, str], dict[str, Any]] = {}
+    if doc_ids:
+        placeholders = ",".join("?" * len(doc_ids))
+        asset_rows = storage.fetchall(
+            app_state.sqlite,
+            f"""
+            SELECT id, doc_id, page_number, bounding_box, mime_type, caption,
+                   width, height
+            FROM document_assets
+            WHERE doc_id IN ({placeholders})
+            """,
+            tuple(doc_ids),
+        )
+        for row in asset_rows:
+            bbox = _json_metadata(row["bounding_box"], None)
+            asset_map[(row["doc_id"], row["id"])] = {
+                "asset_id": row["id"],
+                "page_number": row["page_number"],
+                "bounding_box": tuple(bbox) if isinstance(bbox, list) and len(bbox) == 4 else None,
+                "mime_type": row["mime_type"],
+                "caption": row["caption"],
+                "width": row["width"],
+                "height": row["height"],
+                "url": f"/documents/{row['doc_id']}/assets/{row['id']}",
+            }
+    if chunk_ids:
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = storage.fetchall(
+            app_state.sqlite,
+            f"""
+            SELECT id, block_type, section_heading, heading_path, page_number,
+                   page_end, block_index, bounding_box, provenance_json
+            FROM chunks
+            WHERE id IN ({placeholders})
+            """,
+            tuple(chunk_ids),
+        )
+        for row in rows:
+            heading_path = _json_metadata(row["heading_path"], [])
+            bounding_box = _json_metadata(row["bounding_box"], None)
+            provenance = _json_metadata(row["provenance_json"], {})
+            provenance_map[row["id"]] = {
+                "block_type": row["block_type"],
+                "section_heading": row["section_heading"],
+                "heading_path": heading_path if isinstance(heading_path, list) else [],
+                "page_number": row["page_number"],
+                "page_end": row["page_end"],
+                "block_index": row["block_index"],
+                "bounding_box": tuple(bounding_box) if isinstance(bounding_box, list) and len(bounding_box) == 4 else None,
+                "element_ids": provenance.get("element_ids", []) if isinstance(provenance, dict) else [],
+                "provenance": provenance if isinstance(provenance, dict) else {},
+            }
 
     sources: list[SourceChunk] = []
     for rank, res in enumerate(results, start=start_rank):
@@ -464,6 +504,13 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         doc_name = "Core Memory" if doc_id == "core_memory" else path_map.get(doc_id, "Unknown")
         text = res["text"].strip()
         source_id = f"S{rank}"
+        provenance = provenance_map.get(res["id"], {})
+        source_asset_ids = provenance.get("provenance", {}).get("asset_ids", [])
+        source_assets = [
+            asset_map[(doc_id, asset_id)]
+            for asset_id in source_asset_ids
+            if (doc_id, asset_id) in asset_map
+        ]
         sources.append(SourceChunk(
             rank=rank,
             source_id=source_id,
@@ -472,14 +519,44 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             chunk_id=res["id"],
             parent_id=res.get("parent_id"),
             score=float(res.get("score", 0)),
+            final_score=float(res["final_score"]) if res.get("final_score") is not None else float(res.get("score", 0)),
             vector_score=float(res["_distance"]) if "_distance" in res and res["_distance"] is not None else None,
-            rerank_score=float(res.get("rerank_score", res.get("score", 0))),
+            rerank_score=float(res["rerank_score"]) if res.get("rerank_score") is not None else None,
+            reranker_raw_score=float(res["reranker_raw_score"]) if res.get("reranker_raw_score") is not None else None,
+            listwise_rank=int(res["listwise_rank"]) if res.get("listwise_rank") is not None else None,
             lexical_score=float(res["lexical_score"]) if res.get("lexical_score") is not None else None,
             fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
             snippet=text[:500],
             subquery_id=subquery_id or ",".join(res.get("subquery_ids", [])) or None,
+            assets=source_assets,
+            **provenance,
         ))
     return sources
+
+
+def _json_metadata(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def source_location_label(source: SourceChunk | None) -> str:
+    if source is None:
+        return ""
+    details: list[str] = []
+    if source.page_number is not None:
+        page_label = str(source.page_number)
+        if source.page_end is not None and source.page_end != source.page_number:
+            page_label = f"{page_label}-{source.page_end}"
+        details.append(f"page {page_label}")
+    if source.section_heading:
+        details.append(source.section_heading)
+    if source.block_type and source.block_type != "paragraph":
+        details.append(source.block_type)
+    return " | ".join(details)
 
 
 def _merge_candidates(target: dict[str, dict], results: list[dict], subquery_id: str) -> None:
@@ -756,7 +833,11 @@ def _sentence_relevance(query_terms: set[str], sentence: str) -> float:
     return len(query_terms & sentence_terms) / len(query_terms | sentence_terms)
 
 
-def compress_context(query: str, sources: list[CompressionSource], max_sentences: int = 10) -> tuple[str, dict[str, Any]]:
+def compress_context(
+    query: str,
+    sources: list[CompressionSource],
+    max_sentences: int = 10,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
     query_terms = _term_set(query)
     candidates: list[dict[str, Any]] = []
     for source in sources:
@@ -790,13 +871,19 @@ def compress_context(query: str, sources: list[CompressionSource], max_sentences
     total_sentences = len(candidates)
     relevant_total = sum(1 for item in candidates if item["relevant"])
     compressed = "\n".join(f"[[src:{item['source_id']}]] {item['sentence']}" for item in kept)
+    evidence_by_source: dict[str, list[str]] = {}
+    for item in kept:
+        evidence_by_source.setdefault(item["source_id"], []).append(item["sentence"])
     stats = {
         "input_sentences": total_sentences,
         "kept_sentences": len(kept),
         "relevant_sentence_count": relevant_total,
         "context_relevance": round(relevant_total / total_sentences, 6) if total_sentences else 0.0,
     }
-    return compressed, stats
+    return compressed, stats, {
+        source_id: "\n".join(evidence)
+        for source_id, evidence in evidence_by_source.items()
+    }
 
 
 def confidence_from_sources(sources: list[SourceChunk], settings: RagSettings | None = None) -> dict[str, Any]:
@@ -897,8 +984,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         }
         anchors = [row for row in candidates if row["id"] in anchor_ids]
         non_anchors = [row for row in candidates if row["id"] not in anchor_ids]
-        rerank_candidates = (anchors + non_anchors)[:_rerank_candidate_limit(settings)]
-        skipped_rerank = candidates[len(rerank_candidates):]
+        # Jina v3.5 is listwise: its relevance scores depend on the complete
+        # candidate set, so never pre-cut the fused set before one rerank call.
+        rerank_candidates = anchors + non_anchors
         rerank_started = time.perf_counter()
         all_ranked = await asyncio.to_thread(rerank, app_state, prompt, rerank_candidates)
         trace["latency"]["rerank_ms"] = round((time.perf_counter() - rerank_started) * 1000, 2)
@@ -926,18 +1014,18 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             for rank, row in enumerate(all_ranked, start=1)
             if row["id"] not in selected_ids
         ][: max(settings.top_k, 10)])
-        trace["unused_candidates"].extend([
-            {**_trace_candidate(row, rank + len(rerank_candidates)), "reason": "below rerank candidate cutoff"}
-            for rank, row in enumerate(skipped_rerank, start=1)
-        ][: max(settings.top_k, 10)])
         all_sources = hydrate_sources(app_state, reranked)
         source_by_chunk = {source.chunk_id: source for source in all_sources}
         for res in reranked:
             source = source_by_chunk.get(res["id"])
             if res["doc_id"] == CORE_MEMORY_DOC_ID:
                 context_chunks.append(format_source_context(source.source_id or "S1", "Past conversation", res["id"], res["text"]))
+                if source:
+                    source.evidence_text = res["text"].strip()
                 continue
             label = source.doc_name if source else "Unknown"
+            if location := source_location_label(source):
+                label = f"{label} | {location}"
             source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
             context_text = _parent_context(app_state, res) or res["text"]
             context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
@@ -949,10 +1037,16 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             compression_inputs.append(CompressionSource(source_id=source_id, text=compression_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
 
     if compression_inputs:
-        compressed_context, compression_stats = compress_context(prompt, compression_inputs, max_sentences=max(6, settings.rerank_top_n * 3))
+        compressed_context, compression_stats, evidence_by_source = compress_context(
+            prompt,
+            compression_inputs,
+            max_sentences=max(6, settings.rerank_top_n * 3),
+        )
         if compressed_context:
             memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
             context_chunks = memory_context + [compressed_context]
+            for source in all_sources:
+                source.evidence_text = evidence_by_source.get(source.source_id or "")
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 
@@ -1005,10 +1099,13 @@ def _trace_candidate(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "source_kind": _trace_value(row.get("source_kind")),
         "chunk_index": _trace_value(row.get("chunk_index")),
         "score": _trace_value(row.get("score")),
+        "final_score": _trace_value(row.get("final_score", row.get("score"))),
         "vector_score": _trace_value(row.get("vector_score")),
         "lexical_score": _trace_value(row.get("lexical_score")),
         "fusion_score": _trace_value(row.get("fusion_score")),
         "rerank_score": _trace_value(row.get("rerank_score")),
+        "reranker_raw_score": _trace_value(row.get("reranker_raw_score")),
+        "listwise_rank": _trace_value(row.get("listwise_rank")),
         "dense_rank": _trace_value(row.get("dense_rank")),
         "lexical_rank": _trace_value(row.get("lexical_rank")),
         "summary_rank": _trace_value(row.get("summary_rank")),

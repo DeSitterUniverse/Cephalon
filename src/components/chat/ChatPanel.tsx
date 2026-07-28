@@ -83,7 +83,7 @@ export function ChatPanel({ selectedModel, modelReady, settings, conversation, s
     abortRef.current = controller;
     followOutputRef.current = true;
     setIsTyping(true);
-    setResponsePhase("Connecting to retrieval...");
+    setResponsePhase("Connecting...");
     setMessages([...baseMessages, { role: "user", content: userMsg }, { id: assistantDraftId, role: "assistant", content: "", status: "streaming" }]);
 
     try {
@@ -339,7 +339,9 @@ function renderSourceTags(content: string) {
 }
 
 function phaseLabel(phase: string) {
-  if (phase === "Connecting to retrieval...") return phase;
+  if (phase === "Connecting...") return phase;
+  if (phase === "routing") return "Choosing whether to search documents...";
+  if (phase === "retrieving") return "Retrieving relevant context...";
   if (phase === "drafting") return "Drafting an answer...";
   if (phase === "refining") return "Refining the answer...";
   if (phase === "answering") return "Writing the answer...";

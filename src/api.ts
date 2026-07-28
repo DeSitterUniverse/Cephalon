@@ -14,6 +14,8 @@ export type Document = {
   modified_at?: number | null;
   last_error?: string | null;
   last_indexed_at?: number | null;
+  stale_embedding?: boolean;
+  stale_reasons?: string[];
   tags?: string[];
   chunk_preview?: Array<{
     id: string;
@@ -31,15 +33,12 @@ export type RagSettings = {
   rerank_top_n: number;
   max_tokens: number;
   temperature: number;
-  chunk_size: number;
-  chunk_overlap: number;
   parent_target_tokens: number;
   parent_max_tokens: number;
   child_target_tokens: number;
   child_max_tokens: number;
   child_overlap_tokens: number;
   context_tokens: number;
-  full_context: boolean;
   evidence_required: boolean;
   conversation_memory: boolean;
   trace_persistence: boolean;
@@ -56,12 +55,35 @@ export type SourceChunk = {
   chunk_id: string;
   parent_id?: string | null;
   score: number;
+  final_score?: number | null;
   snippet: string;
+  evidence_text?: string | null;
   vector_score?: number | null;
   lexical_score?: number | null;
   fusion_score?: number | null;
   rerank_score?: number | null;
+  reranker_raw_score?: number | null;
+  listwise_rank?: number | null;
   subquery_id?: string | null;
+  block_type?: string | null;
+  section_heading?: string | null;
+  heading_path?: string[];
+  page_number?: number | null;
+  page_end?: number | null;
+  block_index?: number | null;
+  bounding_box?: [number, number, number, number] | null;
+  element_ids?: string[];
+  provenance?: Record<string, unknown>;
+  assets?: Array<{
+    asset_id: string;
+    page_number: number;
+    bounding_box?: [number, number, number, number] | null;
+    mime_type: string;
+    caption?: string | null;
+    width?: number | null;
+    height?: number | null;
+    url: string;
+  }>;
 };
 export type StoredMessage = Message & {
   id: string;
@@ -80,10 +102,46 @@ export type CitationSupport = {
   reason: string;
   score?: number | null;
   rerank_score?: number | null;
+  reranker_raw_score?: number | null;
+  listwise_rank?: number | null;
+  claim_ids?: string[];
+  claims?: string[];
+  evidence?: string | null;
 };
 export type AnswerSupport = {
-  status: "supported" | "weak" | "unsupported";
+  status: "supported" | "weak" | "unsupported" | "not_applicable";
   citations: CitationSupport[];
+  accounting?: {
+    citation_count: number;
+    unique_citation_count: number;
+    cited_source_ids: string[];
+    valid_source_ids: string[];
+    invalid_source_ids: string[];
+    duplicate_source_ids?: string[];
+    malformed_citations?: string[];
+    unused_citation_source_ids?: string[];
+    uncited_source_ids?: string[];
+    available_source_count: number;
+    uncited_source_count: number;
+    citation_precision: number;
+  };
+  claim_validation?: {
+    method: string;
+    claim_count: number;
+    supported_claim_count: number;
+    weak_claim_count: number;
+    unsupported_claim_count: number;
+    uncited_claim_count: number;
+    claims: Array<{
+      claim_id: string;
+      text: string;
+      source_ids: string[];
+      status: "supported" | "weak" | "unsupported" | "uncited";
+      reason: string;
+      coverage: number;
+      coverage_by_source: Record<string, number>;
+    }>;
+  };
 };
 export type RetrievalTraceSummary = {
   query_id: string;
@@ -172,6 +230,42 @@ export type HealthResponse = {
     table?: string;
   };
   embedding?: { model_id: string; dimension: number; table: string };
+  retrieval_error?: string | null;
+  retrieval_stack?: FixedRetrievalStatus;
+};
+
+export type FixedModelKind = "embedder" | "reranker";
+export type FixedModelInfo = {
+  kind: FixedModelKind;
+  name: string;
+  model_id: string;
+  revision: string;
+  path: string;
+  model_file?: string | null;
+  installed: boolean;
+  dimension?: number | null;
+  verified?: boolean;
+  sha256?: string | null;
+  sha256_expected?: string | null;
+  trust_remote_code?: boolean;
+  runtime: Record<string, unknown>;
+};
+export type FixedRetrievalStatus = {
+  fixed_stack: true;
+  embedder: FixedModelInfo;
+  reranker: FixedModelInfo;
+  reindex_required: boolean;
+};
+export type ReindexProgress = {
+  run_id?: string;
+  status: "idle" | "queued" | "running" | "completed" | "completed_with_errors";
+  processed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  stale_document_count: number;
+  reindex_required: boolean;
 };
 
 export type OnnxModelKind = "embedder" | "reranker" | "all";
@@ -287,6 +381,38 @@ export function installLocalOnnxModel(kind: Exclude<OnnxModelKind, "all">, path:
     method: "POST",
     body: JSON.stringify({ kind, path }),
   });
+}
+
+export function getFixedRetrievalStatus(): Promise<FixedRetrievalStatus> {
+  return requestJson<FixedRetrievalStatus>("/models/status");
+}
+
+export function downloadFixedModel(kind: FixedModelKind) {
+  return requestJson<{ status: string; restart_required: boolean; model: FixedModelInfo }>("/models/download", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function verifyFixedModel(kind: FixedModelKind): Promise<FixedModelInfo> {
+  return requestJson<FixedModelInfo>("/models/verify", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function deleteFixedModel(kind: FixedModelKind) {
+  return requestJson<{ status: string; kind: FixedModelKind; path: string }>("/models/delete", { method: "POST", body: JSON.stringify({ kind, confirmed: true }) });
+}
+
+export function openFixedModelDirectory(kind: FixedModelKind) {
+  return requestJson<{ status: string; path: string }>("/models/open", { method: "POST", body: JSON.stringify({ kind }) });
+}
+
+export function getReindexProgress(): Promise<ReindexProgress> {
+  return requestJson<ReindexProgress>("/reindex/progress");
+}
+
+export function reindexAllDocuments() {
+  return requestJson<{ status: string; total: number }>("/reindex/full", { method: "POST" });
+}
+
+export function reindexStaleDocuments() {
+  return requestJson<{ status: string; total: number }>("/reindex/stale", { method: "POST" });
 }
 
 export function getDocuments(): Promise<DocumentsResponse> {

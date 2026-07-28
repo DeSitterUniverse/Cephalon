@@ -73,7 +73,7 @@ export function LibraryPanel({ documents, search, setSearch, statusFilter, setSt
             <button className="document-select" type="button" onClick={() => setSelectedDocumentId(doc.id)}>
               <div className="document-main">
                 <strong>{doc.name}</strong>
-                <span>{doc.status} / {doc.chunks} chunks</span>
+                <span>{doc.stale_embedding ? "stale - reindex required" : doc.status} / {doc.chunks} chunks</span>
               </div>
               <div className="document-tags">
                 {(doc.tags || []).slice(0, 3).map(tag => <span key={tag}><Tag size={11} />{tag}</span>)}

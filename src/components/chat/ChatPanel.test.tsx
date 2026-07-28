@@ -2,9 +2,10 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
-import type { Conversation, RagSettings } from "../../api";
+import type { Conversation } from "../../api";
 import { queryModel } from "../../api";
 import { useUiStore } from "../../store";
+import { ragSettings } from "../../test/fixtures";
 
 vi.mock("../../api", async importOriginal => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -13,29 +14,6 @@ vi.mock("../../api", async importOriginal => {
     queryModel: vi.fn(),
   };
 });
-
-const settings: RagSettings = {
-  top_k: 8,
-  rerank_top_n: 3,
-  max_tokens: 256,
-  temperature: 0.4,
-  chunk_size: 1500,
-  chunk_overlap: 150,
-  parent_target_tokens: 520,
-  parent_max_tokens: 650,
-  child_target_tokens: 110,
-  child_max_tokens: 150,
-  child_overlap_tokens: 0,
-  context_tokens: 32768,
-  full_context: false,
-  evidence_required: false,
-  conversation_memory: true,
-  trace_persistence: true,
-  no_answer_min_confidence: 0.35,
-  no_answer_min_rerank_score: 0.15,
-  no_answer_min_vector_score: 0.05,
-  no_answer_min_source_count: 1,
-};
 
 const conversation: Conversation = {
   id: "conversation-1",
@@ -76,7 +54,7 @@ describe("ChatPanel", () => {
       <ChatPanel
         selectedModel="local.gguf"
         modelReady
-        settings={settings}
+        settings={ragSettings}
         conversation={conversation}
         selectedConversationId="conversation-1"
       />,
@@ -92,7 +70,7 @@ describe("ChatPanel", () => {
   });
 
   it("shows retrieval scope control next to the composer", () => {
-    render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} />);
+    render(<ChatPanel selectedModel="local.gguf" modelReady settings={ragSettings} />);
 
     expect(screen.getByLabelText("Retrieval scope")).toHaveValue("medium");
     expect(screen.getByText("Low retrieval")).toBeInTheDocument();
@@ -127,7 +105,7 @@ describe("ChatPanel", () => {
       <ChatPanel
         selectedModel="local.gguf"
         modelReady
-        settings={settings}
+        settings={ragSettings}
         selectedConversationId={null}
         onConversationSelected={onConversationSelected}
       />,
@@ -148,7 +126,7 @@ describe("ChatPanel", () => {
       },
     }));
 
-    render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} />);
+    render(<ChatPanel selectedModel="local.gguf" modelReady settings={ragSettings} />);
     const composer = screen.getByRole("textbox", { name: "Message" });
 
     await user.type(composer, "first line{Shift>}{Enter}{/Shift}second line");
@@ -161,7 +139,7 @@ describe("ChatPanel", () => {
       "first line\nsecond line",
       "local.gguf",
       [],
-      settings,
+      ragSettings,
       undefined,
       "medium",
       "balanced",
@@ -181,7 +159,7 @@ describe("ChatPanel", () => {
       });
     });
 
-    render(<ChatPanel selectedModel="local.gguf" modelReady settings={settings} />);
+    render(<ChatPanel selectedModel="local.gguf" modelReady settings={ragSettings} />);
     await user.type(screen.getByRole("textbox", { name: "Message" }), "long request");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.getByText("Partial answer")).toBeInTheDocument());
@@ -206,7 +184,7 @@ describe("ChatPanel", () => {
       <ChatPanel
         selectedModel="local.gguf"
         modelReady
-        settings={settings}
+        settings={ragSettings}
         conversation={conversation}
         selectedConversationId="conversation-1"
       />,

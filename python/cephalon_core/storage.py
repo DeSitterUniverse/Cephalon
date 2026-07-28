@@ -431,6 +431,61 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "010_feedback_eval_cases")
 
+    if not migration_applied(conn, "011_structured_provenance"):
+        for column, definition in [
+            ("page_end", "INTEGER"),
+            ("block_index", "INTEGER"),
+            ("bounding_box", "TEXT"),
+            ("provenance_json", "TEXT"),
+        ]:
+            add_column_if_missing(conn, "chunks", column, definition)
+        mark_migration(conn, "011_structured_provenance")
+
+    if not migration_applied(conn, "012_stale_index_reasons"):
+        add_column_if_missing(conn, "documents", "stale_reasons", "TEXT")
+        mark_migration(conn, "012_stale_index_reasons")
+
+    if not migration_applied(conn, "013_document_assets"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS document_assets (
+                id TEXT NOT NULL,
+                doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                page_number INTEGER NOT NULL,
+                bounding_box TEXT,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                caption TEXT,
+                width INTEGER,
+                height INTEGER,
+                size_bytes INTEGER NOT NULL,
+                PRIMARY KEY (doc_id, id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_assets_doc_page
+                ON document_assets(doc_id, page_number);
+        """)
+        mark_migration(conn, "013_document_assets")
+
+    if not migration_applied(conn, "014_reindex_runs"):
+        add_column_if_missing(conn, "jobs", "reindex_run_id", "TEXT")
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS reindex_runs (
+                id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_documents INTEGER NOT NULL,
+                processed_documents INTEGER NOT NULL DEFAULT 0,
+                succeeded_documents INTEGER NOT NULL DEFAULT 0,
+                failed_documents INTEGER NOT NULL DEFAULT 0,
+                cancelled_documents INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_reindex_runs_created ON reindex_runs(created_at DESC);
+        """)
+        mark_migration(conn, "014_reindex_runs")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -562,6 +617,7 @@ def document_payload(conn: sqlite3.Connection, row: sqlite3.Row, tags: list[str]
         "embedding_model_id": row["embedding_model_id"] if "embedding_model_id" in row.keys() else None,
         "embedding_dim": row["embedding_dim"] if "embedding_dim" in row.keys() else None,
         "stale_embedding": bool(row["stale_embedding"]) if "stale_embedding" in row.keys() else False,
+        "stale_reasons": _json_value(row["stale_reasons"], []) if "stale_reasons" in row.keys() else [],
         "extraction_mode": row["extraction_mode"] if "extraction_mode" in row.keys() else None,
         "last_retrieved_at": row["last_retrieved_at"] if "last_retrieved_at" in row.keys() else None,
         "retrieval_count": row["retrieval_count"] if "retrieval_count" in row.keys() else 0,
@@ -586,7 +642,9 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
     chunks = fetchall(
         conn,
         """
-        SELECT id, chunk_index, text, block_type, token_count, char_count, chunking_profile, embedding_status
+        SELECT id, chunk_index, text, block_type, section_heading, heading_path,
+               page_number, page_end, block_index, bounding_box, token_count,
+               char_count, chunking_profile, embedding_status
         FROM chunks
         WHERE doc_id = ?
         ORDER BY chunk_index
@@ -601,6 +659,12 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
             "index": chunk["chunk_index"],
             "text": chunk["text"][:500],
             "block_type": chunk["block_type"],
+            "section_heading": chunk["section_heading"],
+            "heading_path": _json_value(chunk["heading_path"], []),
+            "page_number": chunk["page_number"],
+            "page_end": chunk["page_end"],
+            "block_index": chunk["block_index"],
+            "bounding_box": _json_value(chunk["bounding_box"], None),
             "token_count": chunk["token_count"],
             "char_count": chunk["char_count"],
             "chunking_profile": chunk["chunking_profile"],
@@ -609,6 +673,15 @@ def get_document_payload(conn: sqlite3.Connection, doc_id: str, preview_limit: i
         for chunk in chunks
     ]
     return payload
+
+
+def _json_value(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
 
 
 def active_vector_table_name(app_state=None) -> str:
@@ -620,6 +693,62 @@ def active_embedding_metadata(app_state=None) -> dict[str, int | str]:
         "embedding_model_id": getattr(app_state, "embedding_model_id", EMBEDDING_MODEL_ID) if app_state is not None else EMBEDDING_MODEL_ID,
         "embedding_dim": getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION) if app_state is not None else EMBEDDING_DIMENSION,
     }
+
+
+def create_reindex_run(conn: sqlite3.Connection, mode: str, total_documents: int) -> dict[str, Any]:
+    import uuid
+
+    now = int(time.time())
+    run_id = str(uuid.uuid4())
+    status = "completed" if total_documents == 0 else "queued"
+    execute(
+        conn,
+        """
+        INSERT INTO reindex_runs (id, mode, status, total_documents, created_at, updated_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, mode, status, total_documents, now, now, now if total_documents == 0 else None),
+    )
+    return get_reindex_run(conn, run_id) or {}
+
+
+def get_reindex_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM reindex_runs WHERE id = ?", (run_id,))
+    return row_to_dict(row)
+
+
+def latest_reindex_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = fetchone(conn, "SELECT * FROM reindex_runs ORDER BY created_at DESC LIMIT 1")
+    return row_to_dict(row)
+
+
+def refresh_reindex_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    run = get_reindex_run(conn, run_id)
+    if not run:
+        return None
+    rows = fetchall(conn, "SELECT status FROM jobs WHERE reindex_run_id = ?", (run_id,))
+    counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("queued", "running", "succeeded", "failed", "cancelled")}
+    processed = counts["succeeded"] + counts["failed"] + counts["cancelled"]
+    total = int(run["total_documents"])
+    terminal = processed >= total
+    if terminal:
+        status = "completed" if not counts["failed"] and not counts["cancelled"] else "completed_with_errors"
+    elif counts["running"]:
+        status = "running"
+    else:
+        status = "queued"
+    now = int(time.time())
+    execute(
+        conn,
+        """
+        UPDATE reindex_runs
+        SET status = ?, processed_documents = ?, succeeded_documents = ?, failed_documents = ?,
+            cancelled_documents = ?, updated_at = ?, completed_at = ?
+        WHERE id = ?
+        """,
+        (status, processed, counts["succeeded"], counts["failed"], counts["cancelled"], now, now if terminal else None, run_id),
+    )
+    return get_reindex_run(conn, run_id)
 
 
 def create_conversation(conn: sqlite3.Connection, title: str | None = None) -> dict[str, Any]:
