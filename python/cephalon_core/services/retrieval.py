@@ -22,7 +22,14 @@ RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
 EMBEDDING_CACHE_LIMIT = 128
 EMBEDDING_INFERENCE_BATCH_SIZE = 16
-RERANK_CACHE_LIMIT = 96
+# A scientific benchmark or focused research session readily exceeds 96
+# distinct questions.  Because each entry retains only Jina's compact
+# ``index``/``relevance_score`` output (never document text or embeddings), 256
+# entries remain a low-single-digit-megabyte hard bound even at the maximum
+# fused-candidate window.  The larger working set also prevents sequential
+# workloads just over the old limit from cyclically evicting every cache hit
+# and repeatedly paying GGUF model startup.
+RERANK_CACHE_LIMIT = 256
 RERANK_TEXT_LIMIT = 700
 MEMORY_ONLY_REQUEST = re.compile(r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\s+only\b", re.IGNORECASE)
 MEMORY_PREFERRED_REQUEST = re.compile(
