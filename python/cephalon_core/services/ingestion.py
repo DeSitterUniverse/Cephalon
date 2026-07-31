@@ -20,7 +20,72 @@ PARENT_MAX_TOKENS = 650
 CHILD_TARGET_TOKENS = 110
 CHILD_MAX_TOKENS = 150
 PARSER_VERSION = "cephalon-basic-2026-05"
-CHUNKING_PROFILE = "semantic_parent_child_v1"
+CHUNKING_PROFILE = "semantic_parent_child_v2"
+SUMMARY_PROFILE = "deterministic_parent_summary_v2"
+SUMMARY_MAX_CHARACTERS = 700
+SUMMARY_MAX_CONTENT_UNITS = 5
+SUMMARY_MAX_ENTITIES = 6
+SUMMARY_MAX_METADATA_CHARACTERS = 110
+SUMMARY_MIN_UNIT_CHARACTERS = 56
+SUMMARY_MAX_UNIT_CHARACTERS = 180
+
+# HiChunk and FreeChunker motivate preserving useful retrieval representations
+# at more than one granularity. Summary v2 is Cephalon's bounded, deterministic
+# adaptation: patterns decide which original parent units deserve the small
+# summary-node budget, but never invent or paraphrase evidence. The categories
+# mirror common scientific retrieval needs and remain inspectable without
+# adding a model call during ingestion.
+SUMMARY_CATEGORY_PATTERNS = {
+    "Definition": re.compile(
+        r"\b(?:we define|is defined as|refers to|denotes|is an?|are (?:an?|the)|means)\b",
+        re.IGNORECASE,
+    ),
+    "Method": re.compile(
+        r"\b(?:we (?:use|used|propose|introduce|develop)|method|approach|pipeline|protocol|dataset|experiment)\b",
+        re.IGNORECASE,
+    ),
+    "Result": re.compile(
+        r"\b(?:we (?:find|found|show|demonstrate|observe|report)|results? show|achiev(?:e|ed)|"
+        r"outperform(?:s|ed)?|improv(?:e|ed|ement)|increase(?:d)?|decrease(?:d)?|significant(?:ly)?)\b",
+        re.IGNORECASE,
+    ),
+    "Limitation": re.compile(
+        r"\b(?:limitation|caveat|however|although|despite|restricted to|may not|cannot|future work)\b",
+        re.IGNORECASE,
+    ),
+    "Conclusion": re.compile(
+        r"\b(?:we conclude|in conclusion|overall|therefore|thus|these findings|our findings)\b",
+        re.IGNORECASE,
+    ),
+}
+SUMMARY_NUMBER_PATTERN = re.compile(
+    r"(?<!\w)[-+]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)"
+    r"(?:[eE][-+]?\d+)?(?:\s?(?:%|ms|s|kg|g|mg|km|m|cm|mm|K|°C|Hz|GHz|V|W|Wh))?"
+)
+SUMMARY_ENTITY_PATTERN = re.compile(
+    r"(?:"
+    r"[A-Z][A-Za-z0-9+.-]*[A-Za-z0-9+]"
+    r"(?:\s+[A-Z][A-Za-z0-9+.-]*[A-Za-z0-9+]){1,4}"
+    r"|(?<![\w-])[A-Z][A-Z0-9]{1,}(?:-[A-Za-z0-9]+)*(?![\w-])"
+    r"|(?<![\w-])[A-Za-z]*[A-Z][A-Za-z]*\d+[A-Za-z0-9-]*(?![\w-])"
+    r")"
+)
+SUMMARY_ENTITY_STOPWORDS = {
+    "Abstract",
+    "Conclusion",
+    "Discussion",
+    "Figure",
+    "Introduction",
+    "Method",
+    "Methods",
+    "Result",
+    "Results",
+    "Section",
+    "Table",
+    "The",
+    "This",
+    "These",
+}
 
 
 ProgressCallback = Callable[[str, int], Awaitable[None]]
@@ -105,7 +170,7 @@ async def process_single_file(
         for parent_index, parent in enumerate(parents):
             parent_text = parent.text
             parent_id = f"{doc_id}_p{parent_index}"
-            summary = summarize_parent(parent_text)
+            summary = summarize_parent(parent_text, parent.blocks)
             summary_id = f"{parent_id}_s"
             parent_rows.append((parent_id, doc_id, parent_index, parent_text, summary, estimate_tokens(parent_text), now))
             summary_rows.append((summary_id, doc_id, parent_id, parent_index, summary, estimate_tokens(summary), now))
@@ -447,13 +512,17 @@ def _split_units_to_token_limit(units: list[str], maximum: int) -> list[str]:
     return bounded
 
 
-def _chunking_config(settings: RagSettings) -> dict[str, int]:
+def _chunking_config(settings: RagSettings) -> dict[str, int | str]:
     return {
         "parent_target_tokens": settings.parent_target_tokens,
         "parent_max_tokens": settings.parent_max_tokens,
         "child_target_tokens": settings.child_target_tokens,
         "child_max_tokens": settings.child_max_tokens,
         "child_overlap_tokens": settings.child_overlap_tokens,
+        # Summary vectors are stored in the same LanceDB table as child
+        # vectors. Changing their selection policy must therefore mark every
+        # prior document stale and require an explicit reindex.
+        "summary_profile": SUMMARY_PROFILE,
     }
 
 
@@ -786,13 +855,232 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-def summarize_parent(text: str) -> str:
-    units = split_text_units(text)
+def summarize_parent(text: str, blocks: list[DocumentBlock] | None = None) -> str:
+    """Build a bounded, extractive scientific summary for dense retrieval.
+
+    The previous implementation copied the first three units, which strongly
+    favored introductions and often omitted the measured result or caveat.
+    Version 2 allocates the same 700-character storage budget across headings,
+    repeated entities, definitions, methods, results, numbers, limitations,
+    and conclusions. Text is only whitespace-normalized and boundary-truncated;
+    it is never generated or paraphrased, preserving the evidence/provenance
+    boundary.
+
+    Complexity is O(parent characters + units × categories). Parents are
+    already capped at 650 tokens, and both emitted units and entities have hard
+    limits, so this cannot create an unbounded ingestion-time loop.
+    """
+
+    units = [_normalize_summary_unit(unit) for unit in split_text_units(text)]
+    units = [unit for unit in units if unit]
     if not units:
-        return text[:500]
-    selected = units[:3]
-    summary = " ".join(selected)
-    return summary[:700]
+        return _truncate_summary(text.strip(), SUMMARY_MAX_CHARACTERS)
+    if len(units) == 1 and not _summary_heading_path(blocks or []):
+        # A short one-unit parent already is its own lossless summary. Labels
+        # would add storage and alter rollback fixtures without improving the
+        # retrieval representation.
+        return _truncate_summary(units[0], SUMMARY_MAX_CHARACTERS)
+
+    components: list[str] = []
+    heading_path = _summary_heading_path(blocks or [])
+    if heading_path:
+        heading = _truncate_summary(
+            " > ".join(heading_path),
+            SUMMARY_MAX_METADATA_CHARACTERS,
+        )
+        components.append(f"Section: {heading}")
+
+    entities = _summary_entities(text)
+    if entities:
+        entity_text = _truncate_summary(
+            "; ".join(entities),
+            SUMMARY_MAX_METADATA_CHARACTERS,
+        )
+        components.append(f"Entities: {entity_text}")
+
+    numbers = _summary_numbers(text)
+    if numbers:
+        number_text = _truncate_summary(
+            "; ".join(numbers),
+            SUMMARY_MAX_METADATA_CHARACTERS,
+        )
+        components.append(f"Values: {number_text}")
+
+    selected_indexes: set[int] = set()
+    selected_units: list[tuple[int, str, str]] = []
+    category_candidates: dict[str, tuple[int, str]] = {}
+    for label, pattern in SUMMARY_CATEGORY_PATTERNS.items():
+        candidate = _best_summary_unit(units, pattern, label, selected_indexes)
+        if candidate is not None:
+            selected_indexes.add(candidate)
+            category_candidates[label] = (candidate, units[candidate])
+
+    # Results carry the highest retrieval value for evidence-dense scientific
+    # questions. Definitions and methods follow, while caveats and conclusions
+    # remain eligible when they have an unclaimed source unit.
+    for label in ("Result", "Definition", "Method", "Limitation", "Conclusion"):
+        if label in category_candidates:
+            index, unit = category_candidates[label]
+            selected_units.append((index, label, unit))
+
+    if not selected_units:
+        selected_units.append((0, "Context", units[0]))
+        selected_indexes.add(0)
+
+    # Fill remaining slots with high-information context units after every
+    # detected evidence category has had an opportunity to claim a slot.
+    remaining = sorted(
+        (
+            (_summary_unit_score(unit, index, len(units)), index, unit)
+            for index, unit in enumerate(units)
+            if index not in selected_indexes
+        ),
+        reverse=True,
+    )
+    while len(selected_units) < SUMMARY_MAX_CONTENT_UNITS and remaining:
+        _score, index, unit = remaining.pop(0)
+        selected_units.append((index, "Context", unit))
+
+    selected_units = selected_units[:SUMMARY_MAX_CONTENT_UNITS]
+    label_overhead = sum(len(label) + 2 for _index, label, _unit in selected_units)
+    separator_overhead = len(components) + len(selected_units)
+    available_for_units = max(
+        SUMMARY_MIN_UNIT_CHARACTERS * len(selected_units),
+        SUMMARY_MAX_CHARACTERS
+        - len(" ".join(components))
+        - label_overhead
+        - separator_overhead,
+    )
+    per_unit_budget = min(
+        SUMMARY_MAX_UNIT_CHARACTERS,
+        max(
+            SUMMARY_MIN_UNIT_CHARACTERS,
+            available_for_units // max(1, len(selected_units)),
+        ),
+    )
+    components.extend(
+        f"{label}: {_truncate_summary(unit, per_unit_budget)}"
+        for _index, label, unit in selected_units
+    )
+    return _truncate_summary(" ".join(components), SUMMARY_MAX_CHARACTERS)
+
+
+def _normalize_summary_unit(text: str) -> str:
+    """Collapse extraction whitespace without changing lexical content."""
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _summary_heading_path(blocks: list[DocumentBlock]) -> list[str]:
+    """Return the first stable structured heading path for this parent."""
+
+    for block in blocks:
+        if block.heading_path:
+            return [
+                _normalize_summary_unit(value)
+                for value in block.heading_path
+                if _normalize_summary_unit(value)
+            ]
+    return []
+
+
+def _summary_entities(text: str) -> list[str]:
+    """Select repeated or distinctive entity strings in deterministic order."""
+
+    counts: dict[str, tuple[int, int]] = {}
+    for match in SUMMARY_ENTITY_PATTERN.finditer(text):
+        entity = _normalize_summary_unit(match.group(0))
+        if entity in SUMMARY_ENTITY_STOPWORDS or len(entity) < 2:
+            continue
+        count, first_position = counts.get(entity, (0, match.start()))
+        counts[entity] = (count + 1, first_position)
+    ranked = sorted(
+        counts,
+        key=lambda entity: (
+            -counts[entity][0],
+            counts[entity][1],
+            entity.casefold(),
+        ),
+    )
+    return ranked[:SUMMARY_MAX_ENTITIES]
+
+
+def _summary_numbers(text: str) -> list[str]:
+    """Return unique values with units in source order for numeric retrieval."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in SUMMARY_NUMBER_PATTERN.finditer(text):
+        value = _normalize_summary_unit(match.group(0))
+        normalized = value.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        values.append(value)
+        if len(values) >= 8:
+            break
+    return values
+
+
+def _best_summary_unit(
+    units: list[str],
+    pattern: re.Pattern[str],
+    label: str,
+    excluded: set[int],
+) -> int | None:
+    """Choose the strongest unselected exact unit for one evidence category."""
+
+    candidates: list[tuple[float, int]] = []
+    for index, unit in enumerate(units):
+        if index in excluded or not pattern.search(unit):
+            continue
+        score = _summary_unit_score(unit, index, len(units))
+        score += 4.0
+        if label in {"Result", "Numbers"} and SUMMARY_NUMBER_PATTERN.search(unit):
+            score += 2.0
+        if label in {"Limitation", "Conclusion"}:
+            # Caveats and conclusions commonly occur late in a section; a
+            # bounded position bonus offsets the general opening-unit bias.
+            score += index / max(1, len(units) - 1)
+        candidates.append((score, index))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][1]
+
+
+def _summary_unit_score(unit: str, index: int, unit_count: int) -> float:
+    """Score information density without relying on corpus-specific terms."""
+
+    words = unit.split()
+    entity_count = len(SUMMARY_ENTITY_PATTERN.findall(unit))
+    number_count = len(SUMMARY_NUMBER_PATTERN.findall(unit))
+    category_count = sum(
+        1 for pattern in SUMMARY_CATEGORY_PATTERNS.values() if pattern.search(unit)
+    )
+    length_score = min(len(words), 60) / 60
+    opening_bonus = 0.5 if index == 0 else 0.0
+    closing_bonus = 0.35 if index == unit_count - 1 else 0.0
+    return (
+        entity_count * 0.6
+        + number_count * 0.8
+        + category_count
+        + length_score
+        + opening_bonus
+        + closing_bonus
+    )
+
+
+def _truncate_summary(text: str, maximum: int) -> str:
+    """Truncate on a word boundary while keeping the hard storage limit."""
+
+    clean = _normalize_summary_unit(text)
+    if len(clean) <= maximum:
+        return clean
+    boundary = clean.rfind(" ", 0, maximum + 1)
+    if boundary <= 0:
+        boundary = maximum
+    return clean[:boundary].rstrip(" ,;:-")
 
 
 def contextualize_chunk(
