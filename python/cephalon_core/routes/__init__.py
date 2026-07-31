@@ -441,18 +441,28 @@ async def create_eval_run(request: Request, body: EvalRunRequest):
     settings = storage.get_rag_settings(app_state.sqlite).model_copy(update={"top_k": body.top_k, "rerank_top_n": min(body.top_k, 10)})
     retrieved_by_id = {}
     for item in body.evals:
+        if item.id in body.sources:
+            # End-to-end evaluation must grade the evidence actually shown to
+            # the generator and user. Re-running retrieval here can select a
+            # different candidate set, doubles listwise-reranker cost, and
+            # invalidates citation attachment metrics. Retrieval-only callers
+            # omit this field and continue through the normal live path below.
+            retrieved_by_id[item.id] = body.sources[item.id]
+            continue
         vector = await retrieval.get_embedding(app_state, item.question)
         _context, sources, _meta = await retrieval.retrieve_context(app_state, item.question, vector, settings)
-        retrieved_by_id[item.id] = [
-            {"doc_id": source.doc_id, "chunk_id": source.chunk_id, "score": source.score}
-            for source in sources
-        ]
+        # Preserve source identifiers and provenance so answer/citation metrics
+        # use the same evidence contract as the chat UI.
+        retrieved_by_id[item.id] = [source.model_dump() for source in sources]
     run = evaluation.run_eval_set(
         app_state.sqlite,
         [item.model_dump() for item in body.evals],
         body.pipeline,
         retrieved_by_id,
         body.top_k,
+        answers_by_id=body.answers,
+        sources_by_id=body.sources or retrieved_by_id,
+        run_meta=body.run_meta,
     )
     return run
 

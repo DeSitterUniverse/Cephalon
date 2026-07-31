@@ -34,8 +34,11 @@ export function EvaluationPanel({ runs, onRun, isRunning }: Props) {
               <span>{run.top_k}</span>
             </div>
             <div className="source-metrics">
-              <span>recall {Number(run.aggregate.recall_at_k || 0).toFixed(3)}</span>
-              <span>mrr {Number(run.aggregate.mrr || 0).toFixed(3)}</span>
+              <span>recall {metric(run, "recall_at_k")}</span>
+              <span>precision {metric(run, "precision_at_k")}</span>
+              <span>nDCG {metric(run, "ndcg_at_k")}</span>
+              <span>MRR {metric(run, "mrr")}</span>
+              {Number(run.aggregate.case_count || 0) > 0 && <span>{Number(run.aggregate.case_count)} cases</span>}
             </div>
           </article>
         ))}
@@ -43,4 +46,13 @@ export function EvaluationPanel({ runs, onRun, isRunning }: Props) {
       </div>
     </section>
   );
+}
+
+/**
+ * Aggregate values can also contain domain/category trees. Keeping this guard
+ * here prevents a malformed imported report from rendering as ``NaN``.
+ */
+function metric(run: EvalRun, name: string): string {
+  const value = run.aggregate[name];
+  return (typeof value === "number" ? value : 0).toFixed(3);
 }
