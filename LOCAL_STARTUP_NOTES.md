@@ -23,7 +23,25 @@ Start the chat server separately. This Vulkan example is appropriate for a llama
   --ctx-size 8192 --host 127.0.0.1 --port 8080 --no-webui
 ```
 
-Download the fixed Jina Nano Q8_0 embedder and Jina Reranker v3.5 from **Settings**, then restart Cephalon. It starts the dedicated embedding server on port 8090 with `--device Vulkan0 --gpu-layers 999`, and starts the isolated reranker worker when their files are installed.
+Download the fixed Jina Nano Q8_0 embedder and Jina Reranker v3.5 BF16 GGUF
+from **Settings**, then restart Cephalon. It starts the dedicated embedding
+server on port 8090 with `--device Vulkan0 --gpu-layers 999`, and starts the
+isolated reranker worker when its verified helper and model files are present.
+
+The reranker needs Jina's selected-token and irregular-Qwen3-attention
+llama.cpp changes. Build the pinned helper and set its path before launch:
+
+```powershell
+git clone https://github.com/ggml-org/llama.cpp.git C:\AI\llama.cpp-jina-reranker
+git -C C:\AI\llama.cpp-jina-reranker fetch origin pull/26286/head
+git -C C:\AI\llama.cpp-jina-reranker checkout --detach 80c940e5a80555167c4ec37652deca6528810f91
+cmake -S C:\AI\llama.cpp-jina-reranker -B C:\AI\llama.cpp-jina-reranker\build -DGGML_VULKAN=ON -DLLAMA_CURL=OFF
+cmake --build C:\AI\llama.cpp-jina-reranker\build --config Release --target llama-embedding -j 4
+$env:CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN="C:\AI\llama.cpp-jina-reranker\build\bin\Release\llama-embedding.exe"
+```
+
+Set `CEPHALON_RERANKER_BACKEND=transformers` for the legacy CPU rollback.
+Switching reranker runtimes does not require reindexing.
 
 ## GPU Nano embedding server (optional external ownership)
 

@@ -246,6 +246,19 @@ export type FixedModelInfo = {
   sha256?: string | null;
   sha256_expected?: string | null;
   trust_remote_code?: boolean;
+  precision?: string;
+  gguf_installed?: boolean;
+  legacy_installed?: boolean;
+  selected_backend?: "gguf_vulkan" | "transformers_cpu" | null;
+  llama_embedding?: {
+    compatible?: boolean;
+    path?: string;
+    revision?: string | null;
+    required_revision?: string;
+    selected_token_output?: boolean;
+    missing_features?: string[];
+    error?: string | null;
+  };
   runtime: Record<string, unknown>;
 };
 export type FixedRetrievalStatus = {

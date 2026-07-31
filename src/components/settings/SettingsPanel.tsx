@@ -163,15 +163,36 @@ function FixedModelRow({
   onDelete?: (kind: FixedModelKind) => void;
 }) {
   if (!info) return <div className="retrieval-model-row"><small>Checking fixed retrieval stack…</small></div>;
-  const runtime = info.runtime as { status?: string; last_error?: string; last_failure?: string; port?: number; pid?: number; queue_size?: number };
+  const runtime = info.runtime as {
+    status?: string;
+    last_error?: string;
+    last_failure?: string;
+    port?: number;
+    pid?: number;
+    queue_size?: number;
+    backend?: string;
+    device?: string;
+    model_precision?: string;
+  };
+  const rerankerBackend = runtime.backend || info.selected_backend || "unavailable";
+  const rerankerDescription = rerankerBackend === "gguf_vulkan"
+    ? "Official BF16 GGUF listwise reranker via the verified llama.cpp/Vulkan path."
+    : rerankerBackend === "transformers_cpu"
+      ? "Compatibility fallback: official custom Transformers worker on CPU."
+      : "Jina v3.5 listwise reranker; install the verified llama.cpp helper or retain the CPU fallback.";
   return (
     <div className="retrieval-model-row">
       <div className="retrieval-model-main">
         <strong>{info.name}</strong>
-        <small>{info.kind === "embedder" ? "768-dimensional Nano Retrieval via dedicated llama.cpp." : "Jina v3.5 listwise custom Transformers worker."}</small>
+        <small>{info.kind === "embedder" ? "768-dimensional Nano Retrieval via dedicated llama.cpp." : rerankerDescription}</small>
         <span className={runtime.status === "running" ? "status-text ok" : "status-text warn"}>{runtime.status || (info.installed ? "stopped" : "not installed")}</span>
         <small>Revision: {info.revision} · Path: <code>{info.path}</code></small>
-        <small>{info.kind === "embedder" ? `Port ${runtime.port ?? "—"} · PID ${runtime.pid ?? "—"} · fixed ${info.dimension}-dim` : `Worker PID ${runtime.pid ?? "—"} · queue ${runtime.queue_size ?? 0} · trust_remote_code`}</small>
+        <small>{info.kind === "embedder"
+          ? `Port ${runtime.port ?? "—"} · PID ${runtime.pid ?? "—"} · fixed ${info.dimension}-dim`
+          : `Worker PID ${runtime.pid ?? "—"} · queue ${runtime.queue_size ?? 0} · ${rerankerBackend} · ${runtime.device ?? "—"} · ${runtime.model_precision ?? info.precision ?? "—"}`}</small>
+        {info.kind === "reranker" && info.llama_embedding?.error && rerankerBackend !== "gguf_vulkan" && (
+          <em>Vulkan path unavailable: {info.llama_embedding.error}</em>
+        )}
         {(runtime.last_error || runtime.last_failure) && <em>{runtime.last_error || runtime.last_failure}</em>}
       </div>
       <div className="retrieval-model-actions">
