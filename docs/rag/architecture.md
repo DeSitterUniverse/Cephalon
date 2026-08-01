@@ -65,6 +65,22 @@ persistence removes its durable cost. Hard caps are eight requirements, twenty
 sources, four evidence assignments per requirement, 64 conflict comparisons,
 and 500 excerpt characters.
 
+## Coverage-aware selection and compression
+
+`services/coverage_selection.py` greedily chooses from Jina's reranked list by
+marginal value: normalized relevance and uncovered requirement coverage receive
+the largest weights, with smaller source-diversity, parent-coherence, and dense
+anchor bonuses; redundancy and estimated token cost are penalties. Every
+source exposes the objective components in `context_selection`.
+
+Compression uses the same requirement plan. It gives each selected source an
+initial representation opportunity, rewards uncovered requirements, and adds
+explicit preservation bonuses for tables/code/lists, numbers and units,
+negation, and definitions. The existing `rerank_top_n * 3` output-block ceiling
+is unchanged, and candidate examination is capped at 320 blocks. Setting all
+coverage weights to zero and using relevance order provides a rollback without
+reindexing or schema changes.
+
 ## Provenance invariant
 
 Expansion can add context but cannot invent a citation target. The public

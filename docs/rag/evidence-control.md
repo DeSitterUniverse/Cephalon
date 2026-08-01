@@ -27,3 +27,10 @@ stage that owns the transition.
 The ledger never replaces source provenance. Evidence IDs point to exact
 `SourceChunk` records; source IDs remain the citation contract used by existing
 conversations and clients.
+
+Coverage selection uses this requirement list before the final ledger is
+materialized. Selection decisions record normalized relevance, per-requirement
+coverage, diversity/coherence flags, redundancy, estimated tokens, and the
+complete named weight set. Compression reports requirement coverage and source
+representation so benchmark traces can distinguish retrieval misses from
+context-pruning misses.

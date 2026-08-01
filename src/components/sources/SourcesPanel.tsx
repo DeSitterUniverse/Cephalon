@@ -46,6 +46,11 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
               {(source.context_assembly?.structural_relationships?.length || 0) > 0 && (
                 <span>{source.context_assembly?.structural_relationships?.length} layout links</span>
               )}
+              {source.context_selection?.requirement_coverage && (
+                <span>
+                  {Object.values(source.context_selection.requirement_coverage).filter(value => value >= 0.34).length} requirements
+                </span>
+              )}
             </div>
             {source.evidence_text && (
               <div className="source-evidence">
