@@ -17,6 +17,7 @@ from ..schemas import RagSettings, SourceChunk
 from . import metrics
 from . import observability
 from . import jina_runtime
+from .context_assembly import assemble_hierarchical_context
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -462,6 +463,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             doc_name=doc_name,
             chunk_id=res["id"],
             parent_id=res.get("parent_id"),
+            source_kind=res.get("source_kind"),
             score=float(res.get("score", 0)),
             final_score=float(res["final_score"]) if res.get("final_score") is not None else float(res.get("score", 0)),
             vector_score=float(res["_distance"]) if "_distance" in res and res["_distance"] is not None else None,
@@ -958,9 +960,17 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             for rank, row in enumerate(all_ranked, start=1)
             if row["id"] not in selected_ids
         ][: max(settings.top_k, 10)])
-        all_sources = hydrate_sources(app_state, reranked)
+        context_started = time.perf_counter()
+        assemblies = assemble_hierarchical_context(
+            app_state.sqlite,
+            reranked,
+            parent_max_tokens=settings.parent_max_tokens,
+        )
+        assembled_results = [assembly.result for assembly in assemblies]
+        all_sources = hydrate_sources(app_state, assembled_results)
         source_by_chunk = {source.chunk_id: source for source in all_sources}
-        for res in reranked:
+        for assembly in assemblies:
+            res = assembly.result
             source = source_by_chunk.get(res["id"])
             if res["doc_id"] == CORE_MEMORY_DOC_ID:
                 context_chunks.append(format_source_context(source.source_id or "S1", "Past conversation", res["id"], res["text"]))
@@ -971,14 +981,16 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             if location := source_location_label(source):
                 label = f"{label} | {location}"
             source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
-            context_text = _parent_context(app_state, res) or res["text"]
+            context_text = assembly.text
+            if source:
+                source.context_assembly = assembly.trace_payload()
             context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
-            # Parent text provides useful surrounding context for ordinary
-            # results.  For a top dense anchor, however, retain the exact
-            # child hit during compression so a large parent section cannot
-            # crowd out the sentence that earned the top semantic rank.
-            compression_text = res["text"] if res["id"] in anchor_ids else context_text
+            # A top dense anchor remains exact unless sibling evidence earned
+            # an explicit bounded expansion. This preserves the recall safety
+            # net without reverting to unconditional full-parent injection.
+            compression_text = res["text"] if res["id"] in anchor_ids and assembly.context_kind == "child" else context_text
             compression_inputs.append(CompressionSource(source_id=source_id, text=compression_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
+        trace["latency"]["context_ms"] = round((time.perf_counter() - context_started) * 1000, 2)
 
     if compression_inputs:
         compressed_context, compression_stats, evidence_by_source = compress_context(
@@ -1064,14 +1076,6 @@ def _trace_value(value: Any) -> Any:
         except Exception:
             return str(value)
     return value
-
-
-def _parent_context(app_state, result: dict) -> str | None:
-    parent_id = result.get("parent_id")
-    if not parent_id:
-        return None
-    row = storage.fetchone(app_state.sqlite, "SELECT text FROM parent_chunks WHERE id = ?", (parent_id,))
-    return row["text"] if row else None
 
 
 def _structured_numeric_analysis_for_query(app_state, prompt: str) -> tuple[list[str], list[SourceChunk]]:
