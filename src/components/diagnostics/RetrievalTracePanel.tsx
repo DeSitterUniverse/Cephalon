@@ -51,6 +51,19 @@ export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: 
             <span>Confidence</span><strong>{value(selected.no_answer || {}, "confidence")}</strong>
             <span>Total</span><strong>{value(selected.latency, "total_ms")} ms</strong>
           </div>
+          {selected.evidence_ledger && (
+            <details open>
+              <summary>Evidence requirements ({selected.evidence_ledger.requirements.length})</summary>
+              <div className="context-list">
+                {selected.evidence_ledger.requirements.map(requirement => (
+                  <p key={requirement.id}>
+                    <strong>{requirement.id} · {requirement.status}</strong> {requirement.text}
+                    {requirement.evidence_ids.length ? ` · ${requirement.evidence_ids.join(", ")}` : ""}
+                  </p>
+                ))}
+              </div>
+            </details>
+          )}
           {(["vector", "bm25", "fused", "reranked", "unused"] as const).map(stage => (
             <details key={stage} open={stage === "reranked" || stage === "fused"}>
               <summary>{stage} ({selected.candidates[stage]?.length || 0})</summary>
