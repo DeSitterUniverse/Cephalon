@@ -81,6 +81,21 @@ is unchanged, and candidate examination is capped at 320 blocks. Setting all
 coverage weights to zero and using relevance order provides a rollback without
 reindexing or schema changes.
 
+## Thorough gap retrieval
+
+`services/retrieval_control.py` wraps the normal retriever. Balanced and Quick
+return after the initial pass. Thorough inspects the ledger and may issue one
+deterministic evidence query for missing, partial, or conflicting requirements.
+The gap query uses the existing embedder, hybrid retrieval, Jina reranker, and
+context path; it does not make a chat-model planning call.
+
+The round is limited to one query, 12 initial candidates, three novel sources,
+20 seconds, and 50% of initial context tokens (also capped by
+`parent_max_tokens`). Duplicate queries and chunks represented by existing
+parent/span/layout context stop expansion. Gap sources retain round `1` and the
+triggering requirement IDs. Disabling the Thorough effort returns to the exact
+single-pass path without reindexing or migration.
+
 ## Provenance invariant
 
 Expansion can add context but cannot invent a citation target. The public
