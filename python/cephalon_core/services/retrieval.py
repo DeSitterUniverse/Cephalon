@@ -19,7 +19,13 @@ from . import observability
 from . import jina_runtime
 from .context_assembly import assemble_hierarchical_context
 from .layout_expansion import expand_layout_evidence
-from .evidence_ledger import build_evidence_ledger, plan_requirements
+from .evidence_ledger import (
+    build_evidence_ledger,
+    document_identity_matches,
+    is_qualifying_evidence,
+    plan_requirements,
+)
+from .claim_verification import strip_hidden_reasoning
 from .coverage_selection import select_coverage_aware_results
 
 RRF_K = 60
@@ -66,6 +72,8 @@ class CompressionSource:
     text: str
     rank: int
     score: float
+    doc_id: str | None = None
+    doc_name: str | None = None
 
 
 def vector_table_name(app_state=None) -> str:
@@ -208,10 +216,9 @@ async def save_permanent_memory(app_state, conversation_id: str, message_id: str
     if not getattr(storage.get_rag_settings(app_state.sqlite), "conversation_memory", True):
         return
     memory_id = f"mem_{uuid.uuid4()}"
-    # Reasoning traces are useful for the live response, but they are neither a
-    # user-facing answer nor useful semantic-memory content.  Keeping them out
-    # prevents a long trace from drowning out the actual answer on retrieval.
-    clean_answer = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.IGNORECASE | re.DOTALL).strip()
+    # Reasoning traces are neither user-facing answers nor useful semantic
+    # memory. The shared sanitizer also handles an unclosed thought block.
+    clean_answer = strip_hidden_reasoning(answer_text)
     memory_text = (
         f"[Past Conversation Context]\nUser: {user_prompt.strip()[:1600]}\n"
         f"Assistant: {(clean_answer or answer_text.strip())[:3200]}"
@@ -401,10 +408,12 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         return []
     doc_ids = list({res["doc_id"] for res in results if res["doc_id"] != "core_memory"})
     path_map = {}
+    document_path_map: dict[str, str] = {}
     if doc_ids:
         placeholders = ",".join("?" * len(doc_ids))
         rows = storage.fetchall(app_state.sqlite, f"SELECT id, path, display_name FROM documents WHERE id IN ({placeholders})", tuple(doc_ids))
         path_map = {row["id"]: row["display_name"] or os.path.basename(row["path"]) for row in rows}
+        document_path_map = {row["id"]: str(row["path"] or "") for row in rows}
     chunk_ids = [res["id"] for res in results if res.get("doc_id") != "core_memory"]
     provenance_map: dict[str, dict[str, Any]] = {}
     asset_map: dict[tuple[str, str], dict[str, Any]] = {}
@@ -467,6 +476,15 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
         text = res["text"].strip()
         source_id = f"S{rank}"
         provenance = provenance_map.get(res["id"], {})
+        source_provenance = provenance.get("provenance", {})
+        if isinstance(source_provenance, dict) and document_path_map.get(doc_id):
+            provenance = {
+                **provenance,
+                "provenance": {
+                    **source_provenance,
+                    "document_path": document_path_map[doc_id],
+                },
+            }
         source_asset_ids = provenance.get("provenance", {}).get("asset_ids", [])
         source_assets = [
             asset_map[(doc_id, asset_id)]
@@ -496,6 +514,30 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             **provenance,
         ))
     return sources
+
+
+def _attach_document_identities(app_state, results: list[dict[str, Any]]) -> None:
+    """Attach display names before A6 selection can reserve named documents."""
+
+    doc_ids = sorted({str(row.get("doc_id")) for row in results if row.get("doc_id") and row.get("doc_id") != CORE_MEMORY_DOC_ID})
+    names: dict[str, str] = {CORE_MEMORY_DOC_ID: "Core Memory"}
+    if doc_ids:
+        placeholders = ",".join("?" * len(doc_ids))
+        rows = storage.fetchall(
+            app_state.sqlite,
+            f"SELECT id, path, display_name FROM documents WHERE id IN ({placeholders})",
+            tuple(doc_ids),
+        )
+        names.update({
+            str(row["id"]): str(row["display_name"] or os.path.basename(row["path"]))
+            for row in rows
+        })
+        paths = {str(row["id"]): str(row["path"] or "") for row in rows}
+    else:
+        paths = {}
+    for result in results:
+        result["document_name"] = names.get(str(result.get("doc_id")), "Unknown")
+        result["document_path"] = paths.get(str(result.get("doc_id")), "")
 
 
 def _json_metadata(value: str | None, default: Any) -> Any:
@@ -802,10 +844,22 @@ def compress_context(
     sources: list[CompressionSource],
     max_sentences: int = 10,
     requirements: list[dict[str, str]] | None = None,
+    coverage_aware: bool = True,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
+    if not coverage_aware:
+        return _compress_context_legacy(query, sources, max_sentences)
     query_terms = _term_set(query)
     requirements = requirements or []
-    requirement_terms = {item["id"]: _term_set(item["text"]) for item in requirements}
+    requirement_terms = {
+        item["id"]: (
+            {str(value).casefold() for value in item.get("evidence_need", [])}
+            if item.get("named_document")
+            else _term_set(item["text"])
+        )
+        for item in requirements
+    }
+    requirements_by_id = {item["id"]: item for item in requirements}
+    named_requirements = [item for item in requirements if item.get("named_document")]
     candidates: list[dict[str, Any]] = []
     for source in sources:
         for block_type, text in split_context_blocks(source.text):
@@ -822,6 +876,8 @@ def compress_context(
                 "block_type": block_type,
                 "rank": source.rank,
                 "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04) + preservation_bonus,
+                "doc_id": source.doc_id,
+                "doc_name": source.doc_name,
                 "relevant": relevance > 0,
                 "requirement_coverage": requirement_coverage,
                 "preservation_bonus": preservation_bonus,
@@ -837,6 +893,31 @@ def compress_context(
     covered_requirements: set[str] = set()
     represented_sources: set[str] = set()
     remaining = list(candidates)
+    reserved_named_requirement_ids: list[str] = []
+
+    # Preserve one substantive sentence from each named document before
+    # spending the sentence budget on lexical complementarity. This is a
+    # second bounded coverage guard after A6 selection; it protects against a
+    # high-scoring generic sentence crowding out a requested study.
+    for requirement in named_requirements:
+        if len(kept) >= max_sentences:
+            break
+        matching = [
+            candidate for candidate in remaining
+            if document_identity_matches(requirement, candidate)
+            and is_qualifying_evidence(candidate["sentence"])
+        ]
+        if not matching:
+            continue
+        reserved = max(matching, key=lambda item: item["score"])
+        kept.append(reserved)
+        remaining.remove(reserved)
+        terms = _term_set(reserved["sentence"])
+        seen_terms.update(terms)
+        represented_sources.add(reserved["source_id"])
+        covered_requirements.add(requirement["id"])
+        reserved_named_requirement_ids.append(requirement["id"])
+
     while remaining and len(kept) < max_sentences:
         best = None
         best_value = float("-inf")
@@ -861,7 +942,15 @@ def compress_context(
         terms = _term_set(candidate["sentence"])
         overlap = len(terms & seen_terms) / max(len(terms), 1)
         covers_new = any(
-            requirement_id not in covered_requirements and coverage >= CONTEXT_REQUIREMENT_COVERAGE
+            requirement_id not in covered_requirements
+            and coverage >= CONTEXT_REQUIREMENT_COVERAGE
+            and (
+                not requirements_by_id[requirement_id].get("named_document")
+                or (
+                    document_identity_matches(requirements_by_id[requirement_id], candidate)
+                    and is_qualifying_evidence(candidate["sentence"])
+                )
+            )
             for requirement_id, coverage in candidate["requirement_coverage"].items()
         )
         represents_new_source = candidate["source_id"] not in represented_sources
@@ -875,6 +964,13 @@ def compress_context(
             requirement_id
             for requirement_id, coverage in candidate["requirement_coverage"].items()
             if coverage >= CONTEXT_REQUIREMENT_COVERAGE
+            and (
+                not requirements_by_id[requirement_id].get("named_document")
+                or (
+                    document_identity_matches(requirements_by_id[requirement_id], candidate)
+                    and is_qualifying_evidence(candidate["sentence"])
+                )
+            )
         )
 
     if not kept and candidates:
@@ -893,6 +989,10 @@ def compress_context(
         "context_relevance": round(relevant_total / total_sentences, 6) if total_sentences else 0.0,
         "requirement_coverage": round(len(covered_requirements) / len(requirements), 6) if requirements else 1.0,
         "covered_requirement_ids": sorted(covered_requirements),
+        "reserved_named_requirement_ids": reserved_named_requirement_ids,
+        "uncovered_named_requirement_ids": [
+            item["id"] for item in named_requirements if item["id"] not in covered_requirements
+        ],
         "represented_source_count": len(represented_sources),
         "preserved_structured_blocks": sum(item["block_type"] == "structured" for item in kept),
     }
@@ -913,6 +1013,54 @@ def _preservation_bonus(block_type: str, text: str) -> float:
     if re.search(r"\b(?:is defined as|refers to|means|we define)\b", text, re.IGNORECASE):
         bonus += DEFINITION_PRESERVATION_BONUS
     return bonus
+
+
+def _compress_context_legacy(
+    query: str,
+    sources: list[CompressionSource],
+    max_sentences: int,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """Provide the pre-A6 relevance/dedup path for instant rollback."""
+
+    query_terms = _term_set(query)
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        for block_type, text in split_context_blocks(source.text):
+            relevance = _sentence_relevance(query_terms, text)
+            candidates.append({
+                "source_id": source.source_id,
+                "sentence": text,
+                "block_type": block_type,
+                "rank": source.rank,
+                "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04),
+                "relevant": relevance > 0,
+            })
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    kept: list[dict[str, Any]] = []
+    seen_terms: set[str] = set()
+    for candidate in candidates:
+        terms = _term_set(candidate["sentence"])
+        overlap = len(terms & seen_terms) / max(len(terms), 1)
+        if overlap > COMPRESSION_DUPLICATE_THRESHOLD and kept:
+            continue
+        kept.append(candidate)
+        seen_terms.update(terms)
+        if len(kept) >= max_sentences:
+            break
+    if not kept and candidates:
+        kept = candidates[:max_sentences]
+    compressed = "\n".join(f"[[src:{item['source_id']}]] {item['sentence']}" for item in kept)
+    evidence_by_source: dict[str, list[str]] = {}
+    for item in kept:
+        evidence_by_source.setdefault(item["source_id"], []).append(item["sentence"])
+    relevant_total = sum(1 for item in candidates if item["relevant"])
+    return compressed, {
+        "input_sentences": len(candidates),
+        "kept_sentences": len(kept),
+        "relevant_sentence_count": relevant_total,
+        "context_relevance": round(relevant_total / len(candidates), 6) if candidates else 0.0,
+        "mode": "legacy_relevance",
+    }, {key: "\n".join(value) for key, value in evidence_by_source.items()}
 
 
 def confidence_from_sources(sources: list[SourceChunk], settings: RagSettings | None = None) -> dict[str, Any]:
@@ -963,7 +1111,14 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         context_chunks.extend(numeric_context)
         all_sources.extend(numeric_sources)
         compression_inputs.extend([
-            CompressionSource(source_id=source.source_id or f"S{source.rank}", text=numeric_context[0], rank=source.rank, score=source.score)
+            CompressionSource(
+                source_id=source.source_id or f"S{source.rank}",
+                text=numeric_context[0],
+                rank=source.rank,
+                score=source.score,
+                doc_id=source.doc_id,
+                doc_name=source.doc_name,
+            )
             for source in numeric_sources
         ])
         search_modes.append("numeric_scan")
@@ -1021,16 +1176,21 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         rerank_candidates = anchors + non_anchors
         rerank_started = time.perf_counter()
         all_ranked = await asyncio.to_thread(rerank, app_state, prompt, rerank_candidates)
+        _attach_document_identities(app_state, all_ranked)
         trace["latency"]["rerank_ms"] = round((time.perf_counter() - rerank_started) * 1000, 2)
         if memory_only:
             reranked = all_ranked[:settings.rerank_top_n]
         else:
-            reranked, selection_meta = select_coverage_aware_results(
-                all_ranked,
-                requirements,
-                settings.rerank_top_n,
-                anchor_ids=anchor_ids,
-            )
+            if settings.coverage_selection:
+                reranked, selection_meta = select_coverage_aware_results(
+                    all_ranked,
+                    requirements,
+                    settings.rerank_top_n,
+                    anchor_ids=anchor_ids,
+                )
+            else:
+                reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
+                selection_meta = {"mode": "legacy_relevance", "selected": [], "covered_requirement_ids": []}
             anchor_ranked = [row for row in all_ranked if row["id"] in anchor_ids]
             if anchor_ranked:
                 decision_by_id = {
@@ -1048,9 +1208,36 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                     }
                     for row in anchor_ranked
                 ]
-                reranked = (anchor_ranked + [
-                    row for row in reranked if row["id"] not in anchor_ids
-                ])[:settings.rerank_top_n]
+                if settings.coverage_selection:
+                    # Named-document reservations are the first priority;
+                    # dense anchors follow, then the remaining greedy choices.
+                    # This keeps A6's recall safety net without allowing it to
+                    # evict a requested paper from a small final context.
+                    selected_by_id = {row["id"]: row for row in reranked}
+                    reserved_ids = set(selection_meta.get("reserved_named_chunk_ids", []))
+                    priority_rows: list[dict[str, Any]] = []
+                    seen_priority: set[str] = set()
+                    for row in [
+                        selected_by_id[item_id]
+                        for item_id in selection_meta.get("reserved_named_chunk_ids", [])
+                        if item_id in selected_by_id
+                    ] + anchor_ranked:
+                        if row["id"] in seen_priority:
+                            continue
+                        if row["id"] not in selected_by_id and row["id"] not in anchor_ids:
+                            continue
+                        seen_priority.add(row["id"])
+                        priority_rows.append(row)
+                    reranked = (priority_rows + [
+                        row for row in reranked if row["id"] not in seen_priority
+                    ])[:settings.rerank_top_n]
+                    selection_meta["priority_reserved_named_count"] = len(
+                        [row for row in priority_rows if row["id"] in reserved_ids]
+                    )
+                else:
+                    reranked = (anchor_ranked + [
+                        row for row in reranked if row["id"] not in anchor_ids
+                    ])[:settings.rerank_top_n]
             if memory_preferred:
                 memory_ranked = [row for row in all_ranked if row.get("doc_id") == CORE_MEMORY_DOC_ID]
                 if memory_ranked:
@@ -1072,8 +1259,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             app_state.sqlite,
             reranked,
             parent_max_tokens=settings.parent_max_tokens,
+            enable_merge=settings.hierarchical_context,
         )
-        layout_expansions = expand_layout_evidence(app_state.sqlite, prompt, assemblies)
+        layout_expansions = expand_layout_evidence(app_state.sqlite, prompt, assemblies) if settings.layout_evidence else {}
         assembled_results = [assembly.result for assembly in assemblies]
         all_sources = hydrate_sources(app_state, assembled_results)
         source_by_chunk = {source.chunk_id: source for source in all_sources}
@@ -1107,6 +1295,8 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                 text=compression_text,
                 rank=source.rank if source else 99,
                 score=source.score if source else 0.0,
+                doc_id=source.doc_id if source else None,
+                doc_name=source.doc_name if source else None,
             ))
         trace["latency"]["context_ms"] = round((time.perf_counter() - context_started) * 1000, 2)
 
@@ -1114,8 +1304,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         compressed_context, compression_stats, evidence_by_source = compress_context(
             prompt,
             compression_inputs,
-            max_sentences=max(6, settings.rerank_top_n * 3),
+            max_sentences=max(6, settings.rerank_top_n * 3, len(requirements)),
             requirements=requirements,
+            coverage_aware=settings.coverage_selection,
         )
         if compressed_context:
             memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
@@ -1125,7 +1316,11 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 
-    ledger = build_evidence_ledger(query_id, prompt, subqueries, all_sources)
+    ledger = (
+        build_evidence_ledger(query_id, prompt, subqueries, all_sources)
+        if settings.evidence_ledger
+        else {"ledger_id": query_id, "state": "disabled", "retrieval_round": 0, "requirements": [], "evidence": [], "conflicts": [], "summary": {}}
+    )
     _mark_sources_retrieved(app_state, all_sources)
     confidence = confidence_from_sources(all_sources, settings)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -1173,6 +1368,8 @@ def _trace_candidate(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "rank": rank,
         "chunk_id": _trace_value(row.get("id") or row.get("chunk_id")),
         "doc_id": _trace_value(row.get("doc_id")),
+        "document_name": _trace_value(row.get("document_name")),
+        "document_path": _trace_value(row.get("document_path")),
         "parent_id": _trace_value(row.get("parent_id")),
         "source_kind": _trace_value(row.get("source_kind")),
         "chunk_index": _trace_value(row.get("chunk_index")),

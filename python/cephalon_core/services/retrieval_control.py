@@ -21,7 +21,7 @@ from typing import Any
 
 from ..schemas import RagSettings, SourceChunk
 from . import retrieval
-from .evidence_ledger import build_evidence_ledger
+from .evidence_ledger import build_evidence_ledger, document_identity_matches, is_qualifying_evidence
 from .prompt_budget import estimate_tokens
 
 
@@ -78,6 +78,11 @@ async def retrieve_with_gap_control(
 
     gap_query = _build_gap_query(prompt, gaps)
     control_trace["query"] = gap_query
+    control_trace["target_titles"] = [
+        str(item.get("requested_title"))
+        for item in gaps
+        if item.get("named_document") and item.get("requested_title")
+    ]
     if _normalize_query(gap_query) == _normalize_query(prompt):
         control_trace["status"] = "duplicate_query"
         _record_control_trace(meta, control_trace)
@@ -85,8 +90,15 @@ async def retrieve_with_gap_control(
 
     control_trace["attempted"] = True
     gap_settings = settings.model_copy(update={
-        "top_k": min(settings.top_k, MAX_GAP_TOP_K),
-        "rerank_top_n": min(settings.rerank_top_n, MAX_GAP_SOURCES),
+        # The targeted query gets the full bounded retrieval width even when
+        # ordinary answer settings use a smaller final context. Selection and
+        # admission below still enforce the three-source gap budget.
+        "top_k": MAX_GAP_TOP_K,
+        # Search the full bounded candidate pool before document-aware
+        # admission. The context round still adds at most MAX_GAP_SOURCES
+        # qualifying chunks, but limiting reranking to that same count can
+        # hide an exact-title source behind generic evidence from other papers.
+        "rerank_top_n": MAX_GAP_TOP_K,
         "conversation_memory": False,
         "trace_persistence": False,
     })
@@ -123,10 +135,36 @@ async def retrieve_with_gap_control(
     added_blocks: list[str] = []
     spent_tokens = 0
     triggering_ids = [str(item.get("id")) for item in gaps if item.get("id")]
-    for candidate in gap_sources:
+    named_gaps = [item for item in gaps if item.get("named_document")]
+    ordered_gap_sources = sorted(
+        gap_sources,
+        key=lambda candidate: (
+            any(document_identity_matches(gap, candidate) for gap in named_gaps),
+            any(
+                document_identity_matches(gap, candidate)
+                and is_qualifying_evidence(
+                    candidate.evidence_text if candidate.evidence_text is not None else candidate.snippet
+                )
+                for gap in named_gaps
+            ),
+            float(candidate.rerank_score if candidate.rerank_score is not None else candidate.score),
+        ),
+        reverse=True,
+    )
+    for candidate in ordered_gap_sources:
         if len(added) >= MAX_GAP_SOURCES or candidate.chunk_id in seen_chunk_ids:
             continue
-        evidence = (candidate.evidence_text or candidate.snippet or "").strip()
+        evidence = (
+            candidate.evidence_text
+            if candidate.evidence_text is not None
+            else candidate.snippet or ""
+        ).strip()
+        if named_gaps:
+            matching_gaps = [gap for gap in named_gaps if document_identity_matches(gap, candidate)]
+            # A targeted named-paper round must not spend its bounded slots on
+            # an unrelated document or a bibliography-only fragment.
+            if not matching_gaps or not any(is_qualifying_evidence(evidence) for _ in matching_gaps):
+                continue
         cost = estimate_tokens(evidence)
         if not evidence or spent_tokens + cost > token_budget:
             continue
@@ -190,15 +228,29 @@ async def retrieve_with_gap_control(
 
 
 def _build_gap_query(prompt: str, gaps: list[dict[str, Any]]) -> str:
+    titles: list[str] = []
+    needs: list[str] = []
     material: list[str] = []
     for gap in gaps:
+        title = str(gap.get("requested_title") or "").strip()
+        if title and title.casefold() not in {item.casefold() for item in titles}:
+            titles.append(title)
+        for need in gap.get("evidence_need", []):
+            if str(need) not in needs:
+                needs.append(str(need))
         for term in re.findall(r"[\wµμ]+", str(gap.get("text", "")).lower(), flags=re.UNICODE):
             if len(term) >= 3 and term not in GAP_STOPWORDS and term not in material:
                 material.append(term)
     # Evidence hints make a single-question retry distinct from the initial
     # natural-language question while favoring result-bearing scientific text.
     hints = ["results", "measured", "evidence", "values", "units", "limitations"]
-    query = " ".join([*material[:18], *[hint for hint in hints if hint not in material]])
+    exact_titles = [f'"{title}"' for title in titles[:3]]
+    query = " ".join([
+        *exact_titles,
+        *needs[:4],
+        *material[:18],
+        *[hint for hint in hints if hint not in material and hint not in needs],
+    ])
     return query or f"{prompt.strip()} supporting evidence results"
 
 

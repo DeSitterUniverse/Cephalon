@@ -42,6 +42,12 @@ export type RagSettings = {
   evidence_required: boolean;
   conversation_memory: boolean;
   trace_persistence: boolean;
+  hierarchical_context?: boolean;
+  layout_evidence?: boolean;
+  evidence_ledger?: boolean;
+  coverage_selection?: boolean;
+  gap_retrieval?: boolean;
+  verified_answer_repair?: boolean;
   no_answer_min_confidence: number;
   no_answer_min_rerank_score: number;
   no_answer_min_vector_score: number;
@@ -168,14 +174,25 @@ export type AnswerSupport = {
     weak_claim_count: number;
     unsupported_claim_count: number;
     uncited_claim_count: number;
+    entailed_claim_count?: number;
+    partially_entailed_claim_count?: number;
+    contradicted_claim_count?: number;
+    citation_missing_claim_count?: number;
     claims: Array<{
       claim_id: string;
       text: string;
       source_ids: string[];
       status: "supported" | "weak" | "unsupported" | "uncited";
+      entailment_status?: "entailed" | "partially_entailed" | "unsupported" | "contradicted" | "citation_missing";
       reason: string;
       coverage: number;
       coverage_by_source: Record<string, number>;
+      negation_conflict?: boolean;
+      numeric_verification?: {
+        status: "not_applicable" | "entailed" | "unsupported" | "contradicted";
+        reason?: string;
+        checks: Array<Record<string, unknown>>;
+      };
     }>;
   };
 };

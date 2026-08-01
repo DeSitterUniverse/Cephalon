@@ -54,6 +54,12 @@ class RagDefaults:
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
+    hierarchical_context: bool = True
+    layout_evidence: bool = True
+    evidence_ledger: bool = True
+    coverage_selection: bool = True
+    gap_retrieval: bool = True
+    verified_answer_repair: bool = True
     no_answer_min_confidence: float = 0.35
     no_answer_min_rerank_score: float = 0.15
     no_answer_min_vector_score: float = 0.05
@@ -120,6 +126,12 @@ class Settings:
             evidence_required=os.getenv("CEPHALON_EVIDENCE_REQUIRED", "0") == "1",
             conversation_memory=os.getenv("CEPHALON_CONVERSATION_MEMORY", "1") != "0",
             trace_persistence=os.getenv("CEPHALON_TRACE_PERSISTENCE", "1") != "0",
+            hierarchical_context=os.getenv("CEPHALON_HIERARCHICAL_CONTEXT", "1") != "0",
+            layout_evidence=os.getenv("CEPHALON_LAYOUT_EVIDENCE", "1") != "0",
+            evidence_ledger=os.getenv("CEPHALON_EVIDENCE_LEDGER", "1") != "0",
+            coverage_selection=os.getenv("CEPHALON_COVERAGE_SELECTION", "1") != "0",
+            gap_retrieval=os.getenv("CEPHALON_GAP_RETRIEVAL", "1") != "0",
+            verified_answer_repair=os.getenv("CEPHALON_VERIFIED_ANSWER_REPAIR", "1") != "0",
             no_answer_min_confidence=float(os.getenv("CEPHALON_NO_ANSWER_MIN_CONFIDENCE", "0.35")),
             no_answer_min_rerank_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_RERANK_SCORE", "0.15")),
             no_answer_min_vector_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_VECTOR_SCORE", "0.05")),

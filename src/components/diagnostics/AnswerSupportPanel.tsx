@@ -6,6 +6,11 @@ type Props = {
 
 export function AnswerSupportPanel({ support }: Props) {
   if (!support) return <div className="empty-state">Select answer support from a response.</div>;
+  const claimValidation = support.claim_validation;
+  const hasEntailmentCounts = claimValidation?.entailed_claim_count != null;
+  const unsupportedOnlyCount = claimValidation?.claims.filter(
+    claim => claim.entailment_status === "unsupported",
+  ).length || 0;
   return (
     <section className="side-section">
       <div className="panel-header">
@@ -45,7 +50,7 @@ export function AnswerSupportPanel({ support }: Props) {
                 <div className="claim-row" key={claim.claim_id}>
                   <div className="source-head">
                     <strong>{claim.claim_id}</strong>
-                    <span>{claim.status}</span>
+                    <span>{claim.entailment_status || claim.status}</span>
                   </div>
                   <p>{claim.text}</p>
                   <small>{claim.reason}</small>
@@ -58,13 +63,26 @@ export function AnswerSupportPanel({ support }: Props) {
           <article className="source-card">
             <div className="source-head">
               <strong>Claim validation</strong>
-              <span>{support.claim_validation.supported_claim_count}/{support.claim_validation.claim_count} supported</span>
+              <span>
+                {hasEntailmentCounts
+                  ? `${support.claim_validation.entailed_claim_count}/${support.claim_validation.claim_count} entailed`
+                  : `${support.claim_validation.supported_claim_count}/${support.claim_validation.claim_count} supported`}
+              </span>
             </div>
-            <div className="source-metrics">
-              <span>{support.claim_validation.weak_claim_count} weak</span>
-              <span>{support.claim_validation.unsupported_claim_count} unsupported</span>
-              <span>{support.claim_validation.uncited_claim_count} uncited</span>
-            </div>
+            {hasEntailmentCounts ? (
+              <div className="source-metrics">
+                <span>{support.claim_validation.partially_entailed_claim_count || 0} partially entailed</span>
+                <span>{unsupportedOnlyCount} unsupported</span>
+                <span>{support.claim_validation.contradicted_claim_count || 0} contradicted</span>
+                <span>{support.claim_validation.citation_missing_claim_count || 0} citation missing</span>
+              </div>
+            ) : (
+              <div className="source-metrics">
+                <span>{support.claim_validation.weak_claim_count} weak</span>
+                <span>{support.claim_validation.unsupported_claim_count} unsupported</span>
+                <span>{support.claim_validation.uncited_claim_count} uncited</span>
+              </div>
+            )}
           </article>
         )}
         {support.citations.map(citation => (

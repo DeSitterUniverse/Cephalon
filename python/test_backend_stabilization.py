@@ -233,8 +233,13 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
                 ])
             return iter([])
 
-    def fake_completion(_app_state, messages, settings, *, stream):
-        calls.append({"messages": messages, "settings": settings, "stream": stream})
+    def fake_completion(_app_state, messages, settings, *, stream, response_format=None):
+        calls.append({
+            "messages": messages,
+            "settings": settings,
+            "stream": stream,
+            "response_format": response_format,
+        })
         return FakeResponse(stream)
 
     monkeypatch.setattr(generation, "_server_completion", fake_completion)
@@ -259,11 +264,12 @@ def test_thorough_response_effort_drafts_then_refines(monkeypatch):
     assert calls[1]["stream"] is False
     assert calls[2]["stream"] is True
     assert calls[0]["settings"].max_tokens == 6144
-    assert calls[1]["settings"].max_tokens == 2048
+    assert calls[1]["settings"].max_tokens == 4096
+    assert calls[1]["response_format"]["type"] == "json_schema"
     assert calls[2]["settings"].max_tokens == 6144
     assert "Draft answer with one gap." in calls[2]["messages"][0]["content"]
     assert "--- CLAIM AUDIT ---" in calls[2]["messages"][0]["content"]
-    assert "deterministic_fallback" in calls[2]["messages"][0]["content"]
+    assert '"claims":' in calls[2]["messages"][0]["content"]
 
 
 def test_response_effort_reserves_thinking_capacity_separately_from_final_output():
