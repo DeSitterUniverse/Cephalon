@@ -43,6 +43,9 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
                   {source.context_assembly.context_tokens != null ? ` · ${source.context_assembly.context_tokens} tokens` : ""}
                 </span>
               )}
+              {(source.context_assembly?.structural_relationships?.length || 0) > 0 && (
+                <span>{source.context_assembly?.structural_relationships?.length} layout links</span>
+              )}
             </div>
             {source.evidence_text && (
               <div className="source-evidence">

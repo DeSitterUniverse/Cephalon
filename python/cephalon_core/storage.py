@@ -496,6 +496,19 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         add_column_if_missing(conn, "eval_cases", "case_json", "TEXT NOT NULL DEFAULT '{}'")
         mark_migration(conn, "015_scientific_evaluation")
 
+    if not migration_applied(conn, "016_layout_lookup_indexes"):
+        # Layout expansion performs only small request-local walks. Composite
+        # indexes make parent and document-neighbour lookup proportional to the
+        # selected neighbourhood rather than the full corpus. Dropping either
+        # index safely rolls back to SQLite scans without changing stored data.
+        executescript(conn, """
+            CREATE INDEX IF NOT EXISTS idx_chunks_parent_chunk
+                ON chunks(parent_id, chunk_index);
+            CREATE INDEX IF NOT EXISTS idx_chunks_doc_chunk
+                ON chunks(doc_id, chunk_index);
+        """)
+        mark_migration(conn, "016_layout_lookup_indexes")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",

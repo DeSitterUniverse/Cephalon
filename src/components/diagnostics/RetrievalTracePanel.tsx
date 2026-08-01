@@ -19,6 +19,13 @@ function contextKind(item: Record<string, unknown>) {
     : null;
 }
 
+function layoutLinkCount(item: Record<string, unknown>) {
+  const assembly = item.context_assembly;
+  if (!assembly || typeof assembly !== "object") return 0;
+  const links = (assembly as Record<string, unknown>).structural_relationships;
+  return Array.isArray(links) ? links.length : 0;
+}
+
 export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: Props) {
   return (
     <section className="side-section">
@@ -69,6 +76,7 @@ export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: 
                 <p key={index}>
                   <strong>{value(item, "source_id")}</strong> {value(item, "doc_name")} · {value(item, "chunk_id")}
                   {contextKind(item) ? <> · {contextKind(item)}</> : null}
+                  {layoutLinkCount(item) > 0 ? <> · {layoutLinkCount(item)} layout links</> : null}
                 </p>
               ))}
             </div>
