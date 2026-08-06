@@ -4,9 +4,9 @@ Cephalon is a local-first desktop workbench for asking grounded questions about 
 
 It is designed for private research, technical documentation, notes, PDFs, and specialised collections where knowing *which source supports an answer* matters as much as the answer itself. Your documents, metadata, chat history, and retrieval index stay on your computer.
 
-Recommended alongside a chat model fine-tuned for a particular domain, task, or voice—for example personal writing, programming conventions, academic terminology, accessibility work, creative genres, or a specialised knowledge base. Cephalon supplies the local evidence; your chosen llama.cpp model supplies the response.
+Cephalon is particularly useful with models fine-tuned for specialised knowledge domains, tasks, writing styles, programming conventions, academic subjects, specialised knowledge base, or creative work.
 
-I built this originally for running LLM inference on a large corpus of scientific and technical papers. I improved the architecture by incorperating the best RAG techniques I found:
+I built this originally for running LLM inference on a large corpus of scientific and technical papers. I improved the architecture by incorporating the best RAG techniques I found:
 
 - Hybrid retrieval with independent signals
 - True full-set listwise reranking
