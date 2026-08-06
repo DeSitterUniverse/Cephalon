@@ -11,6 +11,7 @@ The default Windows private workspace is `C:\tmp\cephalon-private-rag`:
 
 - Corpus PDFs: `C:\tmp\cephalon-scientific-corpus-frozen`
 - Manifest and cases: `a1-full-private\benchmarks\scientific_rag`
+- Versioned execution profiles: `a1-full-private\benchmarks\scientific_rag\profiles.json`
 - Runner: `a1-full-private\scripts\scientific_rag_benchmark.py`
 - Reusable 72-paper index: `a2-live-data`
 - Per-PR reports and database copies: sibling directories under the private
@@ -30,10 +31,11 @@ $private = 'C:\tmp\cephalon-private-rag\a1-full-private'
 $runner = "$private\scripts\scientific_rag_benchmark.py"
 $manifest = "$private\benchmarks\scientific_rag\corpus_manifest.json"
 $cases = "$private\benchmarks\scientific_rag\cases.json"
+$profiles = "$private\benchmarks\scientific_rag\profiles.json"
 $env:PYTHONIOENCODING = 'utf-8'
 
 # Validate frozen metadata without network or models.
-py -3.14 $runner validate --manifest $manifest --cases $cases
+py -3.14 $runner validate --manifest $manifest --cases $cases --profiles $profiles
 
 # Full end-to-end run against an isolated backend.
 py -3.14 $runner run --manifest $manifest --cases $cases `
@@ -43,16 +45,25 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
   --output 'C:\tmp\cephalon-private-rag\a8-e2e.json' --skip-download
 
-# One-case smoke (the first frozen case).
+# Cross-path smoke profile: 12 logical cases and 15 generated answers.
 py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
   --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
-  --output 'C:\tmp\cephalon-private-rag\a8-one-case.json' `
-  --skip-download --skip-ingest --limit 1
+  --output 'C:\tmp\cephalon-private-rag\a8-smoke.json' `
+  --skip-download --skip-ingest --profile smoke-v1 --profiles $profiles
 
-# Retrieval-only run (the runner performs five complete repetitions).
+# Routine paired PR gate: 36 logical cases and 42 generated answers.
+py -3.14 $runner run --manifest $manifest --cases $cases `
+  --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
+  --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
+  --base-url 'http://127.0.0.1:8767' `
+  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --output 'C:\tmp\cephalon-private-rag\a8-pr-core.json' `
+  --skip-download --skip-ingest --profile pr-core-v1 --profiles $profiles
+
+# Full retrieval-only release run (one cold and four warm repetitions).
 py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
@@ -65,6 +76,16 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
 py -3.14 $runner compare BASE.json HEAD.json `
   --output 'C:\tmp\cephalon-private-rag\base-head-comparison.json'
 ```
+
+Profiled retrieval runs use the repetition count pinned by their definition.
+`pr-core-v1`, `a8-critical-v1`, and `tables-v1` perform one cold and one warm
+pass. Use the unprofiled full command for cache work or release measurement.
+
+The comparator uses aggregate metrics only when both reports contain the same
+evaluated case IDs. When profiles differ, it recomputes metrics over the exact
+case-ID intersection, labels the result `matched_cases`, and omits the
+whole-run latency delta. This keeps legacy full reports usable without
+presenting a reduced profile as equivalent to the 120-case baseline.
 
 For the focused named-paper gate, limit the private runner without changing
 the frozen cases file:
@@ -92,6 +113,27 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
 ```
 
 ## Interpretation and gates
+
+The 120-case file is frozen gold data; profiles change only which cases and
+repetitions execute. Do not delete cases or edit `run_in_both_modes` and
+`latency_sentinel` merely to shorten a run. Every new report records the
+profile name, definition hash, selected-case hash, counts, and repetition
+policy. The unprofiled full schedule preserves the legacy checkpoint
+signature.
+
+Use the gates in increasing cost order:
+
+1. `smoke-v1` while developing.
+2. `pr-core-v1` for ordinary behavioral PRs, plus the relevant feature slice.
+3. Full 120-case retrieval for retrieval-affecting changes.
+4. Full 136-answer generation for the final stack PR, releases, and changes to
+   the model, prompts, or reranker contract.
+
+Use `a8-critical-v1` for evidence-control and verification work,
+`tables-v1` for every Stack B behavioral PR, and `performance-v1` when repeated
+latency—not answer quality—is the target. Reuse a validated immutable index for
+request-time changes. Reingest all 72 papers after parsing, chunking, summary,
+embedding, table-schema, or index-version changes.
 
 Deterministic grading is authoritative; Gemma semantic grading is
 supplementary. Compare retrieval evidence/requirement coverage, answer and
