@@ -94,18 +94,16 @@ For the best results:
 
 Saved chats are local searchable memory, not model training data.
 
-## How the local services fit together
+## Runtime separation
 
-```text
-Your chat GGUF ── llama-server :8080 ──> answer generation
-                                                ▲
-Documents ──> Nano embedder :8090 ──> LanceDB ─┼──> Cephalon desktop app
-                  GPU by default               │
-FTS5 keyword search ───────────────────────────┤
-Jina Reranker v3.5 worker ─────────────────────┘
-```
+Cephalon uses separate llama.cpp processes for chat generation and document embeddings. Each process loads a different model and serves a different role, so they cannot share a single server instance.
 
-The chat and embedding servers must remain separate. On Windows, Cephalon automatically starts its managed Nano embedder with `Vulkan0` and full layer offload after the model is installed. If your llama.cpp device name differs, set `CEPHALON_EMBEDDER_DEVICE` and `CEPHALON_EMBEDDER_GPU_LAYERS` before launch.
+Cephalon manages the embedding process automatically after the retrieval model is installed. The chat server remains external and user-controlled, allowing any compatible GGUF model to be used without coupling it to the retrieval stack.
+
+On Windows, the managed embedding process defaults to Vulkan0 with full GPU layer offload. Override these values when your llama.cpp installation uses a different device name or offload configuration:
+
+$env:CEPHALON_EMBEDDER_DEVICE="Vulkan0"
+$env:CEPHALON_EMBEDDER_GPU_LAYERS="999"
 
 ## Local data and model files
 
@@ -125,7 +123,7 @@ Settings can download, verify, open, or remove either model cache. The Nano GGUF
 
 ## Running and building
 
-| Goal | Windows command |
+| Environment | Windows command |
 | --- | --- |
 | Desktop development | `npm.cmd run tauri dev` |
 | Browser development | `npm.cmd run dev:full` |
