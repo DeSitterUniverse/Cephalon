@@ -168,6 +168,7 @@ class SourceChunk(BaseModel):
     doc_name: str
     chunk_id: str
     parent_id: str | None = None
+    source_kind: str | None = None
     score: float
     final_score: float | None = None
     snippet: str
@@ -188,6 +189,7 @@ class SourceChunk(BaseModel):
     bounding_box: tuple[float, float, float, float] | None = None
     element_ids: list[str] = Field(default_factory=list)
     provenance: dict = Field(default_factory=dict)
+    context_assembly: dict = Field(default_factory=dict)
     assets: list[SourceAsset] = Field(default_factory=list)
 
 

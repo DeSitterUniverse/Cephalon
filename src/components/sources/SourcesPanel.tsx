@@ -37,6 +37,12 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
               {source.reranker_raw_score != null && <span>v3.5 raw {source.reranker_raw_score.toFixed(3)}</span>}
               {source.listwise_rank != null && <span>listwise #{source.listwise_rank}</span>}
               {source.final_score != null && <span>final {source.final_score.toFixed(3)}</span>}
+              {source.context_assembly?.context_kind && source.context_assembly.context_kind !== "child" && (
+                <span>
+                  {source.context_assembly.context_kind === "parent" ? "parent context" : "sibling span"}
+                  {source.context_assembly.context_tokens != null ? ` · ${source.context_assembly.context_tokens} tokens` : ""}
+                </span>
+              )}
             </div>
             {source.evidence_text && (
               <div className="source-evidence">

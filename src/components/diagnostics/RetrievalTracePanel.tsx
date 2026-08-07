@@ -12,6 +12,13 @@ function value(item: Record<string, unknown>, key: string) {
   return typeof raw === "number" ? raw.toFixed(3) : raw == null ? "-" : String(raw);
 }
 
+function contextKind(item: Record<string, unknown>) {
+  const assembly = item.context_assembly;
+  return assembly && typeof assembly === "object"
+    ? value(assembly as Record<string, unknown>, "context_kind")
+    : null;
+}
+
 export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: Props) {
   return (
     <section className="side-section">
@@ -59,7 +66,10 @@ export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: 
             <summary>Final context ({selected.final_context.length})</summary>
             <div className="context-list">
               {selected.final_context.map((item, index) => (
-                <p key={index}><strong>{value(item, "source_id")}</strong> {value(item, "doc_name")} · {value(item, "chunk_id")}</p>
+                <p key={index}>
+                  <strong>{value(item, "source_id")}</strong> {value(item, "doc_name")} · {value(item, "chunk_id")}
+                  {contextKind(item) ? <> · {contextKind(item)}</> : null}
+                </p>
               ))}
             </div>
           </details>

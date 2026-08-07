@@ -54,6 +54,7 @@ export type SourceChunk = {
   doc_name: string;
   chunk_id: string;
   parent_id?: string | null;
+  source_kind?: string | null;
   score: number;
   final_score?: number | null;
   snippet: string;
@@ -74,6 +75,16 @@ export type SourceChunk = {
   bounding_box?: [number, number, number, number] | null;
   element_ids?: string[];
   provenance?: Record<string, unknown>;
+  context_assembly?: {
+    context_kind?: "child" | "sibling_span" | "parent";
+    anchor_chunk_id?: string;
+    parent_id?: string | null;
+    matched_chunk_ids?: string[];
+    expanded_chunk_ids?: string[];
+    parent_coverage?: number;
+    context_tokens?: number;
+    decision?: string;
+  };
   assets?: Array<{
     asset_id: string;
     page_number: number;
