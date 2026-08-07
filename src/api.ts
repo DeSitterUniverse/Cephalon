@@ -84,6 +84,15 @@ export type SourceChunk = {
     parent_coverage?: number;
     context_tokens?: number;
     decision?: string;
+    layout_tokens?: number;
+    layout_chunk_ids?: string[];
+    structural_relationships?: Array<{
+      edge_type: string;
+      from_chunk_id: string;
+      to_chunk_id: string;
+      hop: number;
+      reason: string;
+    }>;
   };
   assets?: Array<{
     asset_id: string;

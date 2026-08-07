@@ -36,6 +36,20 @@ chunk IDs, coverage, token count, and decision. Existing clients may ignore
 this optional field. No reindex is needed for context-assembly changes; setting
 the feature aside is equivalent to sending exact child chunks.
 
+## Conditional layout evidence
+
+`services/layout_expansion.py` derives request-local edges from chunk order,
+heading paths, pages, block types, and shared asset IDs. It recognizes adjacent
+blocks, same-section context, captions/assets, table headers/continuations, and
+cross-page continuations. Expansion activates for structural block types,
+layout-language questions, asset-bearing chunks, or anaphoric text.
+
+The traversal is breadth-first and limited to two hops, six added chunks, four
+neighbours per node, and 25% of pre-expansion context tokens. Migration 016
+adds only `(parent_id, chunk_index)` and `(doc_id, chunk_index)` indexes; it
+does not change document content and requires no reindex. The indexes can be
+dropped to roll back with only a query-performance cost.
+
 ## Provenance invariant
 
 Expansion can add context but cannot invent a citation target. The public

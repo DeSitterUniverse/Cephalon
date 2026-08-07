@@ -18,6 +18,7 @@ from . import metrics
 from . import observability
 from . import jina_runtime
 from .context_assembly import assemble_hierarchical_context
+from .layout_expansion import expand_layout_evidence
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -966,6 +967,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             reranked,
             parent_max_tokens=settings.parent_max_tokens,
         )
+        layout_expansions = expand_layout_evidence(app_state.sqlite, prompt, assemblies)
         assembled_results = [assembly.result for assembly in assemblies]
         all_sources = hydrate_sources(app_state, assembled_results)
         source_by_chunk = {source.chunk_id: source for source in all_sources}
@@ -981,9 +983,14 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             if location := source_location_label(source):
                 label = f"{label} | {location}"
             source_id = source.source_id if source and source.source_id else f"S{len(all_sources) + 1}"
+            layout_expansion = layout_expansions.get(assembly.anchor_id)
             context_text = assembly.text
+            if layout_expansion:
+                context_text = "\n\n".join((context_text, *layout_expansion.text_blocks))
             if source:
                 source.context_assembly = assembly.trace_payload()
+                if layout_expansion:
+                    source.context_assembly.update(layout_expansion.trace_payload())
             context_chunks.append(format_source_context(source_id, label, res["id"], context_text))
             # A top dense anchor remains exact unless sibling evidence earned
             # an explicit bounded expansion. This preserves the recall safety
