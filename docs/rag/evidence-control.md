@@ -34,3 +34,10 @@ coverage, diversity/coherence flags, redundancy, estimated tokens, and the
 complete named weight set. Compression reports requirement coverage and source
 representation so benchmark traces can distinguish retrieval misses from
 context-pruning misses.
+
+Thorough mode permits one transition from `assessed` to `gap_assessed`. The
+transition occurs only when a requirement is `missing`, `partial`, or
+`conflicting`; `not_needed`, `duplicate_query`, `timeout`, and
+`no_novel_evidence` are terminal states. The trace records the triggering
+requirements, generated query, candidate/source/token counts, latency, bounds,
+and stop reason. It cannot recurse into another gap round.

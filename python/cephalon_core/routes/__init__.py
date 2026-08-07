@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from .. import storage
 from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, QueryRequest, RagSettings
-from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, retrieval, support
+from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, retrieval, retrieval_control, support
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
 from .documents import delete_document, get_documents, router as documents_router
@@ -544,7 +544,13 @@ async def chat_and_remember(request: Request, req: QueryRequest):
             if retrieval_route["retrieve"]:
                 yield _sse("phase", {"phase": "retrieving"})
                 query_vector = await retrieval.get_embedding(app_state, req.prompt)
-                context, sources, query_meta = await retrieval.retrieve_context(app_state, req.prompt, query_vector, rag_settings)
+                context, sources, query_meta = await retrieval_control.retrieve_with_gap_control(
+                    app_state,
+                    req.prompt,
+                    query_vector,
+                    rag_settings,
+                    enable_gap_round=req.response_effort == "thorough",
+                )
                 query_meta["retrieval_route"] = retrieval_route
             else:
                 context, sources = "", []

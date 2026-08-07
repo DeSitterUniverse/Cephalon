@@ -69,7 +69,6 @@ def build_evidence_ledger(
                 assigned_ids.append(requirement["id"])
         source.evidence_ids = [evidence_id]
         source.requirement_ids = assigned_ids
-        source.retrieval_round = retrieval_round
         evidence.append({
             "id": evidence_id,
             "source_id": source.source_id,
@@ -77,7 +76,7 @@ def build_evidence_ledger(
             "doc_id": source.doc_id,
             "source_kind": source.source_kind or "text",
             "requirement_ids": assigned_ids,
-            "retrieval_round": retrieval_round,
+            "retrieval_round": source.retrieval_round,
             "span": text[:MAX_EVIDENCE_CHARS],
             "page_number": source.page_number,
             "parent_id": source.parent_id,
