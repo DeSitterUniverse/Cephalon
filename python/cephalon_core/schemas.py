@@ -190,6 +190,10 @@ class SourceChunk(BaseModel):
     element_ids: list[str] = Field(default_factory=list)
     provenance: dict = Field(default_factory=dict)
     context_assembly: dict = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    retrieval_round: int = 0
+    triggering_gap: str | None = None
     assets: list[SourceAsset] = Field(default_factory=list)
 
 

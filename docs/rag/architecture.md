@@ -50,6 +50,21 @@ adds only `(parent_id, chunk_index)` and `(doc_id, chunk_index)` indexes; it
 does not change document content and requires no reindex. The indexes can be
 dropped to roll back with only a query-performance cost.
 
+## Request-scoped evidence ledger
+
+`services/evidence_ledger.py` maps deterministic query requirements to final
+sources after compression. Requirements have `sufficient`, `partial`,
+`missing`, or `conflicting` states; evidence records retain source/chunk/page,
+retrieval round, and a bounded excerpt. Potential conflicts require high text
+similarity plus opposite negation or incompatible values with the same unit.
+
+The A5 ledger is observability-only: it cannot alter retrieval, context,
+prompts, or answers. Migration 017 adds a JSON trace column with an empty-object
+default. Traces remain readable if the column is absent, and disabling trace
+persistence removes its durable cost. Hard caps are eight requirements, twenty
+sources, four evidence assignments per requirement, 64 conflict comparisons,
+and 500 excerpt characters.
+
 ## Provenance invariant
 
 Expansion can add context but cannot invent a citation target. The public

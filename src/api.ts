@@ -94,6 +94,10 @@ export type SourceChunk = {
       reason: string;
     }>;
   };
+  evidence_ids?: string[];
+  requirement_ids?: string[];
+  retrieval_round?: number;
+  triggering_gap?: string | null;
   assets?: Array<{
     asset_id: string;
     page_number: number;
@@ -177,6 +181,21 @@ export type RetrievalTrace = RetrievalTraceSummary & {
   latency: Record<string, number>;
   candidates: Record<"vector" | "bm25" | "fused" | "reranked" | "unused", Array<Record<string, unknown>>>;
   final_context: Array<Record<string, unknown>>;
+  evidence_ledger?: {
+    state: string;
+    retrieval_round: number;
+    requirements: Array<{
+      id: string;
+      subquery_id: string;
+      text: string;
+      status: "sufficient" | "partial" | "missing" | "conflicting";
+      evidence_ids: string[];
+      best_coverage: number;
+    }>;
+    evidence: Array<Record<string, unknown>>;
+    conflicts: Array<Record<string, unknown>>;
+    summary: Record<string, number>;
+  };
 };
 export type IndexHealth = {
   document_count: number;
