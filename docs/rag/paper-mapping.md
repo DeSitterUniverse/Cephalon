@@ -12,6 +12,8 @@ reference systems or their model dependencies.
 | Request-scoped evidence ledger | S2G-RAG, SciRAG | Deterministic requirements map to bounded source evidence with sufficiency, round, and potential-conflict state. | A5 is observability-only and adds no planner-model call or retrieval loop. |
 | Coverage-aware context | S2G-RAG, SciRAG, OpenScholar | Greedy selection balances requirement coverage, relevance, diversity, coherence, redundancy, and token cost; compression preserves fragile scientific evidence. | Fixed weights and hard block limits avoid an additional selector model or unbounded context growth. |
 | One-round gap retrieval | S2G-RAG | Thorough mode turns unresolved deterministic requirements into one bounded targeted retrieval pass and reassesses the ledger. | No planner/judge LLM call, recursive loop, or more than one reformulated query. |
+| Claim verification and repair | OpenScholar, RAGChecker | Deterministic entailment, contradiction, unit/arithmetic checks, supplementary semantic audit, and one conditional repair. | Existing generation model is reused; hard deterministic failures cannot be overruled and repair never loops. |
+| Named-document sufficiency | S2G-RAG, SciRAG, OpenScholar | Quoted study targets bind to document identity and require qualifying substantive evidence before ledger coverage or gap completion. | No cross-document graph or planner model; one matching source per named study and one bounded gap query. |
 
 Implementation thresholds are named and documented in
 `services/context_assembly.py`. Benchmark comparisons and large scientific

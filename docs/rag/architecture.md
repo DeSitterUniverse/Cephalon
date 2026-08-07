@@ -9,6 +9,23 @@ question -> dense + FTS5 retrieval -> RRF -> Jina v3.5 rerank
          -> citation and claim diagnostics
 ```
 
+```mermaid
+flowchart TD
+  Q[Question] --> H[Hybrid retrieval and Jina rerank]
+  H --> C[Hierarchy, layout, coverage, ledger]
+  C --> E{Response effort}
+  E -->|Quick or Balanced| G[One generation completion]
+  E -->|Thorough and gap exists| R[One bounded gap retrieval round]
+  E -->|Thorough and sufficient| D[Draft completion]
+  R --> D
+  D --> V[Semantic plus deterministic audit]
+  V -->|All entailed| O[Return verified draft]
+  V -->|Issue found| P[One repair completion]
+  G --> F[Deterministic final verification]
+  O --> F
+  P --> F
+```
+
 The Jina reranker is an external llama.cpp Vulkan service. Retrieval and
 context assembly do not load a chat model; the selected chat model is required
 only for answer generation and later model-assisted verification.
@@ -65,6 +82,16 @@ persistence removes its durable cost. Hard caps are eight requirements, twenty
 sources, four evidence assignments per requirement, 64 conflict comparisons,
 and 500 excerpt characters.
 
+Named-document requirements are stricter than ordinary semantic requirements.
+Quoted paper titles and explicit named targets are bound to document identity
+metadata (document ID, path, display name, and aliases), never to arbitrary
+chunk text. A named requirement becomes sufficient only with a matching
+document and qualifying substantive evidence: reference-only, metadata-only,
+very short, and bibliography fragments are rejected. Distinct named studies
+must receive distinct matching documents, so a strong chunk from one paper
+cannot satisfy another paper's contribution or result. Missing named evidence
+therefore remains partial or missing for the gap controller.
+
 ## Coverage-aware selection and compression
 
 `services/coverage_selection.py` greedily chooses from Jina's reranked list by
@@ -89,12 +116,49 @@ deterministic evidence query for missing, partial, or conflicting requirements.
 The gap query uses the existing embedder, hybrid retrieval, Jina reranker, and
 context path; it does not make a chat-model planning call.
 
-The round is limited to one query, 12 initial candidates, three novel sources,
-20 seconds, and 50% of initial context tokens (also capped by
-`parent_max_tokens`). Duplicate queries and chunks represented by existing
+The round is limited to one query, a full bounded candidate/rerank width of 12,
+three novel admitted sources, 20 seconds, and 50% of initial context tokens
+(also capped by `parent_max_tokens`). The query includes the exact missing
+title and the requested evidence need (contribution, method, result, or
+limitation). Duplicate queries and chunks represented by existing
 parent/span/layout context stop expansion. Gap sources retain round `1` and the
-triggering requirement IDs. Disabling the Thorough effort returns to the exact
-single-pass path without reindexing or migration.
+triggering requirement IDs. Context selection reserves one qualifying source
+per named requirement before spending budget on complementarity. Disabling the
+Thorough effort returns to the exact single-pass path without reindexing or
+migration.
+
+## Claim verification and bounded repair
+
+`services/claim_verification.py` assigns `entailed`, `partially_entailed`,
+`unsupported`, `contradicted`, or `citation_missing` to each cited claim.
+Backward-compatible support aliases remain in stored/API payloads. Deterministic
+checks compare negation and values/units and recompute differences, totals,
+means, and relative percentages with 1% relative or 1e-6 absolute tolerance.
+No generated code, SQL, or expression is executed.
+
+The answer boundary discards the external server's `reasoning_content` and
+filters explicit `<think>` blocks, including tags split across stream chunks.
+Only clean final prose is streamed, stored, rendered, and passed to
+verification. Thorough mode drafts once and audits once with Gemma. The audit
+uses llama.cpp JSON-schema constrained output when available and records a
+deterministic fallback reason when parsing or transport fails; this never adds
+another model call. Deterministic arithmetic, negation, citation, and
+unknown-source failures cannot be upgraded by the semantic audit. If every
+claim is entailed, the verified draft is returned and the repair call is
+skipped. Otherwise exactly one repair completion receives a compact bounded
+audit directive; full evidence remains in diagnostics but is not copied into
+the repair prompt. The repaired clean prose is verified again before storage.
+Quick/Balanced use deterministic final-answer verification without an extra
+model call. The trace records verification, whether repair was attempted,
+validator parse/fallback metadata, and the completion-call count. Disabling
+Thorough restores one-call generation; no reindex or migration is involved.
+
+## Rollback controls
+
+All Stack A request-time stages are persisted booleans in `RagSettings`, shown
+under **Settings → Retrieval behavior → Adaptive evidence controls**. Existing
+settings JSON omits the fields safely and receives the documented defaults.
+Environment defaults use the equivalent `CEPHALON_*` names in operations docs.
 
 ## Provenance invariant
 

@@ -71,6 +71,7 @@ def assemble_hierarchical_context(
     selected: list[dict[str, Any]],
     *,
     parent_max_tokens: int,
+    enable_merge: bool = True,
 ) -> list[ContextAssembly]:
     """Return ordered, non-overlapping context units for reranked results.
 
@@ -89,7 +90,7 @@ def assemble_hierarchical_context(
     by_parent: dict[str, list[dict[str, Any]]] = {}
     for result in selected:
         parent_id = result.get("parent_id")
-        if parent_id and result.get("source_kind", "child") == "child":
+        if enable_merge and parent_id and result.get("source_kind", "child") == "child":
             by_parent.setdefault(str(parent_id), []).append(result)
 
     assemblies_by_anchor: dict[str, ContextAssembly] = {}
