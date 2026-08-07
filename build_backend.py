@@ -18,6 +18,7 @@ def build():
     hidden_imports = [
         "lancedb",
         "transformers",
+        "tokenizers",
         "numpy",
         "huggingface_hub",
         "uvicorn",
@@ -25,7 +26,9 @@ def build():
         "openpyxl",
         "pypdf",
         "pdfplumber",
-        "pdfminer"
+        "pdfminer",
+        "cephalon_core.services.jina_reranker_worker",
+        "cephalon_core.services.jina_reranker_transformers_worker",
     ]
     excluded_modules = [
         "torch",
@@ -44,6 +47,7 @@ def build():
         "--name", "engine",
         "--add-data", add_data_arg("AI_SYSTEM_AWARENESS.md", "."),
         "--add-data", add_data_arg("CEPHALON_ARCHITECTURE_DEEP_DIVE.html", "."),
+        "--runtime-hook", "python/cephalon_core/frozen_worker_hook.py",
         "python/main.py",
     ]
     

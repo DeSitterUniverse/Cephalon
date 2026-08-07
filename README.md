@@ -40,13 +40,13 @@ Cephalon intentionally uses one local retrieval stack:
 | Role | Model | Runtime |
 | --- | --- | --- |
 | Embedder | Jina Embeddings v5 Nano Retrieval `Q8_0` | dedicated llama.cpp embeddings server, normalized 768-dimensional vectors |
-| Reranker | Jina Reranker v3.5 | isolated Transformers worker using its official custom-code interface |
+| Reranker | Jina Reranker v3.5 BF16 GGUF | verified llama.cpp/Vulkan listwise worker, with the previous Transformers CPU worker as compatibility fallback |
 
 Dense LanceDB retrieval and SQLite FTS5 keyword retrieval stay independent, are fused with reciprocal-rank fusion, and the full fused candidate set is listwise reranked when the reranker is available. If the reranker is unavailable, Cephalon continues in clearly marked degraded mode; if the embedder is unavailable, retrieval is safely disabled.
 
 ## Jina AI models
 
-Cephalon uses Jina AI's [Jina Embeddings v5 Nano Retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval-GGUF) and [Jina Reranker v3.5](https://huggingface.co/jinaai/jina-reranker-v3.5). Thank you to Jina AI for making these retrieval models available.
+Cephalon uses Jina AI's [Jina Embeddings v5 Nano Retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval-GGUF) and [Jina Reranker v3.5 GGUF](https://huggingface.co/jinaai/jina-reranker-v3.5-GGUF). Thank you to Jina AI for making these retrieval models available.
 
 Both models are licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/); use of the model files is subject to that license.
 
@@ -78,7 +78,11 @@ Cephalon supports Windows and Linux. The commands below use Windows PowerShell; 
    npm.cmd run tauri dev
    ```
 
-5. In **Settings → Fixed retrieval stack**, download the embedder and reranker. Restart Cephalon, then run **Reindex all documents**.
+5. Build `llama-embedding` from llama.cpp revision
+   `80c940e5a80555167c4ec37652deca6528810f91` with Vulkan enabled, then set
+   `CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN` to that executable. In
+   **Settings → Fixed retrieval stack**, download the embedder and reranker.
+   Restart Cephalon, then run **Reindex all documents**.
 
 6. Press **Connect** for the chat server, import a few documents, and ask a question. Open **Sources** or **Trace** whenever you want to inspect the supporting evidence.
 
@@ -135,8 +139,9 @@ The retrieval models are stored under:
 ~/cephalon-data/models/
   jina-v5-nano-retrieval-q8_0/
     v5-nano-retrieval-Q8_0.gguf
-  jina-reranker-v3.5/
-    config.json
+  jina-reranker-v3.5-gguf-bf16/
+    jina-reranker-v3.5-BF16.gguf
+    projector.safetensors
     tokenizer.json
     ...
 ```
