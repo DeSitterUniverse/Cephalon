@@ -159,7 +159,7 @@ def _draft_answer(
     bounded_history, bounded_context = budget_prompt(
         history,
         context,
-        context_window=getattr(app_state, "active_context_tokens", settings.context_tokens),
+        context_window=_active_context_window(app_state, settings.context_tokens),
         output_tokens=settings.max_tokens,
     )
     system_instruction = build_system_instruction(
@@ -191,7 +191,7 @@ def validate_draft_claims(
     _, bounded_context = budget_prompt(
         [],
         context,
-        context_window=getattr(app_state, "active_context_tokens", settings.context_tokens),
+        context_window=_active_context_window(app_state, settings.context_tokens),
         output_tokens=min(settings.max_tokens, 2048),
     )
     messages = [
@@ -286,7 +286,7 @@ def stream_response_events(
     bounded_history, bounded_context = budget_prompt(
         history,
         context,
-        context_window=getattr(app_state, "active_context_tokens", generation_settings.context_tokens),
+        context_window=_active_context_window(app_state, generation_settings.context_tokens),
         output_tokens=generation_settings.max_tokens,
     )
     system_instruction = build_system_instruction(
@@ -301,6 +301,20 @@ def stream_response_events(
     with guard:
         for content in _stream_server_completion(app_state, _chat_messages(system_instruction, bounded_history, prompt), generation_settings):
             yield "token", content
+
+
+def _active_context_window(app_state, fallback: int) -> int:
+    """Return a usable prompt window for configured external llama.cpp servers.
+
+    External servers do not have to report their loaded context size. In that
+    valid state Cephalon keeps ``active_context_tokens`` as ``None``; the
+    request's validated RAG setting is therefore the authoritative fallback.
+    Keeping this decision at the generation boundary prevents every response
+    mode from passing ``None`` into integer prompt-budget arithmetic.
+    """
+
+    active = getattr(app_state, "active_context_tokens", None)
+    return int(active) if active is not None else int(fallback)
 
 
 def stream_response(
