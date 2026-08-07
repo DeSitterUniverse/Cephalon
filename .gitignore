@@ -40,6 +40,10 @@ build/
 .codex-working-context.md
 .codex-changelog*.html
 
+# Local developer reference files
+/CEPHALON_ARCHITECTURE_DEEP_DIVE.html
+/LOCAL_STARTUP_NOTES.md
+
 # Bundled Backend Sidecar
 src-tauri/backend/
 
