@@ -486,6 +486,16 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "014_reindex_runs")
 
+    if not migration_applied(conn, "015_scientific_evaluation"):
+        # Evaluation payloads evolve faster than the core corpus schema. JSON
+        # columns keep old runs readable while allowing benchmark cases to add
+        # evidence targets, numerical assertions, and reproducibility metadata.
+        add_column_if_missing(conn, "eval_runs", "meta_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column_if_missing(conn, "eval_results", "case_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column_if_missing(conn, "eval_results", "answer_json", "TEXT")
+        add_column_if_missing(conn, "eval_cases", "case_json", "TEXT NOT NULL DEFAULT '{}'")
+        mark_migration(conn, "015_scientific_evaluation")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1106,27 +1116,42 @@ def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> Non
 
 
 def save_eval_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    """Persist one immutable evaluation run and its case-level evidence."""
+
     with SQLITE_LOCK:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO eval_runs (id, pipeline, top_k, created_at, aggregate_json) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT OR REPLACE INTO eval_runs (
+                id, pipeline, top_k, created_at, aggregate_json, meta_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
             (
                 payload["id"],
                 payload["pipeline"],
                 payload["top_k"],
                 payload["created_at"],
                 json.dumps(payload.get("aggregate", {}), ensure_ascii=False, separators=(",", ":")),
+                json.dumps(payload.get("meta", {}), ensure_ascii=False, separators=(",", ":")),
             ),
         )
         cursor.execute("DELETE FROM eval_results WHERE run_id = ?", (payload["id"],))
         for result in payload.get("results", []):
             cursor.execute(
-                "INSERT INTO eval_results (run_id, eval_id, question, metrics_json) VALUES (?, ?, ?, ?)",
+                """
+                INSERT INTO eval_results (
+                    run_id, eval_id, question, metrics_json, case_json, answer_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
                 (
                     payload["id"],
                     result["eval_id"],
                     result.get("question", ""),
                     json.dumps(result.get("metrics", {}), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(result.get("case", {}), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(result.get("answer"), ensure_ascii=False) if result.get("answer") is not None else None,
                 ),
             )
         conn.commit()
@@ -1141,6 +1166,7 @@ def list_eval_runs(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, 
             "top_k": row["top_k"],
             "created_at": row["created_at"],
             "aggregate": json.loads(row["aggregate_json"] or "{}"),
+            "meta": json.loads(row["meta_json"] or "{}"),
         }
         for row in rows
     ]
@@ -1157,11 +1183,14 @@ def get_eval_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None
         "top_k": row["top_k"],
         "created_at": row["created_at"],
         "aggregate": json.loads(row["aggregate_json"] or "{}"),
+        "meta": json.loads(row["meta_json"] or "{}"),
         "results": [
             {
                 "eval_id": item["eval_id"],
                 "question": item["question"],
                 "metrics": json.loads(item["metrics_json"] or "{}"),
+                "case": json.loads(item["case_json"] or "{}"),
+                "answer": json.loads(item["answer_json"]) if item["answer_json"] else None,
             }
             for item in result_rows
         ],

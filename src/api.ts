@@ -177,13 +177,71 @@ export type IndexHealth = {
   chunking_profile_counts: Record<string, number>;
   top_retrieved_documents: Array<{ id: string; name: string; retrieval_count: number }>;
 };
+export type GoldEvidence = {
+  id: string;
+  source_kind: "text" | "table" | "cell" | "asset";
+  doc_id?: string | null;
+  chunk_id?: string | null;
+  text_contains?: string[];
+  page_number?: number | null;
+  table_id?: string | null;
+  cell_refs?: string[];
+  asset_id?: string | null;
+};
+
+export type EvalRequirement = {
+  id: string;
+  description: string;
+  evidence_ids?: string[];
+  required_terms?: string[];
+  match_mode?: "all" | "any";
+};
+
+export type NumericAssertion = {
+  id: string;
+  expected_value: number;
+  tolerance?: number;
+  unit?: string | null;
+  evidence_ids?: string[];
+};
+
+/** Backward-compatible case payload shared by the UI and scientific runner. */
+export type EvalCase = {
+  id: string;
+  question: string;
+  expected_doc_ids: string[];
+  expected_chunk_ids?: string[];
+  reference_answer?: string | null;
+  tags?: string[];
+  domain?: string;
+  category?: string;
+  response_effort?: "quick" | "balanced" | "thorough";
+  gold_evidence?: GoldEvidence[];
+  requirements?: EvalRequirement[];
+  accepted_answers?: string[];
+  numeric_assertions?: NumericAssertion[];
+  expected_refusal?: boolean;
+  expected_contradiction?: boolean;
+  run_in_both_modes?: boolean;
+  latency_sentinel?: boolean;
+};
+
+export type EvalMetricTree = Record<string, number | Record<string, Record<string, number>>>;
+
 export type EvalRun = {
   id: string;
   pipeline: string;
   top_k: number;
   created_at: number;
-  aggregate: Record<string, number>;
-  results?: Array<{ eval_id: string; question: string; metrics: Record<string, number> }>;
+  aggregate: EvalMetricTree;
+  meta?: Record<string, unknown>;
+  results?: Array<{
+    eval_id: string;
+    question: string;
+    metrics: Record<string, number>;
+    case?: EvalCase;
+    answer?: string | null;
+  }>;
 };
 export type Conversation = {
   id: string;
@@ -487,10 +545,17 @@ export function getEvalRuns(): Promise<EvalRunsResponse> {
   return requestJson<EvalRunsResponse>("/eval/runs");
 }
 
-export function runEval(evals: Array<{ id: string; question: string; expected_doc_ids: string[]; expected_chunk_ids?: string[] }>, pipeline = "hybrid_rerank", top_k = 10): Promise<EvalRun> {
+export function runEval(
+  evals: EvalCase[],
+  pipeline = "hybrid_rerank",
+  top_k = 10,
+  answers: Record<string, string> = {},
+  run_meta: Record<string, unknown> = {},
+  sources: Record<string, SourceChunk[]> = {},
+): Promise<EvalRun> {
   return requestJson<EvalRun>("/eval/runs", {
     method: "POST",
-    body: JSON.stringify({ evals, pipeline, top_k }),
+    body: JSON.stringify({ evals, pipeline, top_k, answers, sources, run_meta }),
   });
 }
 

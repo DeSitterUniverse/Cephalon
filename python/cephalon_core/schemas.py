@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from urllib.parse import urlparse
@@ -195,16 +195,83 @@ class QueryEnvelope(BaseModel):
     sources: list[SourceChunk]
 
 
+class GoldEvidence(BaseModel):
+    """A stable, human-curated evidence target for one evaluation case.
+
+    Document and chunk identifiers are optional because benchmark manifests can
+    be authored before a clean corpus is ingested. ``text_contains`` provides a
+    content-stable fallback that the benchmark resolver converts to concrete
+    chunk identifiers after ingestion.
+    """
+
+    id: str
+    source_kind: Literal["text", "table", "cell", "asset"] = "text"
+    doc_id: str | None = None
+    chunk_id: str | None = None
+    text_contains: list[str] = Field(default_factory=list)
+    page_number: int | None = None
+    table_id: str | None = None
+    cell_refs: list[str] = Field(default_factory=list)
+    asset_id: str | None = None
+
+
+class EvalRequirement(BaseModel):
+    """A deterministic answer requirement used by the primary benchmark judge."""
+
+    id: str
+    description: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    required_terms: list[str] = Field(default_factory=list)
+    match_mode: Literal["all", "any"] = "all"
+
+
+class NumericAssertion(BaseModel):
+    """An expected numeric value with an explicit absolute tolerance and unit."""
+
+    id: str
+    expected_value: float
+    tolerance: float = Field(default=0.0, ge=0.0)
+    unit: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class EvalItem(BaseModel):
+    """One backward-compatible retrieval or end-to-end scientific RAG case."""
+
     id: str
     question: str
     expected_doc_ids: list[str] = Field(default_factory=list)
     expected_chunk_ids: list[str] = Field(default_factory=list)
     reference_answer: str | None = None
     tags: list[str] = Field(default_factory=list)
+    domain: str = "unspecified"
+    category: str = "direct_fact"
+    response_effort: Literal["quick", "balanced", "thorough"] = "balanced"
+    gold_evidence: list[GoldEvidence] = Field(default_factory=list)
+    requirements: list[EvalRequirement] = Field(default_factory=list)
+    accepted_answers: list[str] = Field(default_factory=list)
+    numeric_assertions: list[NumericAssertion] = Field(default_factory=list)
+    expected_refusal: bool = False
+    expected_contradiction: bool = False
+    run_in_both_modes: bool = Field(
+        default=False,
+        description="Execute one additional answer using the alternate Standard/Thorough mode.",
+    )
+    latency_sentinel: bool = Field(
+        default=False,
+        description="Execute this case three times for latency variance without duplicate grading.",
+    )
 
 
 class EvalRunRequest(BaseModel):
+    """Request a retrieval evaluation, optionally grading captured answers."""
+
     evals: list[EvalItem]
     pipeline: str = "hybrid_rerank"
     top_k: int = 10
+    answers: dict[str, str] = Field(default_factory=dict)
+    sources: dict[str, list[dict[str, Any]]] = Field(
+        default_factory=dict,
+        description="Exact sources emitted by answer generation; omitted for retrieval-only evaluation.",
+    )
+    run_meta: dict = Field(default_factory=dict)
