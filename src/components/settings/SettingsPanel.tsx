@@ -84,6 +84,16 @@ export function SettingsPanel({
           <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.evidence_required || false} onChange={event => setDraftRagSettings(current => current && { ...current, evidence_required: event.target.checked })} />Require local evidence for answers</label>
           <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.conversation_memory ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, conversation_memory: event.target.checked })} />Use past chats as local retrieval memory</label>
           <details className="retrieval-guide">
+            <summary>Adaptive evidence controls</summary>
+            <p className="settings-note">Disable one stage to compare behavior or roll it back. These request-time controls do not require reindexing.</p>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.hierarchical_context ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, hierarchical_context: event.target.checked })} />Merge sibling and parent context</label>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.layout_evidence ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, layout_evidence: event.target.checked })} />Expand layout evidence</label>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.evidence_ledger ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, evidence_ledger: event.target.checked })} />Record evidence ledger</label>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.coverage_selection ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, coverage_selection: event.target.checked })} />Select and compress by coverage</label>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.gap_retrieval ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, gap_retrieval: event.target.checked })} />Allow one Thorough gap round</label>
+            <label className="checkbox-field"><input type="checkbox" checked={draftRagSettings?.verified_answer_repair ?? true} onChange={event => setDraftRagSettings(current => current && { ...current, verified_answer_repair: event.target.checked })} />Skip repair when draft verifies</label>
+          </details>
+          <details className="retrieval-guide">
             <summary>Advanced chunking</summary>
             <div className="settings-grid">
               <NumberSetting label="Parent target" value={draftRagSettings?.parent_target_tokens} onChange={value => setDraftRagSettings(current => current && { ...current, parent_target_tokens: value })} />
@@ -176,7 +186,7 @@ function FixedModelRow({
   };
   const rerankerBackend = runtime.backend || info.selected_backend || "unavailable";
   const rerankerDescription = rerankerBackend === "gguf_vulkan"
-    ? "Official BF16 GGUF listwise reranker via the verified llama.cpp/Vulkan path."
+    ? "Official Q8_0 GGUF listwise reranker via the verified llama.cpp/Vulkan path."
     : rerankerBackend === "transformers_cpu"
       ? "Compatibility fallback: official custom Transformers worker on CPU."
       : "Jina v3.5 listwise reranker; install the verified llama.cpp helper or retain the CPU fallback.";

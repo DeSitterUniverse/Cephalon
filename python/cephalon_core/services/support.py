@@ -4,21 +4,11 @@ import re
 from typing import Any
 
 from ..schemas import SourceChunk
+from .claim_verification import strip_hidden_reasoning, verify_answer_claims
 
 
 SOURCE_TAG_PATTERN = re.compile(r"\[\[\s*src\s*:\s*([A-Za-z0-9_-]+)\s*\]\]", re.IGNORECASE)
 SOURCE_LIKE_PATTERN = re.compile(r"\[\[[^\]\n]*src[^\]\n]*(?:\]\]|$)", re.IGNORECASE | re.MULTILINE)
-CLAIM_SPLIT_PATTERN = re.compile(
-    r"(?<=[.!?])\s+(?!\[\[\s*src\s*:)|\n+",
-    re.IGNORECASE,
-)
-CLAIM_STOPWORDS = {
-    "about", "after", "again", "also", "because", "before", "being", "between",
-    "could", "does", "from", "have", "into", "more", "most", "other", "should",
-    "than", "that", "their", "there", "these", "they", "this", "those", "through",
-    "using", "very", "were", "what", "when", "where", "which", "while", "with",
-    "would", "your",
-}
 
 
 def extract_cited_source_ids(answer_text: str) -> list[str]:
@@ -68,11 +58,12 @@ def classify_citation_support(
 
 
 def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dict[str, Any]:
-    raw_tags = [match.group(0) for match in SOURCE_TAG_PATTERN.finditer(answer_text or "")]
-    cited_source_ids = extract_cited_source_ids(answer_text)
+    visible_answer = strip_hidden_reasoning(answer_text)
+    raw_tags = [match.group(0) for match in SOURCE_TAG_PATTERN.finditer(visible_answer)]
+    cited_source_ids = extract_cited_source_ids(visible_answer)
     malformed_citations = [
         match.group(0)
-        for match in SOURCE_LIKE_PATTERN.finditer(answer_text or "")
+        for match in SOURCE_LIKE_PATTERN.finditer(visible_answer)
         if SOURCE_TAG_PATTERN.fullmatch(match.group(0)) is None
     ]
     source_by_id = {
@@ -123,7 +114,7 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         if sum(1 for raw in raw_tags if SOURCE_TAG_PATTERN.fullmatch(raw).group(1).upper() == source_id) > 1
     })
     uncited_source_ids = sorted(set(available_source_ids) - set(cited_source_ids))
-    claim_validation = validate_answer_claims(answer_text, sources)
+    claim_validation = validate_answer_claims(visible_answer, sources)
     claim_ids_by_source: dict[str, list[str]] = {}
     claim_text_by_source: dict[str, list[str]] = {}
     for claim in claim_validation["claims"]:
@@ -135,7 +126,10 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         source = source_by_id.get(str(source_id).upper()) if source_id else None
         citation["claim_ids"] = claim_ids_by_source.get(str(source_id), [])
         citation["claims"] = claim_text_by_source.get(str(source_id), [])
-        citation["evidence"] = (source.evidence_text or source.snippet) if source else None
+        citation["evidence"] = (
+            (source.evidence_text if source.evidence_text is not None else source.snippet)
+            if source else None
+        )
     unused_citation_source_ids = [
         source_id
         for source_id in cited_source_ids
@@ -161,6 +155,7 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
         status = "weak"
     return {
         "status": status,
+        "answer_sanitized": visible_answer != str(answer_text or ""),
         "citations": citations,
         "accounting": accounting,
         "claim_validation": claim_validation,
@@ -168,68 +163,9 @@ def classify_answer_support(answer_text: str, sources: list[SourceChunk]) -> dic
 
 
 def validate_answer_claims(answer_text: str, sources: list[SourceChunk]) -> dict[str, Any]:
-    source_by_id = {
-        source.source_id.upper(): source
-        for source in sources
-        if source.source_id
-    }
-    claims: list[dict[str, Any]] = []
-    for index, statement in enumerate(_claim_statements(answer_text), start=1):
-        clean = statement.strip()
-        if not clean or clean.startswith("<think>") or clean.startswith("</think>"):
-            continue
-        cited_ids = extract_cited_source_ids(clean)
-        claim_text = SOURCE_TAG_PATTERN.sub("", clean).strip(" -*#\t")
-        claim_terms = _claim_terms(claim_text)
-        if len(claim_terms) < 2:
-            continue
-        known_sources = [source_by_id[source_id] for source_id in cited_ids if source_id in source_by_id]
-        unknown_ids = [source_id for source_id in cited_ids if source_id not in source_by_id]
-        coverage_by_source = {
-            source.source_id or "unknown": _term_coverage(
-                claim_terms,
-                _claim_terms(source.evidence_text or source.snippet),
-            )
-            for source in known_sources
-        }
-        best_coverage = max(coverage_by_source.values(), default=0.0)
-        if unknown_ids:
-            status = "unsupported"
-            reason = "One or more citation tags do not identify supplied evidence."
-        elif not cited_ids:
-            status = "uncited"
-            reason = "The claim has no source tag."
-        elif best_coverage >= 0.55:
-            status = "supported"
-            reason = "The cited evidence contains most of the claim's material terms."
-        elif best_coverage >= 0.25:
-            status = "weak"
-            reason = "The cited evidence has partial lexical support for the claim."
-        else:
-            status = "unsupported"
-            reason = "The cited evidence does not contain enough of the claim's material terms."
-        claims.append({
-            "claim_id": f"C{index}",
-            "text": claim_text,
-            "source_ids": cited_ids,
-            "status": status,
-            "reason": reason,
-            "coverage": round(best_coverage, 6),
-            "coverage_by_source": {
-                source_id: round(coverage, 6)
-                for source_id, coverage in coverage_by_source.items()
-            },
-        })
+    """Return deterministic entailment plus backward-compatible support aliases."""
 
-    return {
-        "method": "deterministic_claim_coverage_v1",
-        "claim_count": len(claims),
-        "supported_claim_count": sum(claim["status"] == "supported" for claim in claims),
-        "weak_claim_count": sum(claim["status"] == "weak" for claim in claims),
-        "unsupported_claim_count": sum(claim["status"] == "unsupported" for claim in claims),
-        "uncited_claim_count": sum(claim["status"] == "uncited" for claim in claims),
-        "claims": claims,
-    }
+    return verify_answer_claims(answer_text, sources)
 
 
 def sources_from_context(context: str) -> list[SourceChunk]:
@@ -259,32 +195,3 @@ def sources_from_context(context: str) -> list[SourceChunk]:
         )
         for index, source_id in enumerate(order, start=1)
     ]
-
-
-def _claim_statements(answer_text: str) -> list[str]:
-    tag = r"\[\[\s*src\s*:\s*[A-Za-z0-9_-]+\s*\]\]"
-    normalized = re.sub(
-        rf"([.!?])\s+((?:{tag}\s*)+)",
-        lambda match: f"{match.group(1)} {match.group(2).strip()}\n",
-        answer_text or "",
-        flags=re.IGNORECASE,
-    )
-    return [
-        statement
-        for statement in CLAIM_SPLIT_PATTERN.split(normalized)
-        if statement.strip()
-    ]
-
-
-def _claim_terms(text: str) -> set[str]:
-    return {
-        term
-        for term in re.findall(r"[\w.-]+", text.lower(), flags=re.UNICODE)
-        if len(term) >= 3 and term not in CLAIM_STOPWORDS
-    }
-
-
-def _term_coverage(claim_terms: set[str], evidence_terms: set[str]) -> float:
-    if not claim_terms:
-        return 0.0
-    return len(claim_terms & evidence_terms) / len(claim_terms)

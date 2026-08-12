@@ -16,6 +16,43 @@ def build_conn():
     return conn
 
 
+def test_answer_metrics_recognize_current_and_legacy_canonical_refusals():
+    item = {"expected_refusal": True, "accepted_answers": ["insufficient evidence"]}
+    current = evaluation.answer_metrics(
+        item=item,
+        answer="I found insufficient evidence in your local documents to answer that reliably.",
+        sources=[],
+    )
+    legacy = evaluation.answer_metrics(
+        item={"expected_refusal": True},
+        answer="I could not find sufficient supporting evidence in your local documents to answer that reliably.",
+        sources=[],
+    )
+    natural = evaluation.answer_metrics(
+        item={"expected_refusal": True},
+        answer="The retrieved documents do not contain information about that measurement.",
+        sources=[],
+    )
+    natural_first_person = evaluation.answer_metrics(
+        item={"expected_refusal": True, "accepted_answers": ["insufficient evidence"]},
+        answer="I was unable to find any mention of that value in the retrieved documents.",
+        sources=[],
+    )
+    partial = evaluation.answer_metrics(
+        item={"expected_refusal": False},
+        answer="The first source supports the result, but the second does not contain that comparison.",
+        sources=[],
+    )
+    assert current["correct_refusal"] == 1.0
+    assert current["accepted_answer_match"] == 1.0
+    assert legacy["correct_refusal"] == 1.0
+    assert natural["correct_refusal"] == 1.0
+    assert natural_first_person["correct_refusal"] == 1.0
+    assert natural_first_person["accepted_answer_match"] == 1.0
+    assert partial["correct_refusal"] == 1.0
+    assert partial["over_refusal"] == 0.0
+
+
 def test_retrieval_trace_persistence_roundtrip():
     conn = build_conn()
     trace = {

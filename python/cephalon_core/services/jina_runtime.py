@@ -27,6 +27,7 @@ from ..config import (
     EMBEDDING_MODEL_ID,
     RERANKER_FILE_SHA256,
     RERANKER_GGUF_FILE,
+    RERANKER_GGUF_PRECISION,
     RERANKER_LLAMA_CPP_REVISION,
     RERANKER_MODEL_ID,
     RERANKER_PROJECTOR_FILE,
@@ -250,7 +251,7 @@ def _base_model_status(settings, kind: str) -> dict:
         "selected_backend": backend,
         "llama_embedding": capabilities,
         "dimension": None,
-        "precision": "BF16",
+        "precision": RERANKER_GGUF_PRECISION if backend == "gguf_vulkan" else "BF16" if backend == "transformers_cpu" else None,
         "trust_remote_code": backend == "transformers_cpu",
         "required": list(required),
     }
@@ -437,7 +438,7 @@ def _start_reranker(app_state) -> None:
             ]
         )
         device = app_state.settings.reranker_device
-        precision = "BF16"
+        precision = RERANKER_GGUF_PRECISION
     elif backend == "transformers_cpu":
         worker_arguments = [str(_legacy_reranker_path(app_state.settings))]
         command = (
@@ -590,7 +591,7 @@ def verify_model(app_state, kind: str) -> dict:
         )
         if not all((legacy_directory / item).is_file() for item in ("config.json", "tokenizer.json")):
             payload["verified"] = False
-            payload["error"] = "BF16 GGUF assets and Transformers fallback files are missing."
+            payload["error"] = "Q8_0 GGUF assets and Transformers fallback files are missing."
             return payload
         manifest = _read_manifest(legacy_directory)
         if manifest is None:

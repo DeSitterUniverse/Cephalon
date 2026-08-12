@@ -23,6 +23,12 @@ class RagSettings(BaseModel):
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
+    hierarchical_context: bool = True
+    layout_evidence: bool = True
+    evidence_ledger: bool = True
+    coverage_selection: bool = True
+    gap_retrieval: bool = True
+    verified_answer_repair: bool = True
     no_answer_min_confidence: float = 0.35
     no_answer_min_rerank_score: float = 0.15
     no_answer_min_vector_score: float = 0.05

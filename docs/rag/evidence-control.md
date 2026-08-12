@@ -28,6 +28,14 @@ The ledger never replaces source provenance. Evidence IDs point to exact
 `SourceChunk` records; source IDs remain the citation contract used by existing
 conversations and clients.
 
+Quoted paper titles and explicit named targets create document-aware
+requirements. Identity matching uses document metadata and aliases rather than
+similar words inside a chunk. A source must also contain a substantive,
+evidence-marked excerpt of at least the qualifying length; bibliography-only,
+reference-number-only, metadata-only, and extremely short fragments do not
+count. Each distinct named paper needs its own matching document, preventing a
+generic or unrelated chunk from satisfying multiple study requirements.
+
 Coverage selection uses this requirement list before the final ledger is
 materialized. Selection decisions record normalized relevance, per-requirement
 coverage, diversity/coherence flags, redundancy, estimated tokens, and the
@@ -41,3 +49,13 @@ transition occurs only when a requirement is `missing`, `partial`, or
 `no_novel_evidence` are terminal states. The trace records the triggering
 requirements, generated query, candidate/source/token counts, latency, bounds,
 and stop reason. It cannot recurse into another gap round.
+
+After synthesis, deterministic verification is authoritative for citation
+presence, negation, and arithmetic. The semantic audit may recognize a valid
+paraphrase that lexical coverage marked partial, but it cannot override a
+deterministic contradiction or numerical failure. Thorough repair is a single
+terminal transition; repaired text is verified again by the ordinary final
+support classifier before storage. Reasoning-channel tokens and explicit
+`<think>` blocks are removed before this final classification, and validator
+JSON-schema failures are recorded with a deterministic fallback rather than a
+second repair loop.

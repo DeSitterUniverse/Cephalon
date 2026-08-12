@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from .. import storage
 from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, QueryRequest, RagSettings
 from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, retrieval, retrieval_control, support
+from ..services.claim_verification import strip_hidden_reasoning
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
 from .documents import delete_document, get_documents, router as documents_router
@@ -549,7 +550,7 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                     req.prompt,
                     query_vector,
                     rag_settings,
-                    enable_gap_round=req.response_effort == "thorough",
+                    enable_gap_round=req.response_effort == "thorough" and rag_settings.gap_retrieval,
                 )
                 query_meta["retrieval_route"] = retrieval_route
             else:
@@ -603,10 +604,23 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                         yield _sse("token", {"text": value})
             if await request.is_disconnected():
                 return
-            answer_text = "".join(answer_parts)
+            # The stream filter prevents normal leakage, while this second
+            # boundary protects persistence and diagnostics from templates
+            # that place thought tags inside a content delta.
+            raw_answer_text = "".join(answer_parts)
+            answer_text = strip_hidden_reasoning(raw_answer_text)
             generation_ms = round((time.perf_counter() - generation_started) * 1000, 2)
             quality = metrics.estimate_answer_quality(req.prompt, answer_text, context)
             support_payload = support.classify_answer_support(answer_text, sources)
+            draft_verification = query_meta.get("claim_verification")
+            if draft_verification is not None:
+                query_meta["draft_claim_verification"] = draft_verification
+            # This is deliberately deterministic and runs after the optional
+            # one-repair completion. The UI therefore reports the claims in the
+            # prose that was actually stored, while the draft audit remains
+            # available for debugging the repair decision.
+            query_meta["claim_verification"] = support_payload["claim_validation"]
+            query_meta["final_answer_sanitized"] = raw_answer_text != answer_text
             query_meta.update(quality)
             query_meta["support"] = support_payload
             query_meta["generation_latency_ms"] = generation_ms
@@ -619,7 +633,28 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                 })
             except OSError as error:
                 app_state.last_metrics_error = str(error)
-            yield _sse("answer_meta", {**quality, "support": support_payload, "generation_latency_ms": generation_ms})
+            # Retrieval metadata is emitted before generation, but completion
+            # counts and the Thorough audit do not exist until the generator
+            # closes. Emit the late-bound fields again so the live UI and
+            # benchmark stream observe the same verification record that is
+            # persisted with the conversation.
+            late_generation_meta = {
+                key: query_meta[key]
+                for key in (
+                    "completion_call_count",
+                    "repair_attempted",
+                    "claim_verification",
+                    "draft_claim_verification",
+                    "final_answer_sanitized",
+                )
+                if key in query_meta
+            }
+            yield _sse("answer_meta", {
+                **quality,
+                **late_generation_meta,
+                "support": support_payload,
+                "generation_latency_ms": generation_ms,
+            })
             assistant_message = storage.append_message(
                 app_state.sqlite,
                 conversation_id,

@@ -23,13 +23,14 @@ RERANKER_REPO = "jinaai/jina-reranker-v3.5-GGUF"
 RERANKER_TRANSFORMERS_REPO = "jinaai/jina-reranker-v3.5"
 RERANKER_REVISION = "884f7c67aa3ac24edb89064da8c7bfd03f4a90f5"
 RERANKER_LLAMA_CPP_REVISION = "80c940e5a80555167c4ec37652deca6528810f91"
-RERANKER_GGUF_FILE = "jina-reranker-v3.5-BF16.gguf"
+RERANKER_GGUF_FILE = "jina-reranker-v3.5-Q8_0.gguf"
+RERANKER_GGUF_PRECISION = "Q8_0"
 RERANKER_PROJECTOR_FILE = "projector.safetensors"
 RERANKER_TOKENIZER_FILE = "tokenizer.json"
-# BF16 is intentional: lower-bit GGUFs are smaller, but the fixed retrieval
-# stack may not trade ranking quality for storage without benchmark evidence.
+# Q8_0 preserves the fixed scientific retrieval metrics while reducing model
+# storage and request wall time. BF16 remains the controlled rollback artifact.
 RERANKER_FILE_SHA256 = {
-    RERANKER_GGUF_FILE: "d9b699dec7ae8e5ff058c3e9b767c5b7d467dc4dc38e4c6badfe061e82aabd60",
+    RERANKER_GGUF_FILE: "bedbedd688d18665448241f1aad78afb23a4476b89ae0867243e1c79aa4357b8",
     RERANKER_PROJECTOR_FILE: "b14c3d97315ca33490e630218c821640f183180fd971c5c3242f5b81aadcedf9",
     RERANKER_TOKENIZER_FILE: "4e95945ab0cef486709f760b81efcc7a6e75747f9165d13ead29159737455803",
 }
@@ -54,6 +55,12 @@ class RagDefaults:
     evidence_required: bool = False
     conversation_memory: bool = True
     trace_persistence: bool = True
+    hierarchical_context: bool = True
+    layout_evidence: bool = True
+    evidence_ledger: bool = True
+    coverage_selection: bool = True
+    gap_retrieval: bool = True
+    verified_answer_repair: bool = True
     no_answer_min_confidence: float = 0.35
     no_answer_min_rerank_score: float = 0.15
     no_answer_min_vector_score: float = 0.05
@@ -65,7 +72,7 @@ class Settings:
         self.data_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_DATA_DIR", "~/cephalon-data")))
         self.model_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_MODEL_DIR", os.path.join(self.data_dir, "models"))))
         self.embedder_model_dir = os.path.join(self.model_dir, "jina-v5-nano-retrieval-q8_0")
-        self.reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5-gguf-bf16")
+        self.reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5-gguf-q8_0")
         # Existing installations remain usable until the GGUF assets and a
         # feature-compatible llama-embedding binary are available.
         self.legacy_reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5")
@@ -120,6 +127,12 @@ class Settings:
             evidence_required=os.getenv("CEPHALON_EVIDENCE_REQUIRED", "0") == "1",
             conversation_memory=os.getenv("CEPHALON_CONVERSATION_MEMORY", "1") != "0",
             trace_persistence=os.getenv("CEPHALON_TRACE_PERSISTENCE", "1") != "0",
+            hierarchical_context=os.getenv("CEPHALON_HIERARCHICAL_CONTEXT", "1") != "0",
+            layout_evidence=os.getenv("CEPHALON_LAYOUT_EVIDENCE", "1") != "0",
+            evidence_ledger=os.getenv("CEPHALON_EVIDENCE_LEDGER", "1") != "0",
+            coverage_selection=os.getenv("CEPHALON_COVERAGE_SELECTION", "1") != "0",
+            gap_retrieval=os.getenv("CEPHALON_GAP_RETRIEVAL", "1") != "0",
+            verified_answer_repair=os.getenv("CEPHALON_VERIFIED_ANSWER_REPAIR", "1") != "0",
             no_answer_min_confidence=float(os.getenv("CEPHALON_NO_ANSWER_MIN_CONFIDENCE", "0.35")),
             no_answer_min_rerank_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_RERANK_SCORE", "0.15")),
             no_answer_min_vector_score=float(os.getenv("CEPHALON_NO_ANSWER_MIN_VECTOR_SCORE", "0.05")),
