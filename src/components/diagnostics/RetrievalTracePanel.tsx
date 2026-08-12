@@ -54,6 +54,14 @@ export function RetrievalTracePanel({ traces, selected, selectedId, onSelect }: 
           {selected.evidence_ledger && (
             <details open>
               <summary>Evidence requirements ({selected.evidence_ledger.requirements.length})</summary>
+              {selected.evidence_ledger.gap_retrieval && (
+                <p>
+                  Gap round: {selected.evidence_ledger.gap_retrieval.status}
+                  {selected.evidence_ledger.gap_retrieval.added_source_count != null
+                    ? ` · ${selected.evidence_ledger.gap_retrieval.added_source_count} added`
+                    : ""}
+                </p>
+              )}
               <div className="context-list">
                 {selected.evidence_ledger.requirements.map(requirement => (
                   <p key={requirement.id}>

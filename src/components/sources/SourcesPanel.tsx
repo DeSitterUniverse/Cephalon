@@ -51,6 +51,9 @@ export function SourcesPanel({ sources, onOpenDocument }: Props) {
                   {Object.values(source.context_selection.requirement_coverage).filter(value => value >= 0.34).length} requirements
                 </span>
               )}
+              {(source.retrieval_round || 0) > 0 && (
+                <span>retrieval round {source.retrieval_round} · gap {source.triggering_gap || "unknown"}</span>
+              )}
             </div>
             {source.evidence_text && (
               <div className="source-evidence">

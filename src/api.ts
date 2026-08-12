@@ -207,6 +207,19 @@ export type RetrievalTrace = RetrievalTraceSummary & {
     evidence: Array<Record<string, unknown>>;
     conflicts: Array<Record<string, unknown>>;
     summary: Record<string, number>;
+    gap_retrieval?: {
+      enabled: boolean;
+      round: number;
+      attempted: boolean;
+      status: string;
+      query?: string;
+      triggering_requirement_ids: string[];
+      latency_ms?: number;
+      candidate_count?: number;
+      added_source_count?: number;
+      added_context_tokens?: number;
+      token_budget?: number;
+    };
   };
 };
 export type IndexHealth = {
