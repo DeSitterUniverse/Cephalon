@@ -94,6 +94,18 @@ export type SourceChunk = {
       reason: string;
     }>;
   };
+  context_selection?: {
+    objective?: number | null;
+    normalized_relevance?: number;
+    requirement_coverage?: Record<string, number>;
+    new_requirement_coverage?: number;
+    diversity_bonus?: boolean;
+    structural_coherence?: boolean;
+    dense_anchor?: boolean;
+    redundancy?: number;
+    estimated_tokens?: number;
+    decision?: string;
+  };
   evidence_ids?: string[];
   requirement_ids?: string[];
   retrieval_round?: number;

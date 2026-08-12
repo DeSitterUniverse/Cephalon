@@ -53,7 +53,7 @@ def build_evidence_ledger(
     numeric values with the same explicit unit.
     """
 
-    requirements = _requirements(raw_query, subqueries)
+    requirements = plan_requirements(raw_query, subqueries)
     evidence: list[dict[str, Any]] = []
     assignments: dict[str, list[tuple[str, float]]] = {item["id"]: [] for item in requirements}
     for index, source in enumerate(sources[:MAX_LEDGER_SOURCES], start=1):
@@ -132,7 +132,9 @@ def build_evidence_ledger(
     }
 
 
-def _requirements(raw_query: str, subqueries: list[dict[str, str]]) -> list[dict[str, str]]:
+def plan_requirements(raw_query: str, subqueries: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return the stable deterministic requirement plan used by control stages."""
+
     components = [item for item in subqueries if item.get("id") != "q0"]
     if not components:
         components = subqueries[:1] or [{"id": "q1", "text": raw_query}]

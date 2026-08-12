@@ -10,6 +10,7 @@ reference systems or their model dependencies.
 | Sibling-span auto-merge | HiChunk, FreeChunker | Selected siblings form a bounded span; sufficiently covered parents may be promoted. Exact child provenance remains the citation anchor. | No model/runtime replacement. Five-child, 40% coverage, per-unit, and request token bounds prevent open-ended expansion. |
 | Conditional layout evidence | LAD-RAG, SciRAG | Request-local SQLite relationships connect adjacent blocks, sections, captions/assets, table segments, and page continuations. | No graph database or corpus-wide graph. Traversal is limited to two hops, six nodes, and 25% of context tokens. |
 | Request-scoped evidence ledger | S2G-RAG, SciRAG | Deterministic requirements map to bounded source evidence with sufficiency, round, and potential-conflict state. | A5 is observability-only and adds no planner-model call or retrieval loop. |
+| Coverage-aware context | S2G-RAG, SciRAG, OpenScholar | Greedy selection balances requirement coverage, relevance, diversity, coherence, redundancy, and token cost; compression preserves fragile scientific evidence. | Fixed weights and hard block limits avoid an additional selector model or unbounded context growth. |
 
 Implementation thresholds are named and documented in
 `services/context_assembly.py`. Benchmark comparisons and large scientific

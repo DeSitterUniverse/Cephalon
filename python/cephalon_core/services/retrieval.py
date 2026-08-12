@@ -19,7 +19,8 @@ from . import observability
 from . import jina_runtime
 from .context_assembly import assemble_hierarchical_context
 from .layout_expansion import expand_layout_evidence
-from .evidence_ledger import build_evidence_ledger
+from .evidence_ledger import build_evidence_ledger, plan_requirements
+from .coverage_selection import select_coverage_aware_results
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -34,6 +35,20 @@ EMBEDDING_INFERENCE_BATCH_SIZE = 16
 # and repeatedly paying GGUF model startup.
 RERANK_CACHE_LIMIT = 256
 RERANK_TEXT_LIMIT = 700
+CONTEXT_REQUIREMENT_COVERAGE = 0.34
+# Compression bonuses are intentionally smaller than lexical relevance (whose
+# range is 0..1). They break close ties in favor of coverage and scientifically
+# fragile evidence without allowing a numeric or structured but irrelevant
+# block to dominate. The 320-block cap bounds the O(output * candidates) loop.
+COMPRESSION_CANDIDATE_LIMIT = 320
+COMPRESSION_REQUIREMENT_WEIGHT = 0.45
+COMPRESSION_NEW_SOURCE_BONUS = 0.20
+COMPRESSION_REDUNDANCY_PENALTY = 0.28
+COMPRESSION_DUPLICATE_THRESHOLD = 0.75
+STRUCTURED_PRESERVATION_BONUS = 0.12
+NUMERIC_PRESERVATION_BONUS = 0.08
+NEGATION_PRESERVATION_BONUS = 0.08
+DEFINITION_PRESERVATION_BONUS = 0.06
 MEMORY_ONLY_REQUEST = re.compile(r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\s+only\b", re.IGNORECASE)
 MEMORY_PREFERRED_REQUEST = re.compile(
     r"\b(?:past|previous|earlier)\s+(?:conversation|chat)\b|\b(?:we\s+(?:just\s+)?discuss(?:ed)?|remember)\b",
@@ -476,6 +491,7 @@ def hydrate_sources(app_state, results: list[dict], subquery_id: str | None = No
             fusion_score=float(res["fusion_score"]) if res.get("fusion_score") is not None else None,
             snippet=text[:500],
             subquery_id=subquery_id or ",".join(res.get("subquery_ids", [])) or None,
+            context_selection=res.get("context_selection", {}),
             assets=source_assets,
             **provenance,
         ))
@@ -785,33 +801,81 @@ def compress_context(
     query: str,
     sources: list[CompressionSource],
     max_sentences: int = 10,
+    requirements: list[dict[str, str]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
     query_terms = _term_set(query)
+    requirements = requirements or []
+    requirement_terms = {item["id"]: _term_set(item["text"]) for item in requirements}
     candidates: list[dict[str, Any]] = []
     for source in sources:
         for block_type, text in split_context_blocks(source.text):
             relevance = _sentence_relevance(query_terms, text)
+            block_terms = _term_set(text)
+            requirement_coverage = {
+                requirement_id: len(terms & block_terms) / len(terms) if terms else 0.0
+                for requirement_id, terms in requirement_terms.items()
+            }
+            preservation_bonus = _preservation_bonus(block_type, text)
             candidates.append({
                 "source_id": source.source_id,
                 "sentence": text,
                 "block_type": block_type,
                 "rank": source.rank,
-                "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04),
+                "score": relevance + (source.score * 0.08) + (1.0 / max(source.rank, 1) * 0.04) + preservation_bonus,
                 "relevant": relevance > 0,
+                "requirement_coverage": requirement_coverage,
+                "preservation_bonus": preservation_bonus,
             })
+            if len(candidates) >= COMPRESSION_CANDIDATE_LIMIT:
+                break
+        if len(candidates) >= COMPRESSION_CANDIDATE_LIMIT:
+            break
     candidates.sort(key=lambda item: item["score"], reverse=True)
 
     kept: list[dict[str, Any]] = []
     seen_terms: set[str] = set()
-    for candidate in candidates:
+    covered_requirements: set[str] = set()
+    represented_sources: set[str] = set()
+    remaining = list(candidates)
+    while remaining and len(kept) < max_sentences:
+        best = None
+        best_value = float("-inf")
+        for candidate in remaining:
+            terms = _term_set(candidate["sentence"])
+            overlap = len(terms & seen_terms) / max(len(terms), 1)
+            new_requirement = max(
+                (
+                    coverage
+                    for requirement_id, coverage in candidate["requirement_coverage"].items()
+                    if requirement_id not in covered_requirements
+                ),
+                default=0.0,
+            )
+            source_bonus = COMPRESSION_NEW_SOURCE_BONUS if candidate["source_id"] not in represented_sources else 0.0
+            marginal = candidate["score"] + COMPRESSION_REQUIREMENT_WEIGHT * new_requirement + source_bonus - COMPRESSION_REDUNDANCY_PENALTY * overlap
+            if marginal > best_value:
+                best, best_value = candidate, marginal
+        if best is None:
+            break
+        candidate = best
         terms = _term_set(candidate["sentence"])
         overlap = len(terms & seen_terms) / max(len(terms), 1)
-        if overlap > 0.75 and len(kept) >= 1:
+        covers_new = any(
+            requirement_id not in covered_requirements and coverage >= CONTEXT_REQUIREMENT_COVERAGE
+            for requirement_id, coverage in candidate["requirement_coverage"].items()
+        )
+        represents_new_source = candidate["source_id"] not in represented_sources
+        remaining.remove(candidate)
+        if overlap > COMPRESSION_DUPLICATE_THRESHOLD and kept and not covers_new and not represents_new_source:
             continue
         kept.append(candidate)
         seen_terms.update(terms)
-        if len(kept) >= max_sentences:
-            break
+        represented_sources.add(candidate["source_id"])
+        covered_requirements.update(
+            requirement_id
+            for requirement_id, coverage in candidate["requirement_coverage"].items()
+            if coverage >= CONTEXT_REQUIREMENT_COVERAGE
+        )
 
     if not kept and candidates:
         kept = candidates[:max_sentences]
@@ -827,11 +891,28 @@ def compress_context(
         "kept_sentences": len(kept),
         "relevant_sentence_count": relevant_total,
         "context_relevance": round(relevant_total / total_sentences, 6) if total_sentences else 0.0,
+        "requirement_coverage": round(len(covered_requirements) / len(requirements), 6) if requirements else 1.0,
+        "covered_requirement_ids": sorted(covered_requirements),
+        "represented_source_count": len(represented_sources),
+        "preserved_structured_blocks": sum(item["block_type"] == "structured" for item in kept),
     }
     return compressed, stats, {
         source_id: "\n".join(evidence)
         for source_id, evidence in evidence_by_source.items()
     }
+
+
+def _preservation_bonus(block_type: str, text: str) -> float:
+    """Favor evidence whose semantics are easily damaged by lexical pruning."""
+
+    bonus = STRUCTURED_PRESERVATION_BONUS if block_type == "structured" else 0.0
+    if re.search(r"(?<!\w)-?\d+(?:\.\d+)?\s*(?:%|[a-zA-Zµμ°]+)?", text):
+        bonus += NUMERIC_PRESERVATION_BONUS
+    if re.search(r"\b(?:no|not|never|without|failed to|did not|does not)\b", text, re.IGNORECASE):
+        bonus += NEGATION_PRESERVATION_BONUS
+    if re.search(r"\b(?:is defined as|refers to|means|we define)\b", text, re.IGNORECASE):
+        bonus += DEFINITION_PRESERVATION_BONUS
+    return bonus
 
 
 def confidence_from_sources(sources: list[SourceChunk], settings: RagSettings | None = None) -> dict[str, Any]:
@@ -868,11 +949,13 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "reranked_candidates": [],
         "final_context": [],
         "evidence_ledger": {},
+        "selection": {},
         "unused_candidates": [],
         "latency": {"preprocessing_ms": 0, "rewrite_ms": 0, "vector_ms": 0, "bm25_ms": 0, "fusion_ms": 0, "rerank_ms": 0, "context_ms": 0},
         "no_answer": {},
     }
     subqueries = plan_subqueries(prompt)
+    requirements = plan_requirements(prompt, subqueries)
     memory_only, memory_preferred = _memory_request_mode(prompt)
     trace["subqueries"] = subqueries
     numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
@@ -942,9 +1025,29 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         if memory_only:
             reranked = all_ranked[:settings.rerank_top_n]
         else:
-            reranked = _select_relevant_results(all_ranked, settings.rerank_top_n)
+            reranked, selection_meta = select_coverage_aware_results(
+                all_ranked,
+                requirements,
+                settings.rerank_top_n,
+                anchor_ids=anchor_ids,
+            )
             anchor_ranked = [row for row in all_ranked if row["id"] in anchor_ids]
             if anchor_ranked:
+                decision_by_id = {
+                    item["chunk_id"]: item for item in selection_meta.get("selected", [])
+                }
+                anchor_ranked = [
+                    {
+                        **row,
+                        "context_selection": decision_by_id.get(row["id"], {
+                            "objective": None,
+                            "requirement_coverage": {},
+                            "dense_anchor": True,
+                            "decision": "forced dense-rank recall anchor",
+                        }),
+                    }
+                    for row in anchor_ranked
+                ]
                 reranked = (anchor_ranked + [
                     row for row in reranked if row["id"] not in anchor_ids
                 ])[:settings.rerank_top_n]
@@ -956,6 +1059,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
                     reranked = (memory_ranked[:1] + [
                         row for row in reranked if row.get("id") != memory_ranked[0].get("id")
                     ])[:settings.rerank_top_n]
+            trace["selection"] = selection_meta
         selected_ids = {item["id"] for item in reranked}
         trace["reranked_candidates"] = [_trace_candidate(row, rank) for rank, row in enumerate(all_ranked, start=1)]
         trace["unused_candidates"].extend([
@@ -998,7 +1102,12 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             # an explicit bounded expansion. This preserves the recall safety
             # net without reverting to unconditional full-parent injection.
             compression_text = res["text"] if res["id"] in anchor_ids and assembly.context_kind == "child" else context_text
-            compression_inputs.append(CompressionSource(source_id=source_id, text=compression_text, rank=source.rank if source else 99, score=source.score if source else 0.0))
+            compression_inputs.append(CompressionSource(
+                source_id=source_id,
+                text=compression_text,
+                rank=source.rank if source else 99,
+                score=source.score if source else 0.0,
+            ))
         trace["latency"]["context_ms"] = round((time.perf_counter() - context_started) * 1000, 2)
 
     if compression_inputs:
@@ -1006,6 +1115,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             prompt,
             compression_inputs,
             max_sentences=max(6, settings.rerank_top_n * 3),
+            requirements=requirements,
         )
         if compressed_context:
             memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
