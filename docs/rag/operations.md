@@ -104,6 +104,7 @@ All controls are booleans, default `true`, have no unit, and accept only
 | `gap_retrieval` | `CEPHALON_GAP_RETRIEVAL` | Thorough stays single retrieval pass | No |
 | `verified_answer_repair` | `CEPHALON_VERIFIED_ANSWER_REPAIR` | Thorough always uses its legacy repair completion | No |
 | n/a | `CEPHALON_TYPED_TABLES` | Typed table rows are not written or routed; table text remains retrievable | Yes when re-enabled |
+| n/a | `CEPHALON_TABLE_EXECUTION` | No typed planning, deterministic execution, or named-document unit scan; hybrid text retrieval remains | No |
 
 A2 parent-summary v2 is the only Stack A change that requires reindexing. Its
 rollback requires checking out the earlier ingestion code and reindexing again.
@@ -114,6 +115,11 @@ Migration 018 adds the typed table schema without rewriting documents at
 startup. Explicitly reindex the library to populate it. Disabling
 `CEPHALON_TYPED_TABLES` is the runtime rollback and leaves dense/FTS table text
 available; re-enable and reindex to refresh structured rows.
+
+Migration 019 adds only `retrieval_queries.table_execution_json`; it does not
+rewrite the index. `CEPHALON_TABLE_EXECUTION=0` is the B2 rollback and requires
+no reindex. The trace records the validated plan, bounds, fallback reason,
+candidate sources, execution latency, and completion-call count.
 
 ## Shutdown verification
 

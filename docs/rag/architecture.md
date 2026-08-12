@@ -5,6 +5,7 @@ retaining document structure in SQLite. A request follows this bounded path:
 
 ```text
 question -> dense + FTS5 retrieval -> RRF -> Jina v3.5 rerank
+         -> optional validated table plan + deterministic execution
          -> hierarchical context assembly -> compression -> generation
          -> citation and claim diagnostics
 ```
@@ -40,6 +41,14 @@ dialect/encoding; XLSX retains worksheet references, merged ranges, formats,
 and formulas without claiming recalculation. Stable content/location-derived
 IDs make identical reingestion deterministic. See [structured-tables.md](structured-tables.md)
 for the complete schema, limits, and rollback contract.
+
+At request time, recognizable table questions may produce a validated
+`TablePlan`. The executor reads only bound table IDs and numeric column indexes
+through application-owned statements. Safe results join—not replace—the hybrid
+context, then participate in compression and the evidence ledger. Any planning,
+schema, unit, ambiguity, bound, or timeout failure returns to text retrieval.
+The router makes no model call and a Thorough gap round can only re-enter the
+same bounded route; it cannot bypass validation or recurse.
 
 ## Hierarchical context assembly
 

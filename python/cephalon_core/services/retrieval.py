@@ -27,6 +27,12 @@ from .evidence_ledger import (
 )
 from .claim_verification import strip_hidden_reasoning
 from .coverage_selection import select_coverage_aware_results
+from .table_retrieval import (
+    MAX_REQUESTED_UNIT_CANDIDATES,
+    document_unit_sources,
+    execute_table_route,
+    requested_unit_values,
+)
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -1097,6 +1103,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "reranked_candidates": [],
         "final_context": [],
         "evidence_ledger": {},
+        "table_execution": {},
         "selection": {},
         "unused_candidates": [],
         "latency": {"preprocessing_ms": 0, "rewrite_ms": 0, "vector_ms": 0, "bm25_ms": 0, "fusion_ms": 0, "rerank_ms": 0, "context_ms": 0},
@@ -1106,14 +1113,18 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     requirements = plan_requirements(prompt, subqueries)
     memory_only, memory_preferred = _memory_request_mode(prompt)
     trace["subqueries"] = subqueries
-    numeric_context, numeric_sources = _structured_numeric_analysis_for_query(app_state, prompt)
+    table_context, table_sources, table_trace = execute_table_route(app_state, prompt)
+    trace["table_execution"] = table_trace
+    document_value_sources, document_value_trace = document_unit_sources(app_state, prompt)
+    trace["table_execution"]["text_fallback"] = document_value_trace
+    numeric_context, numeric_sources = ([], []) if table_sources else _structured_numeric_analysis_for_query(app_state, prompt)
     if numeric_context:
         context_chunks.extend(numeric_context)
         all_sources.extend(numeric_sources)
         compression_inputs.extend([
             CompressionSource(
                 source_id=source.source_id or f"S{source.rank}",
-                text=numeric_context[0],
+                text=source.evidence_text or source.snippet,
                 rank=source.rank,
                 score=source.score,
                 doc_id=source.doc_id,
@@ -1300,6 +1311,87 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             ))
         trace["latency"]["context_ms"] = round((time.perf_counter() - context_started) * 1000, 2)
 
+        # Lookup-style table evidence is additive to hybrid retrieval. It can
+        # surface exact cells without suppressing nearby prose when several
+        # values share a unit or header and deterministic selection is unsafe.
+        for source in table_sources:
+            source.rank = len(all_sources) + 1
+            source.source_id = f"S{source.rank}"
+            all_sources.append(source)
+            evidence = source.evidence_text or source.snippet
+            context_chunks.append(format_source_context(
+                source.source_id,
+                f"{source.doc_name} | structured table evidence",
+                source.chunk_id,
+                evidence,
+            ))
+            compression_inputs.append(CompressionSource(
+                source_id=source.source_id,
+                text=evidence,
+                rank=source.rank,
+                score=source.score,
+                doc_id=source.doc_id,
+                doc_name=source.doc_name,
+            ))
+        if table_sources:
+            search_modes.append("table_execution")
+
+        # A named-document unit scan is a bounded text fallback. Each match is
+        # still cited through its original chunk; it is additive and never
+        # replaces either typed-table output or ordinary hybrid retrieval.
+        for source in document_value_sources:
+            source.rank = len(all_sources) + 1
+            source.source_id = f"S{source.rank}"
+            all_sources.append(source)
+            evidence = source.evidence_text or source.snippet
+            context_chunks.append(format_source_context(
+                source.source_id,
+                f"{source.doc_name} | named-document text evidence",
+                source.chunk_id,
+                evidence,
+            ))
+            compression_inputs.append(CompressionSource(
+                source_id=source.source_id,
+                text=evidence,
+                rank=source.rank,
+                score=source.score,
+                doc_id=source.doc_id,
+                doc_name=source.doc_name,
+            ))
+        if document_value_sources:
+            search_modes.append("named_document_unit_scan")
+
+        requested_candidates = []
+        remaining_candidates = MAX_REQUESTED_UNIT_CANDIDATES
+        table_source_ids = {source.source_id for source in table_sources}
+        document_value_source_ids = {source.source_id for source in document_value_sources}
+        priority_source_ids = table_source_ids | document_value_source_ids
+        candidate_inputs = sorted(
+            enumerate(compression_inputs),
+            key=lambda pair: (
+                0 if pair[1].source_id in document_value_source_ids
+                else 1 if pair[1].source_id in table_source_ids
+                else 2,
+                pair[0],
+            ),
+        )
+        for _, item in candidate_inputs:
+            if remaining_candidates <= 0:
+                break
+            values = requested_unit_values(prompt, item.text)[:remaining_candidates]
+            if not values:
+                continue
+            remaining_candidates -= len(values)
+            requested_candidates.append({"source_id": item.source_id, "values": values})
+            item.text = (
+                "Deterministic requested-unit matches in this retrieved evidence "
+                f"(bounded candidates, retrieval order): {'; '.join(values)}.\n{item.text}"
+            )
+        trace["table_execution"]["requested_unit_candidates"] = requested_candidates
+        trace["table_execution"]["requested_unit_candidate_count"] = sum(
+            len(item["values"]) for item in requested_candidates
+        )
+
     if compression_inputs:
         compressed_context, compression_stats, evidence_by_source = compress_context(
             prompt,
@@ -1312,7 +1404,22 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             memory_context = [chunk for chunk in context_chunks if "Past conversation" in chunk]
             context_chunks = memory_context + [compressed_context]
             for source in all_sources:
-                source.evidence_text = evidence_by_source.get(source.source_id or "")
+                compressed_evidence = evidence_by_source.get(source.source_id or "")
+                deterministic_values = source.provenance.get("requested_unit_candidates", [])
+                if deterministic_values:
+                    deterministic_prefix = (
+                        "Deterministic requested-unit matches in this named-document text "
+                        f"(all remain candidates): {'; '.join(str(value) for value in deterministic_values)}."
+                    )
+                    source.evidence_text = "\n".join(
+                        part for part in (deterministic_prefix, compressed_evidence) if part
+                    )
+                elif source.source_kind == "table" and source.evidence_text:
+                    source.evidence_text = "\n".join(
+                        part for part in (source.evidence_text, compressed_evidence) if part
+                    )
+                else:
+                    source.evidence_text = compressed_evidence
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 

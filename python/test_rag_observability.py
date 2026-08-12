@@ -69,6 +69,11 @@ def test_retrieval_trace_persistence_roundtrip():
         "unused_candidates": [{"rank": 2, "chunk_id": "c2", "doc_id": "d2", "reason": "below final context cutoff"}],
         "latency": {"vector_ms": 2.0, "bm25_ms": 1.0, "fusion_ms": 0.5, "rerank_ms": 3.0, "total_ms": 8.5},
         "no_answer": {"confidence": 0.82, "no_answer": False},
+        "table_execution": {
+            "status": "executed",
+            "validated_plan": {"operation": "max", "table_ids": ["tbl-a"]},
+            "result_cell_refs": ["Sheet1!B2"],
+        },
     }
 
     storage.save_retrieval_trace(conn, trace)
@@ -81,6 +86,7 @@ def test_retrieval_trace_persistence_roundtrip():
     assert loaded["candidates"]["fused"][0]["fusion_score"] == 0.032
     assert loaded["candidates"]["reranked"][0]["rerank_score"] == 1.7
     assert loaded["final_context"][0]["source_id"] == "S1"
+    assert loaded["table_execution"]["result_cell_refs"] == ["Sheet1!B2"]
 
 
 def test_stale_embedding_detection_uses_hashes_versions_and_models():
