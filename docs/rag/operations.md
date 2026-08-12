@@ -24,7 +24,7 @@ llama.cpp commit 80c940e5a80555167c4ec37652deca6528810f91
 ```
 
 Do not add `--attention non-causal`; that changes Jina v3.5 ranking quality.
-Keep the BF16 GGUF, projector, tokenizer, model revision, and hashes pinned by
+Keep the Q8_0 GGUF, projector, tokenizer, model revision, and hashes pinned by
 `config.py`.
 
 ## Isolated benchmark startup

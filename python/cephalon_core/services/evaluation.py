@@ -24,10 +24,22 @@ NUMBER_PATTERN = re.compile(
 )
 REFUSAL_MARKERS = (
     "insufficient evidence",
+    "could not find sufficient supporting evidence",
     "not enough evidence",
     "cannot determine",
     "can't determine",
     "not provided in the sources",
+)
+REFUSAL_PREFIXES = (
+    "the retrieved documents do not contain",
+    "the provided documents do not contain",
+    "the retrieved sources do not contain",
+    "the provided sources do not contain",
+    "none of the retrieved sources reference",
+    "none of the provided sources reference",
+    "none of the indexed sources reference",
+    "i was unable to find",
+    "i've reviewed all the provided sources, and none",
 )
 
 
@@ -99,7 +111,9 @@ def answer_metrics(
     accepted_answers = [str(value).casefold() for value in item.get("accepted_answers", []) if str(value).strip()]
     accepted_match = not accepted_answers or any(value in answer_lower for value in accepted_answers)
     expected_refusal = bool(item.get("expected_refusal"))
-    refused = any(marker in answer_lower for marker in REFUSAL_MARKERS)
+    refused = any(marker in answer_lower for marker in REFUSAL_MARKERS) or answer_lower.startswith(REFUSAL_PREFIXES)
+    if expected_refusal:
+        accepted_match = refused
 
     numeric_assertions = item.get("numeric_assertions", [])
     numeric_hits = sum(1 for assertion in numeric_assertions if _numeric_assertion_matches(assertion, clean_answer))

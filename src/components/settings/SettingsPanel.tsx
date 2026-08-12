@@ -186,7 +186,7 @@ function FixedModelRow({
   };
   const rerankerBackend = runtime.backend || info.selected_backend || "unavailable";
   const rerankerDescription = rerankerBackend === "gguf_vulkan"
-    ? "Official BF16 GGUF listwise reranker via the verified llama.cpp/Vulkan path."
+    ? "Official Q8_0 GGUF listwise reranker via the verified llama.cpp/Vulkan path."
     : rerankerBackend === "transformers_cpu"
       ? "Compatibility fallback: official custom Transformers worker on CPU."
       : "Jina v3.5 listwise reranker; install the verified llama.cpp helper or retain the CPU fallback.";

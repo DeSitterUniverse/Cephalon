@@ -40,7 +40,7 @@ Cephalon intentionally uses one local retrieval stack:
 | Role | Model | Runtime |
 | --- | --- | --- |
 | Embedder | Jina Embeddings v5 Nano Retrieval `Q8_0` | dedicated llama.cpp embeddings server, normalized 768-dimensional vectors |
-| Reranker | Jina Reranker v3.5 BF16 GGUF | verified llama.cpp/Vulkan listwise worker, with the previous Transformers CPU worker as compatibility fallback |
+| Reranker | Jina Reranker v3.5 `Q8_0` GGUF | verified llama.cpp/Vulkan listwise worker, with the previous Transformers CPU worker as compatibility fallback |
 
 Dense LanceDB retrieval and SQLite FTS5 keyword retrieval stay independent, are fused with reciprocal-rank fusion, and the full fused candidate set is listwise reranked when the reranker is available. If the reranker is unavailable, Cephalon continues in clearly marked degraded mode; if the embedder is unavailable, retrieval is safely disabled.
 
@@ -139,8 +139,8 @@ The retrieval models are stored under:
 ~/cephalon-data/models/
   jina-v5-nano-retrieval-q8_0/
     v5-nano-retrieval-Q8_0.gguf
-  jina-reranker-v3.5-gguf-bf16/
-    jina-reranker-v3.5-BF16.gguf
+  jina-reranker-v3.5-gguf-q8_0/
+    jina-reranker-v3.5-Q8_0.gguf
     projector.safetensors
     tokenizer.json
     ...

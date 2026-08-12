@@ -1,4 +1,4 @@
-"""Official Jina v3.5 BF16 GGUF reranking through llama.cpp/Vulkan.
+"""Official Jina v3.5 Q8_0 GGUF reranking through llama.cpp/Vulkan.
 
 This worker implements Jina's listwise LBNL inference contract around three
 pinned artifacts: the Qwen3 GGUF trunk, a two-layer MLP projector, and the
@@ -180,7 +180,7 @@ def load_projector(path: Path) -> MlpProjector:
 
 
 class GgufReranker:
-    """Bounded listwise reranking using Jina's official BF16 GGUF artifacts."""
+    """Bounded listwise reranking using Jina's official Q8_0 GGUF artifacts."""
 
     def __init__(
         self,

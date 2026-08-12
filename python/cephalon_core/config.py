@@ -23,13 +23,14 @@ RERANKER_REPO = "jinaai/jina-reranker-v3.5-GGUF"
 RERANKER_TRANSFORMERS_REPO = "jinaai/jina-reranker-v3.5"
 RERANKER_REVISION = "884f7c67aa3ac24edb89064da8c7bfd03f4a90f5"
 RERANKER_LLAMA_CPP_REVISION = "80c940e5a80555167c4ec37652deca6528810f91"
-RERANKER_GGUF_FILE = "jina-reranker-v3.5-BF16.gguf"
+RERANKER_GGUF_FILE = "jina-reranker-v3.5-Q8_0.gguf"
+RERANKER_GGUF_PRECISION = "Q8_0"
 RERANKER_PROJECTOR_FILE = "projector.safetensors"
 RERANKER_TOKENIZER_FILE = "tokenizer.json"
-# BF16 is intentional: lower-bit GGUFs are smaller, but the fixed retrieval
-# stack may not trade ranking quality for storage without benchmark evidence.
+# Q8_0 preserves the fixed scientific retrieval metrics while reducing model
+# storage and request wall time. BF16 remains the controlled rollback artifact.
 RERANKER_FILE_SHA256 = {
-    RERANKER_GGUF_FILE: "d9b699dec7ae8e5ff058c3e9b767c5b7d467dc4dc38e4c6badfe061e82aabd60",
+    RERANKER_GGUF_FILE: "bedbedd688d18665448241f1aad78afb23a4476b89ae0867243e1c79aa4357b8",
     RERANKER_PROJECTOR_FILE: "b14c3d97315ca33490e630218c821640f183180fd971c5c3242f5b81aadcedf9",
     RERANKER_TOKENIZER_FILE: "4e95945ab0cef486709f760b81efcc7a6e75747f9165d13ead29159737455803",
 }
@@ -71,7 +72,7 @@ class Settings:
         self.data_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_DATA_DIR", "~/cephalon-data")))
         self.model_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_MODEL_DIR", os.path.join(self.data_dir, "models"))))
         self.embedder_model_dir = os.path.join(self.model_dir, "jina-v5-nano-retrieval-q8_0")
-        self.reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5-gguf-bf16")
+        self.reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5-gguf-q8_0")
         # Existing installations remain usable until the GGUF assets and a
         # feature-compatible llama-embedding binary are available.
         self.legacy_reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5")

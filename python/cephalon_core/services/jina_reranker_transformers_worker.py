@@ -1,6 +1,6 @@
 """Compatibility worker for the legacy Transformers Jina v3.5 install.
 
-The primary reranker is the official BF16 GGUF/Vulkan runtime. This isolated
+The primary reranker is the official Q8_0 GGUF/Vulkan runtime. This isolated
 worker preserves existing installations and provides an automatic rollback
 path when the GGUF assets or required llama.cpp features are unavailable.
 Custom Hugging Face code remains out of the API process by design.
