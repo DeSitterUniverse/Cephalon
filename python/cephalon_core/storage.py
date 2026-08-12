@@ -509,6 +509,13 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "016_layout_lookup_indexes")
 
+    if not migration_applied(conn, "017_evidence_ledger_trace"):
+        # The ledger is request-scoped observability, not durable corpus state.
+        # JSON keeps older traces readable and allows later control-plane
+        # fields to evolve without a migration for every status transition.
+        add_column_if_missing(conn, "retrieval_queries", "ledger_json", "TEXT NOT NULL DEFAULT '{}'")
+        mark_migration(conn, "017_evidence_ledger_trace")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -946,9 +953,9 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
             """
             INSERT INTO retrieval_queries (
                 id, raw_query, normalized_query, rewritten_query, retrieval_mode,
-                created_at, subqueries_json, no_answer_json
+                created_at, subqueries_json, no_answer_json, ledger_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 query_id,
@@ -959,6 +966,7 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
                 int(trace.get("timestamp") or time.time()),
                 json.dumps(subqueries, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(no_answer, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(trace.get("evidence_ledger") or {}, ensure_ascii=False, separators=(",", ":")),
             ),
         )
         stage_map = {
@@ -1080,6 +1088,7 @@ def get_retrieval_trace(conn: sqlite3.Connection, query_id: str) -> dict[str, An
         "created_at": row["created_at"],
         "subqueries": json.loads(row["subqueries_json"] or "[]"),
         "no_answer": json.loads(row["no_answer_json"] or "{}"),
+        "evidence_ledger": json.loads(row["ledger_json"] or "{}") if "ledger_json" in row.keys() else {},
         "latency": json.loads(latency["payload_json"] or "{}") if latency else {},
         "candidates": candidates,
         "final_context": [json.loads(item["payload_json"]) for item in context_rows],

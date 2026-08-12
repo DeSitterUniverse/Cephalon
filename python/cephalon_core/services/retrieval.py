@@ -19,6 +19,7 @@ from . import observability
 from . import jina_runtime
 from .context_assembly import assemble_hierarchical_context
 from .layout_expansion import expand_layout_evidence
+from .evidence_ledger import build_evidence_ledger
 
 RRF_K = 60
 CORE_MEMORY_DOC_ID = "core_memory"
@@ -866,6 +867,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "fused_candidates": [],
         "reranked_candidates": [],
         "final_context": [],
+        "evidence_ledger": {},
         "unused_candidates": [],
         "latency": {"preprocessing_ms": 0, "rewrite_ms": 0, "vector_ms": 0, "bm25_ms": 0, "fusion_ms": 0, "rerank_ms": 0, "context_ms": 0},
         "no_answer": {},
@@ -1013,11 +1015,13 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     else:
         compression_stats = {"input_sentences": 0, "kept_sentences": 0, "context_relevance": 0.0}
 
+    ledger = build_evidence_ledger(query_id, prompt, subqueries, all_sources)
     _mark_sources_retrieved(app_state, all_sources)
     confidence = confidence_from_sources(all_sources, settings)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     trace["retrieval_mode"] = "+".join(search_modes) if search_modes else "empty"
     trace["final_context"] = [source.model_dump() for source in all_sources]
+    trace["evidence_ledger"] = ledger
     trace["no_answer"] = confidence
     trace["latency"]["total_ms"] = elapsed_ms
     try:
@@ -1049,6 +1053,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         "metrics_path": metrics_path,
         "compression": compression_stats,
         "trace": trace,
+        "evidence_ledger": ledger,
     }
     return "\n\n".join(context_chunks) if context_chunks else "No relevant memories or documents found.", all_sources, meta
 
