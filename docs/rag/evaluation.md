@@ -42,7 +42,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-e2e.json' --skip-download
 
 # Cross-path smoke profile: 12 logical cases and 15 generated answers.
@@ -50,7 +50,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-smoke.json' `
   --skip-download --skip-ingest --profile smoke-v1 --profiles $profiles
 
@@ -59,7 +59,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-pr-core.json' `
   --skip-download --skip-ingest --profile pr-core-v1 --profiles $profiles
 
@@ -68,7 +68,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-retrieval.json' `
   --skip-download --skip-ingest --retrieval-only
 
@@ -95,7 +95,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a2-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-synthesis-focused.json' `
   --skip-download --skip-ingest --category synthesis_list
 ```
@@ -107,7 +107,7 @@ py -3.14 $runner run --manifest $manifest --cases $cases `
   --cache-dir 'C:\tmp\cephalon-scientific-corpus-frozen' `
   --data-dir 'C:\tmp\cephalon-private-rag\a8-live-data' `
   --base-url 'http://127.0.0.1:8767' `
-  --model 'gemma-4-E4B-it-UD-Q5_K_XL' `
+  --model 'ling-3.0-tiny' `
   --output 'C:\tmp\cephalon-private-rag\a8-climate.json' `
   --skip-download --skip-ingest --domain climate
 ```
@@ -135,7 +135,7 @@ latency—not answer quality—is the target. Reuse a validated immutable index 
 request-time changes. Reingest all 72 papers after parsing, chunking, summary,
 embedding, table-schema, or index-version changes.
 
-Deterministic grading is authoritative; Gemma semantic grading is
+Deterministic grading is authoritative; chat-model semantic grading is
 supplementary. Compare retrieval evidence/requirement coverage, answer and
 numerical correctness, refusal behavior, citation precision/completeness,
 latency, prompt/completion calls, peak RSS, and SQLite/Lance/assets/trace size.

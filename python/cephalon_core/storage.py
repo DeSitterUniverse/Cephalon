@@ -105,6 +105,9 @@ def mark_migration(conn: sqlite3.Connection, version: str) -> None:
 
 
 def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
+    # SQLite does not enforce declared foreign keys unless each connection opts
+    # in. The normalized table layer relies on cascades for atomic replacement.
+    conn.execute("PRAGMA foreign_keys = ON")
     executescript(conn, """
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version TEXT PRIMARY KEY,
@@ -515,6 +518,71 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         # fields to evolve without a migration for every status transition.
         add_column_if_missing(conn, "retrieval_queries", "ledger_json", "TEXT NOT NULL DEFAULT '{}'")
         mark_migration(conn, "017_evidence_ledger_trace")
+
+    if not migration_applied(conn, "018_typed_tables"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS tables (
+                id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                source_type TEXT NOT NULL CHECK(source_type IN ('pdf', 'csv', 'xlsx')),
+                sheet_name TEXT,
+                sheet_index INTEGER,
+                page_number INTEGER,
+                page_end INTEGER,
+                table_index INTEGER NOT NULL,
+                caption TEXT,
+                bounding_box TEXT,
+                row_count INTEGER NOT NULL,
+                column_count INTEGER NOT NULL,
+                parser_version TEXT NOT NULL,
+                provenance_json TEXT,
+                parse_warnings TEXT
+            );
+            CREATE TABLE IF NOT EXISTS table_columns (
+                id TEXT PRIMARY KEY,
+                table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+                column_index INTEGER NOT NULL,
+                raw_header TEXT NOT NULL,
+                normalized_header TEXT NOT NULL,
+                inferred_type TEXT NOT NULL,
+                inferred_unit TEXT,
+                header_cell_ref TEXT,
+                UNIQUE(table_id, column_index)
+            );
+            CREATE TABLE IF NOT EXISTS table_rows (
+                id TEXT PRIMARY KEY,
+                table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+                row_index INTEGER NOT NULL,
+                page_number INTEGER,
+                sheet_name TEXT,
+                row_label TEXT,
+                UNIQUE(table_id, row_index)
+            );
+            CREATE TABLE IF NOT EXISTS table_cells (
+                id TEXT PRIMARY KEY,
+                table_id TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
+                row_index INTEGER NOT NULL,
+                column_index INTEGER NOT NULL,
+                cell_ref TEXT NOT NULL,
+                raw_value TEXT NOT NULL,
+                normalized_value TEXT,
+                value_type TEXT NOT NULL,
+                unit TEXT,
+                page_number INTEGER,
+                sheet_name TEXT,
+                bounding_box TEXT,
+                formula TEXT,
+                effective_value TEXT,
+                parse_warnings TEXT,
+                UNIQUE(table_id, row_index, column_index),
+                UNIQUE(table_id, cell_ref)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tables_doc ON tables(doc_id, table_index);
+            CREATE INDEX IF NOT EXISTS idx_table_columns_name ON table_columns(table_id, normalized_header);
+            CREATE INDEX IF NOT EXISTS idx_table_cells_lookup ON table_cells(table_id, column_index, row_index);
+            CREATE INDEX IF NOT EXISTS idx_table_cells_normalized ON table_cells(table_id, normalized_value);
+        """)
+        mark_migration(conn, "018_typed_tables")
 
     execute(
         conn,

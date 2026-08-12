@@ -14,6 +14,7 @@ reference systems or their model dependencies.
 | One-round gap retrieval | S2G-RAG | Thorough mode turns unresolved deterministic requirements into one bounded targeted retrieval pass and reassesses the ledger. | No planner/judge LLM call, recursive loop, or more than one reformulated query. |
 | Claim verification and repair | OpenScholar, RAGChecker | Deterministic entailment, contradiction, unit/arithmetic checks, supplementary semantic audit, and one conditional repair. | Existing generation model is reused; hard deterministic failures cannot be overruled and repair never loops. |
 | Named-document sufficiency | S2G-RAG, SciRAG, OpenScholar | Quoted study targets bind to document identity and require qualifying substantive evidence before ledger coverage or gap completion. | No cross-document graph or planner model; one matching source per named study and one bounded gap query. |
+| Typed table ingestion | T-RAG, T2-RAGBench | PDF, CSV, and XLSX tables receive stable normalized table/column/row/cell records while their text remains in hybrid retrieval. | Deterministic conservative typing only; no learned parser, generated SQL, formula recalculation, or replacement of text RAG. |
 
 Implementation thresholds are named and documented in
 `services/context_assembly.py`. Benchmark comparisons and large scientific

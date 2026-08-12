@@ -2,7 +2,7 @@
 
 Cephalon uses external llama.cpp chat and embedding servers. The Jina v3.5
 reranker is a managed Vulkan GGUF worker launched by the backend from the pinned
-feature-compatible llama.cpp build. Retrieval tests do not load Gemma; complete
+feature-compatible llama.cpp build. Retrieval tests do not load Ling; complete
 answer tests require the chat server.
 
 ## Fixed local services
@@ -11,12 +11,17 @@ The scientific benchmark uses:
 
 | Service | Port | Required role |
 |---|---:|---|
-| Gemma E4B llama.cpp | 8080 | Draft, semantic audit, repair, final generation |
+| Ling 3.0 tiny Q6_K llama.cpp | 8080 | Draft, semantic audit, repair, final generation |
 | Jina v5 Nano embedder | 8090 | Query and document embeddings |
 | Isolated Cephalon backend | 8767 | Public ingestion/query/evaluation API |
 
 Use `py -3.14` and set the isolated backend's data directory explicitly. The
-default reranker path expects:
+Ling chat runtime uses llama.cpp PR 26608 at commit
+`d8d862521e9ad842f2b47f3b392b039317782aa0`; this is temporary until its
+BailingMoE3 support is merged. The Q6_K artifact is stored at
+`C:\Users\Fluttershy\cephalon-data\models\ling-3.0-tiny-q6_k`.
+
+The default reranker path expects:
 
 ```text
 C:\tmp\llama.cpp-jina-v35\build\bin\Release\llama-embedding.exe
@@ -36,13 +41,16 @@ change in the paired benchmark report:
 ```powershell
 $repo = 'C:\Projects\Active\Cephalon'
 $privateLogs = 'C:\tmp\cephalon-private-rag\a8-live-logs'
-$llamaServer = 'C:\AI\llama.cpp\build\bin\Release\llama-server.exe'
+$llamaServer = 'C:\tmp\llama.cpp-ling-pr26608\build-vs18\bin\Release\llama-server.exe'
 $python314 = 'C:\Users\Fluttershy\AppData\Local\Python\pythoncore-3.14-64\python.exe'
 
 Start-Process -FilePath $llamaServer -WindowStyle Hidden -ArgumentList @(
-  '-m', 'C:\AI\models\unsloth-gemma-4-E4B-it-GGUF\gemma-4-E4B-it-UD-Q5_K_XL.gguf',
+  '-m', 'C:\Users\Fluttershy\cephalon-data\models\ling-3.0-tiny-q6_k\Ling-3.0-tiny-Q6_K.gguf',
   '--device', 'Vulkan0', '--gpu-layers', '999', '--ctx-size', '8192',
-  '--host', '127.0.0.1', '--port', '8080', '--seed', '20260730', '--no-webui'
+  '--parallel', '1', '--split-mode', 'none', '--no-flash-attn',
+  '--seed', '20260812', '--temp', '1.0', '--top-k', '20', '--top-p', '0.95',
+  '--min-p', '0.05', '--reasoning-format', 'deepseek', '--reasoning-budget', '2048',
+  '--host', '127.0.0.1', '--port', '8080', '--no-webui'
 ) -RedirectStandardOutput "$privateLogs\chat.stdout.log" `
   -RedirectStandardError "$privateLogs\chat.stderr.log"
 
@@ -95,11 +103,17 @@ All controls are booleans, default `true`, have no unit, and accept only
 | `coverage_selection` | `CEPHALON_COVERAGE_SELECTION` | Pre-A6 selection and compression | No |
 | `gap_retrieval` | `CEPHALON_GAP_RETRIEVAL` | Thorough stays single retrieval pass | No |
 | `verified_answer_repair` | `CEPHALON_VERIFIED_ANSWER_REPAIR` | Thorough always uses its legacy repair completion | No |
+| n/a | `CEPHALON_TYPED_TABLES` | Typed table rows are not written or routed; table text remains retrievable | Yes when re-enabled |
 
 A2 parent-summary v2 is the only Stack A change that requires reindexing. Its
 rollback requires checking out the earlier ingestion code and reindexing again.
 Migration 016 indexes may be dropped for rollback with a performance cost;
 migrations 015/017 only extend evaluation/trace JSON storage.
+
+Migration 018 adds the typed table schema without rewriting documents at
+startup. Explicitly reindex the library to populate it. Disabling
+`CEPHALON_TYPED_TABLES` is the runtime rollback and leaves dense/FTS table text
+available; re-enable and reindex to refresh structured rows.
 
 ## Shutdown verification
 

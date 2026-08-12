@@ -14,6 +14,7 @@ from . import document_assets
 from . import observability
 from .retrieval import ensure_vector_table, get_embedding, get_embeddings, vector_table_name
 from .pdf_parser import DocumentBlock
+from . import table_ingestion
 
 PARENT_TARGET_TOKENS = 520
 PARENT_MAX_TOKENS = 650
@@ -144,6 +145,9 @@ async def process_single_file(
         extraction_mode = extracted.extraction_mode
         parser_version = extracted.parser_version
         parse_warnings = extracted.warnings
+        typed_table_rows = table_ingestion.persistence_rows(doc_id, extracted.tables) if getattr(app_state.settings, "typed_tables", True) else {
+            "tables": [], "columns": [], "rows": [], "cells": []
+        }
         metadata = storage.active_embedding_metadata(app_state)
         chunking_config = _chunking_config(rag_settings)
         chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, chunking_config)
@@ -292,6 +296,7 @@ async def process_single_file(
                 parser_version=parser_version,
                 parse_warnings=parse_warnings,
                 asset_rows=asset_transaction.rows if asset_transaction else [],
+                typed_table_rows=typed_table_rows,
                 before_commit=asset_transaction.promote if asset_transaction else None,
             )
         except Exception:
@@ -349,6 +354,7 @@ def _replace_document_rows(
     parser_version: str,
     parse_warnings: list[str],
     asset_rows: list[tuple],
+    typed_table_rows: dict[str, list[tuple]],
     before_commit: Callable[[], None] | None = None,
 ) -> None:
     with storage.SQLITE_LOCK:
@@ -360,6 +366,7 @@ def _replace_document_rows(
             cursor.execute("DELETE FROM summary_nodes WHERE doc_id = ?", (doc_id,))
             cursor.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
             cursor.execute("DELETE FROM document_assets WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM tables WHERE doc_id = ?", (doc_id,))
             cursor.executemany(
                 """
                 INSERT INTO parent_chunks (id, doc_id, parent_index, text, summary, token_count, created_at)
@@ -402,6 +409,42 @@ def _replace_document_rows(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 asset_rows,
+            )
+            cursor.executemany(
+                """
+                INSERT INTO tables (
+                    id, doc_id, source_type, sheet_name, sheet_index, page_number,
+                    page_end, table_index, caption, bounding_box, row_count,
+                    column_count, parser_version, provenance_json, parse_warnings
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                typed_table_rows["tables"],
+            )
+            cursor.executemany(
+                """
+                INSERT INTO table_columns (
+                    id, table_id, column_index, raw_header, normalized_header,
+                    inferred_type, inferred_unit, header_cell_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                typed_table_rows["columns"],
+            )
+            cursor.executemany(
+                """
+                INSERT INTO table_rows (id, table_id, row_index, page_number, sheet_name, row_label)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                typed_table_rows["rows"],
+            )
+            cursor.executemany(
+                """
+                INSERT INTO table_cells (
+                    id, table_id, row_index, column_index, cell_ref, raw_value,
+                    normalized_value, value_type, unit, page_number, sheet_name,
+                    bounding_box, formula, effective_value, parse_warnings
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                typed_table_rows["cells"],
             )
             cursor.execute(
                 """
@@ -527,7 +570,12 @@ def _chunking_config(settings: RagSettings) -> dict[str, int | str]:
 
 
 def parser_version_for_path(path: str) -> str:
-    return documents.PDF_PARSER_VERSION if os.path.splitext(path)[1].lower() == ".pdf" else PARSER_VERSION
+    extension = os.path.splitext(path)[1].lower()
+    if extension == ".pdf":
+        return documents.PDF_PARSER_VERSION
+    if extension in {".csv", ".xlsx"}:
+        return documents.TABLE_PARSER_VERSION
+    return PARSER_VERSION
 
 
 def refresh_document_staleness(app_state, rag_settings: RagSettings | None = None) -> dict:
@@ -1128,6 +1176,7 @@ def delete_document_rows(app_state, doc_id: str) -> None:
         cursor.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM summary_nodes WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
+        cursor.execute("DELETE FROM tables WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM document_tags WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         app_state.sqlite.commit()
