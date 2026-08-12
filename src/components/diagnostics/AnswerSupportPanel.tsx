@@ -54,6 +54,16 @@ export function AnswerSupportPanel({ support }: Props) {
                   </div>
                   <p>{claim.text}</p>
                   <small>{claim.reason}</small>
+                  {claim.numeric_verification && claim.numeric_verification.status !== "not_applicable" && (
+                    <div className="source-metrics">
+                      <span>numeric {claim.numeric_verification.status}</span>
+                      {claim.numeric_verification.checks.map((check, index) => (
+                        <span key={`${claim.claim_id}:numeric:${index}`}>
+                          {String(check.method || "check")} · {String(check.status || "unknown")}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -92,6 +102,13 @@ export function AnswerSupportPanel({ support }: Props) {
               <span>{citation.status}</span>
             </div>
             <p>{citation.reason}</p>
+            <div className="source-metrics">
+              {citation.source_kind && <span>{citation.source_kind}</span>}
+              {citation.table_operation && <span>operation {citation.table_operation}</span>}
+              {citation.sheet_name && <span>sheet {citation.sheet_name}</span>}
+              {citation.page_number != null && <span>page {citation.page_number}</span>}
+              {(citation.cell_refs?.length || 0) > 0 && <span>cells {citation.cell_refs!.join(", ")}</span>}
+            </div>
             {citation.claims?.map((claim, index) => (
               <div className="citation-claim" key={`${citation.chunk_id}:claim:${index}`}>
                 <span>Cited claim</span>

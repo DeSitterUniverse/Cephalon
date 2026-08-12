@@ -133,6 +133,24 @@ def answer_metrics(
     }
     expected_doc_ids = {str(value) for value in item.get("expected_doc_ids", []) if str(value)}
     expected_sources = sum(1 for doc_id in expected_doc_ids if doc_id in source_doc_ids)
+    source_by_id = {
+        str(source.get("source_id", "")).upper(): source
+        for source in sources
+        if str(source.get("source_id", "")).strip()
+    }
+    cited_cell_refs = {
+        str(cell_ref)
+        for source_id in valid_citations
+        for cell_ref in source_by_id[source_id].get("cell_refs", [])
+        if str(cell_ref)
+    }
+    gold_cell_refs = {
+        str(cell_ref)
+        for evidence in item.get("gold_evidence", [])
+        if evidence.get("source_kind") in {"table", "cell"}
+        for cell_ref in evidence.get("cell_refs", [])
+        if str(cell_ref)
+    }
 
     # Metrics with no applicable denominator are omitted instead of emitted as
     # zero. Otherwise, for example, 104 non-numeric cases would dilute the 16
@@ -152,6 +170,10 @@ def answer_metrics(
         metrics["invalid_citation_rate"] = _ratio(len(invalid_citations), len(cited_source_ids))
     if expected_doc_ids:
         metrics["citation_source_recall"] = _ratio(expected_sources, len(expected_doc_ids))
+    if gold_cell_refs:
+        cell_hits = cited_cell_refs.intersection(gold_cell_refs)
+        metrics["cell_citation_precision"] = _ratio(len(cell_hits), len(cited_cell_refs))
+        metrics["cell_citation_recall"] = _ratio(len(cell_hits), len(gold_cell_refs))
     return metrics
 
 

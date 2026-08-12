@@ -1095,6 +1095,11 @@ select, option { background: #050505; color: var(--text); }
 .source-head span { color: var(--text); font-family: Consolas, ui-monospace, monospace; }
 .source-metrics { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0; color: var(--muted); font-size: 0.68rem; font-family: Consolas, ui-monospace, monospace; }
 .source-metrics span { border: 1px solid var(--line); padding: 1px 5px; background: #030303; }
+.source-kind-badge { border: 1px solid var(--line-strong); padding: 1px 5px; font: 0.66rem Consolas, ui-monospace, monospace; text-transform: uppercase; }
+.source-kind-table { color: #e8bd67; }
+.source-kind-cell { color: #73d9c3; }
+.source-kind-text, .source-kind-child, .source-kind-summary { color: var(--muted); }
+.table-citation-details p { overflow-wrap: anywhere; }
 .source-document-link {
   margin-top: 8px;
   min-height: 30px;
