@@ -45,7 +45,12 @@ for the complete schema, limits, and rollback contract.
 At request time, recognizable table questions may produce a validated
 `TablePlan`. The executor reads only bound table IDs and numeric column indexes
 through application-owned statements. Safe results join—not replace—the hybrid
-context, then participate in compression and the evidence ledger. Any planning,
+context, then participate in compression and the evidence ledger. B3 promotes
+result provenance to the public source contract: table identity/location,
+exact result cells, verification-only cells, header cells, cell values and
+boxes, the validated operation, and its result payload survive streaming,
+storage, reload, support diagnostics, and UI rendering. Arithmetic claims are
+recomputed from these cells at the final verification boundary. Any planning,
 schema, unit, ambiguity, bound, or timeout failure returns to text retrieval.
 The router makes no model call and a Thorough gap round can only re-enter the
 same bounded route; it cannot bypass validation or recurse.
@@ -155,6 +160,13 @@ Backward-compatible support aliases remain in stored/API payloads. Deterministic
 checks compare negation and values/units and recompute differences, totals,
 means, and relative percentages with 1% relative or 1e-6 absolute tolerance.
 No generated code, SQL, or expression is executed.
+
+For cell-backed claims, the same verifier also emits the explicit numerical
+states `entailed`, `contradicted`, `unit_mismatch`, `missing_cell`, and
+`ambiguous_operation`. It reconstructs lookup, filtering, sorting, grouping,
+sum/mean/min/max/count, comparison, difference, and percentage results from the
+bounded cited cell snapshots. Verification-only cells support recomputation but
+do not inflate cell-citation precision.
 
 The answer boundary discards the external server's `reasoning_content` and
 filters explicit `<think>` blocks, including tags split across stream chunks.

@@ -167,6 +167,23 @@ class SourceAsset(BaseModel):
     url: str
 
 
+class TableCellCitation(BaseModel):
+    """Exact, display-safe cell evidence attached to a normal source tag."""
+
+    cell_ref: str
+    row_index: int
+    column_index: int
+    raw_value: str
+    normalized_value: str | None = None
+    value_type: str | None = None
+    unit: str | None = None
+    header_ref: str | None = None
+    header: str | None = None
+    sheet_name: str | None = None
+    page_number: int | None = None
+    bounding_box: tuple[float, float, float, float] | None = None
+
+
 class SourceChunk(BaseModel):
     rank: int
     source_id: str | None = None
@@ -193,6 +210,16 @@ class SourceChunk(BaseModel):
     page_end: int | None = None
     block_index: int | None = None
     bounding_box: tuple[float, float, float, float] | None = None
+    table_id: str | None = None
+    table_title: str | None = None
+    sheet_name: str | None = None
+    table_bounding_box: tuple[float, float, float, float] | None = None
+    cell_refs: list[str] = Field(default_factory=list)
+    verification_cell_refs: list[str] = Field(default_factory=list)
+    header_refs: list[str] = Field(default_factory=list)
+    cells: list[TableCellCitation] = Field(default_factory=list)
+    table_operation: str | None = None
+    table_result: list[dict[str, Any]] = Field(default_factory=list)
     element_ids: list[str] = Field(default_factory=list)
     provenance: dict = Field(default_factory=dict)
     context_assembly: dict = Field(default_factory=dict)

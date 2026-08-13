@@ -3,6 +3,8 @@ import sqlite3
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from cephalon_core import storage
 from cephalon_core.config import Settings
 from cephalon_core.schemas import RagSettings, SourceChunk
@@ -333,6 +335,31 @@ def test_answer_support_exposes_claim_evidence_and_malformed_tags():
     assert result["citations"][0]["evidence"] == source.evidence_text
     unattached = support.classify_answer_support("[[src:S1]]", [source])
     assert unattached["accounting"]["unused_citation_source_ids"] == ["S1"]
+
+
+def test_evaluator_scores_only_cells_attached_to_cited_sources():
+    item = {
+        "id": "cell-case",
+        "question": "What is the value?",
+        "gold_evidence": [{
+            "id": "E1",
+            "source_kind": "cell",
+            "table_id": "tbl-a",
+            "cell_refs": ["Results!C4", "Results!C5"],
+        }],
+    }
+    sources = [
+        {"source_id": "S1", "cell_refs": ["Results!C4", "Results!C5"]},
+        {"source_id": "S2", "cell_refs": ["Results!C9"]},
+    ]
+
+    exact = evaluation.answer_metrics(item=item, answer="20 kg [[src:S1]]", sources=sources)
+    partial = evaluation.answer_metrics(item=item, answer="20 kg [[src:S1]] [[src:S2]]", sources=sources)
+
+    assert exact["cell_citation_precision"] == 1.0
+    assert exact["cell_citation_recall"] == 1.0
+    assert partial["cell_citation_precision"] == pytest.approx(2 / 3, abs=1e-6)
+    assert partial["cell_citation_recall"] == 1.0
 
 
 def test_schema_initialization_is_idempotent_and_observability_tables_exist():

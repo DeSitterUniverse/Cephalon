@@ -161,3 +161,56 @@ accepted-answer matching fell to zero because ambiguity-preserving candidate
 lists intentionally do not copy the frozen prose answer, so numeric grading,
 valid citation accounting, and the explicit safety behavior are the relevant
 B2 gates.
+
+## B3 cell-citation gates
+
+B3 adds `cell_citation_precision` and `cell_citation_recall` only when a case
+declares table/cell gold evidence. The evaluator counts cells only from source
+IDs actually cited in the answer; uncited retrieved cells receive no credit,
+and inapplicable text cases omit both metrics instead of diluting them with
+zeros. The checked-in synthetic gate declares gold cells independently for all
+11 cell-bearing operations and requires 100% precision and recall. Count is
+separately required to retain table-level provenance and the exact
+verification-only row cells. All 12 supported operations are covered by exact
+arithmetic/provenance tests.
+
+The frozen B2/B3 `tables-v1` pair reuses the same immutable typed index, Ling
+3.0 Tiny Q6_K server, and Jina v3.5 Q8_0 worker. Its report belongs under the
+private benchmark workspace; no generated cases, answers, or reports enter
+Git. On 2026-08-12, B2 and B3 both scored 94.44% numeric accuracy, 100%
+citation precision, and 100% retrieval recall with no request failures. Mean
+answer latency changed from 5.95 s to 5.51 s and wall time from 107.67 s to
+99.89 s. The shared mutable benchmark database grew by 22,607,294 bytes during
+the second run because it appended evaluation, trace, and metrics records; that
+number is reported for transparency but is not an isolated B3 schema delta. A
+representative three-cell mean-result source JSON grows from 1,427 to 2,494
+bytes to carry the exact cell/header contract.
+
+## 2026-08-12 full Stack B release result
+
+The final unprofiled release schedule completed all 120 retrieval cases (one
+cold plus four warm passes) and all 136 generated-answer variants with zero
+request failures. Retrieval scored 93.06% recall@10, 0.925 MRR, and 0.9252
+nDCG in 557.21 s. The answer run scored 81.62% accepted-answer match, 94.44%
+numeric accuracy, 100% valid-citation precision, 94.85% correct-refusal, 2.21%
+over-refusal, and 95.28% requirement coverage. Mean/p50/p95 answer latency was
+31.61/18.42/84.09 s; total wall time including three latency measurements for
+each of 12 sentinels was 4,675.23 s.
+
+Ling 3.0 Tiny Q6_K remains the principal answer-quality limitation. Retrieval
+found the named synthesis documents (the ledger averaged 2.75 sufficient named
+requirements out of 3), while strict synthesis component coverage was 19.44%
+and complete component pass rate was 2.78%. Unanswerable correct-refusal was
+55.56%, and neuroscience had 20% over-refusal. These are reported as
+generation/composition limitations rather than cell-citation regressions. The
+validator produced valid constrained JSON in all 53 Thorough cases with no
+fallback, but every one required its single allowed repair; final answers had
+no `<think>` or `reasoning_content` leakage. The run used 224 total completion
+calls: 18 zero-call table answers, 65 one-call answers, and 53 three-call
+Thorough answers.
+
+The shared benchmark database measured 472,057,605 bytes after the full run
+(238,166,016 SQLite and 69,163,501 LanceDB; the total also includes other data
+directory files). Because evaluation/trace rows accumulate in this reused
+database, this is an end-state operational measurement rather than an isolated
+B3 storage delta.

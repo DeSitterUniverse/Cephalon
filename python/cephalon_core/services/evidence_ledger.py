@@ -157,8 +157,10 @@ def build_evidence_ledger(
             "span": text[:MAX_EVIDENCE_CHARS],
             "page_number": source.page_number,
             "parent_id": source.parent_id,
-            "table_id": source.provenance.get("table_id"),
-            "cell_refs": list(source.provenance.get("cell_refs") or []),
+            "table_id": source.table_id or source.provenance.get("table_id"),
+            "cell_refs": list(source.cell_refs or source.provenance.get("cell_refs") or []),
+            "header_refs": list(source.header_refs),
+            "table_operation": source.table_operation,
             "operation": source.provenance.get("operation"),
             "status": "supporting" if assigned_ids else "unassigned",
         })

@@ -53,6 +53,20 @@ export type RagSettings = {
   no_answer_min_vector_score: number;
   no_answer_min_source_count: number;
 };
+export type TableCellCitation = {
+  cell_ref: string;
+  row_index: number;
+  column_index: number;
+  raw_value: string;
+  normalized_value?: string | null;
+  value_type?: string | null;
+  unit?: string | null;
+  header_ref?: string | null;
+  header?: string | null;
+  sheet_name?: string | null;
+  page_number?: number | null;
+  bounding_box?: [number, number, number, number] | null;
+};
 export type SourceChunk = {
   rank: number;
   source_id?: string | null;
@@ -79,6 +93,16 @@ export type SourceChunk = {
   page_end?: number | null;
   block_index?: number | null;
   bounding_box?: [number, number, number, number] | null;
+  table_id?: string | null;
+  table_title?: string | null;
+  sheet_name?: string | null;
+  table_bounding_box?: [number, number, number, number] | null;
+  cell_refs?: string[];
+  verification_cell_refs?: string[];
+  header_refs?: string[];
+  cells?: TableCellCitation[];
+  table_operation?: string | null;
+  table_result?: Array<Record<string, unknown>>;
   element_ids?: string[];
   provenance?: Record<string, unknown>;
   context_assembly?: {
@@ -140,6 +164,13 @@ export type CitationSupport = {
   source_id?: string | null;
   doc_id?: string;
   doc_name?: string;
+  source_kind?: string;
+  table_id?: string | null;
+  cell_refs?: string[];
+  header_refs?: string[];
+  sheet_name?: string | null;
+  page_number?: number | null;
+  table_operation?: string | null;
   status: "supported" | "weak" | "unsupported";
   reason: string;
   score?: number | null;
@@ -189,7 +220,7 @@ export type AnswerSupport = {
       coverage_by_source: Record<string, number>;
       negation_conflict?: boolean;
       numeric_verification?: {
-        status: "not_applicable" | "entailed" | "unsupported" | "contradicted";
+        status: "not_applicable" | "entailed" | "unsupported" | "contradicted" | "unit_mismatch" | "missing_cell" | "ambiguous_operation";
         reason?: string;
         checks: Array<Record<string, unknown>>;
       };

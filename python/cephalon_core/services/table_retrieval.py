@@ -391,7 +391,18 @@ def _execute_cells(
     if plan.operation == "filter":
         return [_row_result(table_id, row, deadline) for row in data_rows[:plan.limit]]
     if plan.operation == "count":
-        return [{"table_id": table_id, "value": str(len(data_rows)), "unit": None, "cell_refs": []}]
+        verification_refs = []
+        for row in data_rows:
+            _check_deadline(deadline)
+            if row:
+                verification_refs.append(row[min(row)]["cell_ref"])
+        return [{
+            "table_id": table_id,
+            "value": str(len(data_rows)),
+            "unit": None,
+            "cell_refs": [],
+            "verification_cell_refs": verification_refs,
+        }]
     if plan.operation in {"compare", "difference", "percentage"}:
         return _binary_result(plan, cells, deadline)
     values = _numeric_values(data_rows, plan.value_column, plan.target_unit, deadline)
@@ -519,12 +530,19 @@ def _aggregate_result(plan: TablePlan, table_id: str, values, deadline: float) -
     for cell in cells:
         _check_deadline(deadline)
         refs.append(cell["cell_ref"])
-    return [{
+    result = {
         "table_id": table_id,
         "value": _decimal_text(value),
         "unit": cells[0]["unit"],
         "cell_refs": refs,
-    }]
+    }
+    if plan.operation in {"min", "max"}:
+        verification_refs = []
+        for item in values:
+            _check_deadline(deadline)
+            verification_refs.append(item[2]["cell_ref"])
+        result["verification_cell_refs"] = verification_refs
+    return [result]
 
 
 def _binary_result(plan: TablePlan, cells: list[dict[str, Any]], deadline: float) -> list[dict[str, Any]]:
@@ -666,19 +684,35 @@ def _sources_for_execution(conn, execution: TableExecution, plan: TablePlan) -> 
             (table_id,),
         ).fetchone()
         refs = sorted({ref for row in rows for ref in row.get("cell_refs", [])})
+        verification_refs = sorted({
+            ref for row in rows for ref in row.get("verification_cell_refs", [])
+        })
+        cited_cells = _cell_citation_payloads(conn, table_id, sorted(set(refs) | set(verification_refs)))
+        header_refs = sorted({
+            cell["header_ref"] for cell in cited_cells if cell.get("header_ref")
+        })
         evidence = "\n".join(
             line for line in execution.text.splitlines()
             if line.startswith("Deterministic") or (table["display_name"] or table["path"]) in line
         )
-        digest = hashlib.sha256((table_id + "|" + "|".join(refs)).encode()).hexdigest()[:16]
-        first = rows[0]
+        result_payload = [
+            {key: value for key, value in row.items() if key not in {"bounding_box"}}
+            for row in rows
+        ]
+        digest_input = json.dumps(
+            {"table_id": table_id, "operation": plan.operation, "rows": result_payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(digest_input.encode()).hexdigest()[:16]
         sources.append(SourceChunk(
             rank=rank,
             source_id=f"S{rank}",
             doc_id=table["doc_id"],
             doc_name=table["display_name"] or str(table["path"]).rsplit("\\", 1)[-1],
             chunk_id=f"table-result-{digest}",
-            source_kind="table",
+            source_kind="cell" if refs else "table",
             score=1.0,
             final_score=1.0,
             snippet=evidence[:1000],
@@ -687,6 +721,16 @@ def _sources_for_execution(conn, execution: TableExecution, plan: TablePlan) -> 
             page_number=table["page_number"],
             page_end=table["page_end"],
             bounding_box=json.loads(table["bounding_box"]) if table["bounding_box"] else None,
+            table_id=table_id,
+            table_title=table["caption"],
+            sheet_name=table["sheet_name"],
+            table_bounding_box=json.loads(table["bounding_box"]) if table["bounding_box"] else None,
+            cell_refs=refs,
+            verification_cell_refs=verification_refs,
+            header_refs=header_refs,
+            cells=cited_cells,
+            table_operation=plan.operation,
+            table_result=result_payload,
             provenance={
                 "table_id": table_id,
                 "cell_refs": refs,
@@ -696,6 +740,45 @@ def _sources_for_execution(conn, execution: TableExecution, plan: TablePlan) -> 
             context_selection={"decision": "deterministic table execution", "objective": 1.0},
         ))
     return sources
+
+
+def _cell_citation_payloads(conn, table_id: str, cell_refs: list[str]) -> list[dict[str, Any]]:
+    if not cell_refs:
+        return []
+    placeholders = ",".join("?" for _ in cell_refs)
+    rows = conn.execute(
+        f"""
+        SELECT cells.*, columns.raw_header, columns.normalized_header,
+               headers.cell_ref AS header_ref
+        FROM table_cells AS cells
+        LEFT JOIN table_columns AS columns
+          ON columns.table_id = cells.table_id AND columns.column_index = cells.column_index
+        LEFT JOIN table_cells AS headers
+          ON headers.table_id = cells.table_id
+         AND headers.row_index = 0
+         AND headers.column_index = cells.column_index
+        WHERE cells.table_id = ? AND cells.cell_ref IN ({placeholders})
+        ORDER BY cells.row_index, cells.column_index
+        """,
+        (table_id, *cell_refs),
+    ).fetchall()
+    return [
+        {
+            "cell_ref": row["cell_ref"],
+            "row_index": row["row_index"],
+            "column_index": row["column_index"],
+            "raw_value": row["raw_value"],
+            "normalized_value": row["normalized_value"],
+            "value_type": row["value_type"],
+            "unit": row["unit"],
+            "header_ref": row["header_ref"],
+            "header": row["raw_header"] or row["normalized_header"],
+            "sheet_name": row["sheet_name"],
+            "page_number": row["page_number"],
+            "bounding_box": json.loads(row["bounding_box"]) if row["bounding_box"] else None,
+        }
+        for row in rows
+    ]
 
 
 def _decimal_text(value: Decimal) -> str:

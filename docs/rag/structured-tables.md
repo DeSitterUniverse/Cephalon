@@ -97,10 +97,23 @@ progress handler is always removed afterward.
 
 Lookup evidence is additive: structured candidates cannot suppress nearby
 prose when several values share a unit. Selected table results are emitted as
-`SourceChunk`-compatible sources with `source_kind=table`; B2 stores table ID,
-cell references, operation, and validated plan under `provenance`. The normal
-`[[src:S1]]` marker remains unchanged. Migration `019_table_execution_trace`
-persists the route decision and bounds in `retrieval_queries`.
+`SourceChunk`-compatible sources. Results with exact cells use
+`source_kind=cell`; a count with no single result cell remains
+`source_kind=table`. B3 exposes `table_id`, title, sheet/page, table bounds,
+`cell_refs`, `verification_cell_refs`, `header_refs`, bounded cell snapshots,
+`table_operation`, and `table_result` as optional top-level fields while also
+retaining the B2 provenance keys. The normal `[[src:S1]]` marker remains
+unchanged. Old saved sources omit these optional fields safely. Migration
+`019_table_execution_trace` persists the route decision and bounds in
+`retrieval_queries`.
+
+`cell_refs` are the answer-bearing citation target. `verification_cell_refs`
+may include additional operands needed to independently recompute min/max or
+count and are deliberately excluded from citation scoring. Each cited cell
+snapshot carries its stable reference, row/column, raw and normalized value,
+unit, header reference/text, page/sheet, and bounding box. The claim verifier
+uses only this bounded contract; it never reopens a workbook, executes a
+formula, or trusts generated arithmetic.
 
 ```json
 {

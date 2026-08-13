@@ -14,8 +14,27 @@ const source: SourceChunk = {
   score: 0.91,
   snippet: "The full retrieved parent contains additional context.",
   evidence_text: "RATE improved retrieval recall to 81.7 percent.",
+  source_kind: "cell",
   page_number: 3,
   block_type: "caption",
+  table_id: "tbl-123",
+  table_title: "Retrieval results",
+  sheet_name: "Results",
+  table_operation: "lookup",
+  cell_refs: ["Results!C4"],
+  header_refs: ["Results!C1"],
+  cells: [{
+    cell_ref: "Results!C4",
+    row_index: 3,
+    column_index: 2,
+    raw_value: "81.7 percent",
+    normalized_value: "81.7",
+    value_type: "percentage",
+    unit: "%",
+    header_ref: "Results!C1",
+    header: "Recall",
+    sheet_name: "Results",
+  }],
   assets: [{
     asset_id: "p3-img-a",
     page_number: 3,
@@ -57,6 +76,10 @@ const answerSupport: AnswerSupport = {
       reason: "The evidence supports the claim.",
       coverage: 1,
       coverage_by_source: { S1: 1 },
+      numeric_verification: {
+        status: "entailed",
+        checks: [{ method: "cell_lookup", status: "entailed" }],
+      },
     }],
   },
   citations: [{
@@ -77,6 +100,9 @@ describe("evidence panels", () => {
 
     expect(screen.getByText("Evidence sent to model")).toBeInTheDocument();
     expect(screen.getByText("Retrieved chunk")).toBeInTheDocument();
+    expect(screen.getByText("cell")).toBeInTheDocument();
+    expect(screen.getAllByText("Results!C4")).toHaveLength(2);
+    expect(screen.getByText(/Recall = 81.7 percent/)).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Figure 1: Retrieval pipeline" })).toHaveAttribute(
       "src",
       "http://127.0.0.1:8765/documents/doc-1/assets/p3-img-a",
@@ -90,6 +116,8 @@ describe("evidence panels", () => {
     expect(screen.getByText("Unused evidence: S2")).toBeInTheDocument();
     expect(screen.getByText("C1")).toBeInTheDocument();
     expect(screen.getByText("Cited claim")).toBeInTheDocument();
+    expect(screen.getByText("numeric entailed")).toBeInTheDocument();
+    expect(screen.getByText("cell_lookup · entailed")).toBeInTheDocument();
     expect(screen.getAllByText("RATE improved retrieval recall to 81.7 percent.")).toHaveLength(4);
   });
 });

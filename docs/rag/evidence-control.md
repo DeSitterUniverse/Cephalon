@@ -70,7 +70,12 @@ the original chunk; this prevents a text fallback from masquerading as exact
 cell evidence. Planning ambiguity, invalid units, bounds, and timeouts return
 to hybrid retrieval and never mark an unresolved requirement sufficient.
 
-The `[[src:S1]]` marker and ledger evidence IDs are unchanged. Migration 019
-persists the complete `table_execution` trace so reload and diagnostics retain
+The `[[src:S1]]` marker and ledger evidence IDs are unchanged. B3 ledger and
+support records copy the optional table location, exact cells, headers, and
+operation into their existing JSON payloads. Cell-backed numeric claims are
+recomputed from the cited snapshots and report `entailed`, `contradicted`,
+`unit_mismatch`, `missing_cell`, or `ambiguous_operation`; deterministic cell
+failures cannot be upgraded by semantic review. Migration 019 persists the
+complete `table_execution` trace so reload and diagnostics retain
 the plan, bounds, fallback reason, candidate sources, and zero-model-call
 decision.

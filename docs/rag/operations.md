@@ -69,7 +69,7 @@ $env:CEPHALON_METRICS_DIR = 'C:\tmp\cephalon-private-rag\a8-metrics'
 $env:CEPHALON_HOST = '127.0.0.1'
 $env:CEPHALON_PORT = '8767'
 $env:CEPHALON_LLAMA_SERVER_URL = 'http://127.0.0.1:8080'
-$env:CEPHALON_EMBEDDING_SERVER_URL = 'http://127.0.0.1:8090'
+$env:CEPHALON_EMBEDDER_SERVER_URL = 'http://127.0.0.1:8090'
 $env:CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN = `
   'C:\tmp\llama.cpp-jina-v35\build\bin\Release\llama-embedding.exe'
 Start-Process -FilePath $python314 -ArgumentList 'python\main.py' `
@@ -120,6 +120,11 @@ Migration 019 adds only `retrieval_queries.table_execution_json`; it does not
 rewrite the index. `CEPHALON_TABLE_EXECUTION=0` is the B2 rollback and requires
 no reindex. The trace records the validated plan, bounds, fallback reason,
 candidate sources, execution latency, and completion-call count.
+
+B3 adds no migration, flag, or index format. Its optional cell-citation fields
+travel inside the existing source, ledger, trace, message-source, and
+answer-citation JSON contracts. Rolling back B3 is therefore a code checkout;
+old and new conversations remain readable and no reindex is required.
 
 ## Shutdown verification
 

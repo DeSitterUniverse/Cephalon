@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..schemas import SourceChunk
@@ -182,7 +183,7 @@ def verify_answer_claims(answer_text: str, sources: list[SourceChunk]) -> dict[s
         }
         best_coverage = max(coverage_by_source.values(), default=0.0)
         combined_evidence = "\n".join(evidence_by_source.values())
-        numeric = _verify_numbers(claim_text, combined_evidence)
+        numeric = _verify_numbers(claim_text, combined_evidence, known_sources)
         negation_conflict = _negation_conflict(claim_text, evidence_by_source)
 
         if not cited_ids:
@@ -191,13 +192,13 @@ def verify_answer_claims(answer_text: str, sources: list[SourceChunk]) -> dict[s
         elif unknown_ids:
             entailment = "unsupported"
             reason = "One or more citation tags do not identify supplied evidence."
-        elif numeric["status"] == "contradicted":
+        elif numeric["status"] in {"contradicted", "unit_mismatch"}:
             entailment = "contradicted"
             reason = numeric["reason"]
         elif negation_conflict:
             entailment = "contradicted"
             reason = "Highly similar cited evidence has opposite negation polarity."
-        elif numeric["status"] == "unsupported":
+        elif numeric["status"] in {"unsupported", "missing_cell", "ambiguous_operation"}:
             entailment = "unsupported"
             reason = numeric["reason"]
         elif best_coverage >= ENTAILED_TERM_COVERAGE:
@@ -250,10 +251,13 @@ def _summary(claims: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _verify_numbers(claim: str, evidence: str) -> dict[str, Any]:
+def _verify_numbers(claim: str, evidence: str, sources: list[SourceChunk] | None = None) -> dict[str, Any]:
     claim_values = _numeric_values(claim)
     if not claim_values:
-        return {"status": "not_applicable", "checks": []}
+        return _verify_structured_direction(claim, sources or [])
+    structured = _verify_structured_numbers(claim, claim_values, sources or [])
+    if structured is not None:
+        return structured
     evidence_values = _numeric_values(evidence)
     checks: list[dict[str, Any]] = []
     contradicted = False
@@ -294,6 +298,229 @@ def _verify_numbers(claim: str, evidence: str) -> dict[str, Any]:
     if unsupported:
         return {"status": "unsupported", "reason": "A numerical claim has no comparable cited value.", "checks": checks}
     return {"status": "entailed", "reason": "All numerical claims match cited values or deterministic recomputation.", "checks": checks}
+
+
+def _verify_structured_numbers(
+    claim: str,
+    claim_values: list[NumericValue],
+    sources: list[SourceChunk],
+) -> dict[str, Any] | None:
+    structured = [source for source in sources if source.table_id or source.cells or source.table_operation]
+    if not structured:
+        return None
+    operations = {source.table_operation for source in structured if source.table_operation}
+    if len(operations) != 1:
+        return _structured_failure("ambiguous_operation", "Cited table sources do not identify one operation.")
+    operation = next(iter(operations))
+    supported = {
+        "lookup", "filter", "sort", "group", "min", "max", "sum", "mean",
+        "count", "compare", "difference", "percentage",
+    }
+    if operation not in supported:
+        return _structured_failure("ambiguous_operation", "The cited table operation is unsupported or missing.")
+
+    checks: list[dict[str, Any]] = []
+    computed: list[tuple[Decimal, str, str]] = []
+    for source in structured:
+        cell_by_ref = {cell.cell_ref: cell for cell in source.cells}
+        required_refs = set(source.cell_refs) | set(source.verification_cell_refs)
+        missing = sorted(required_refs - set(cell_by_ref))
+        if missing:
+            return _structured_failure(
+                "missing_cell",
+                "One or more cited arithmetic cells are unavailable.",
+                missing_cell_refs=missing,
+            )
+        try:
+            values = _structured_operation_values(source, operation, cell_by_ref)
+        except ValueError as error:
+            status = str(error)
+            reason = {
+                "unit_mismatch": "Cited cells use incompatible units.",
+                "missing_cell": "The operation lacks required cited cells.",
+                "ambiguous_operation": "The operation cannot be recomputed unambiguously from cited cells.",
+            }.get(status, "The cited operation is unsupported.")
+            return _structured_failure(status if status in {"unit_mismatch", "missing_cell", "ambiguous_operation"} else "ambiguous_operation", reason)
+        computed.extend(values)
+
+    contradicted = False
+    unit_mismatch = False
+    for claim_value in claim_values:
+        compatible = [item for item in computed if _compatible_units(claim_value.unit, item[1])]
+        exact = next((item for item in compatible if _close(claim_value.value, float(item[0]))), None)
+        if exact:
+            checks.append({
+                "claim_value": claim_value.raw,
+                "status": "entailed",
+                "method": exact[2],
+                "computed_value": str(exact[0]),
+                "unit": exact[1] or None,
+            })
+            continue
+        same_number = next((item for item in computed if _close(claim_value.value, float(item[0]))), None)
+        if same_number and not _compatible_units(claim_value.unit, same_number[1]):
+            unit_mismatch = True
+            checks.append({
+                "claim_value": claim_value.raw,
+                "status": "unit_mismatch",
+                "method": same_number[2],
+                "computed_value": str(same_number[0]),
+                "computed_unit": same_number[1] or None,
+            })
+        else:
+            contradicted = True
+            checks.append({
+                "claim_value": claim_value.raw,
+                "status": "contradicted",
+                "method": "cited_cell_recomputation",
+                "computed_values": [f"{value} {unit}".strip() for value, unit, _ in computed[:24]],
+            })
+    if operation == "compare":
+        stated = next((
+            word for word in ("greater", "less", "equal")
+            if re.search(rf"\b{word}\b", claim, re.IGNORECASE)
+        ), None)
+        declared = [str(row.get("value") or "").casefold() for source in structured for row in source.table_result]
+        if stated and stated not in declared:
+            contradicted = True
+            checks.append({"status": "contradicted", "method": "cell_compare", "computed_values": declared})
+    if unit_mismatch:
+        return {
+            "status": "unit_mismatch",
+            "reason": "A numerical claim has the right scalar but an incompatible unit.",
+            "operation": operation,
+            "checks": checks,
+        }
+    if contradicted:
+        return {
+            "status": "contradicted",
+            "reason": "A numerical claim does not match deterministic cited-cell recomputation.",
+            "operation": operation,
+            "checks": checks,
+        }
+    return {
+        "status": "entailed",
+        "reason": "All numerical claims match deterministic cited-cell recomputation.",
+        "operation": operation,
+        "checks": checks,
+    }
+
+
+def _structured_operation_values(
+    source: SourceChunk,
+    operation: str,
+    cell_by_ref: dict[str, Any],
+) -> list[tuple[Decimal, str, str]]:
+    results = source.table_result or []
+    if operation in {"lookup", "filter", "sort"}:
+        return _cell_values((cell_by_ref[ref] for ref in source.cell_refs), f"cell_{operation}")
+    if operation == "group":
+        output = _declared_result_values(results, f"table_{operation}")
+        if output:
+            return output
+        return _cell_values(cell_by_ref.values(), f"cell_{operation}")
+    if operation == "count":
+        refs = source.verification_cell_refs
+        if not refs and not results:
+            raise ValueError("missing_cell")
+        row_count = len({cell_by_ref[ref].row_index for ref in refs}) if refs else int(results[0]["value"])
+        return [(Decimal(row_count), "", "cell_count")]
+
+    ordered_refs = []
+    if results:
+        ordered_refs = list(results[0].get("verification_cell_refs") or results[0].get("cell_refs") or [])
+    if not ordered_refs:
+        ordered_refs = list(source.verification_cell_refs or source.cell_refs)
+    if not ordered_refs or any(ref not in cell_by_ref for ref in ordered_refs):
+        raise ValueError("missing_cell")
+    operand_cells = [cell_by_ref[ref] for ref in ordered_refs]
+    values = _decimal_cells(operand_cells)
+    units = {unit for _, unit in values}
+    if len(units) != 1:
+        raise ValueError("unit_mismatch")
+    unit = next(iter(units))
+    numbers = [value for value, _ in values]
+    if operation == "sum":
+        result = sum(numbers, Decimal(0))
+    elif operation == "mean":
+        result = sum(numbers, Decimal(0)) / Decimal(len(numbers))
+    elif operation == "min":
+        result = min(numbers)
+    elif operation == "max":
+        result = max(numbers)
+    elif operation == "difference":
+        if len(numbers) != 2:
+            raise ValueError("ambiguous_operation")
+        result = numbers[0] - numbers[1]
+    elif operation == "percentage":
+        if len(numbers) != 2 or numbers[1] == 0:
+            raise ValueError("ambiguous_operation")
+        result = (numbers[0] - numbers[1]) / numbers[1] * Decimal(100)
+        unit = "%"
+    elif operation == "compare":
+        return [(value, unit, "cell_compare_operand") for value, unit in values]
+    else:
+        raise ValueError("ambiguous_operation")
+    return [(result, unit, f"cell_{operation}")]
+
+
+def _declared_result_values(results: list[dict[str, Any]], method: str) -> list[tuple[Decimal, str, str]]:
+    output = []
+    for row in results:
+        if row.get("value") is not None:
+            try:
+                output.append((Decimal(str(row["value"])), _normalize_unit(str(row.get("unit") or "")), method))
+            except InvalidOperation:
+                pass
+        for raw in row.get("values") or []:
+            for value in _numeric_values(str(raw)):
+                output.append((Decimal(str(value.value)), value.unit, method))
+    return output
+
+
+def _cell_values(cells, method: str) -> list[tuple[Decimal, str, str]]:
+    return [(value, unit, method) for value, unit in _decimal_cells(cells)]
+
+
+def _decimal_cells(cells) -> list[tuple[Decimal, str]]:
+    output = []
+    for cell in cells:
+        if cell.normalized_value is None:
+            continue
+        try:
+            output.append((Decimal(cell.normalized_value), _normalize_unit(cell.unit or "")))
+        except InvalidOperation:
+            continue
+    if not output:
+        raise ValueError("missing_cell")
+    return output
+
+
+def _verify_structured_direction(claim: str, sources: list[SourceChunk]) -> dict[str, Any]:
+    structured = [source for source in sources if source.table_operation == "compare"]
+    if not structured:
+        return {"status": "not_applicable", "checks": []}
+    results = [str(row.get("value") or "").casefold() for source in structured for row in source.table_result]
+    stated = next((word for word in ("greater", "less", "equal") if re.search(rf"\b{word}\b", claim, re.IGNORECASE)), None)
+    if not stated:
+        return _structured_failure("ambiguous_operation", "The comparison claim has no supported direction.")
+    if stated not in results:
+        return {
+            "status": "contradicted",
+            "reason": "The claimed comparison direction contradicts cited-cell execution.",
+            "operation": "compare",
+            "checks": [{"status": "contradicted", "method": "cell_compare", "computed_values": results}],
+        }
+    return {
+        "status": "entailed",
+        "reason": "The comparison direction matches deterministic cited-cell execution.",
+        "operation": "compare",
+        "checks": [{"status": "entailed", "method": "cell_compare", "computed_value": stated}],
+    }
+
+
+def _structured_failure(status: str, reason: str, **extra) -> dict[str, Any]:
+    return {"status": status, "reason": reason, "checks": [], **extra}
 
 
 def _direction_conflict(claim: str, evidence_text: str, evidence_values: list[NumericValue]) -> bool:
@@ -347,7 +574,12 @@ def _numeric_values(text: str) -> list[NumericValue]:
 
 
 def _normalize_unit(unit: str) -> str:
-    lowered = unit.strip().lower().replace("μ", "µ")
+    raw = unit.strip().replace("μ", "µ")
+    # One-letter scientific units are case-sensitive: M, m, K and k cannot be
+    # folded without turning a correct scalar into false supporting evidence.
+    if len(raw) == 1 and raw.isalpha():
+        return raw
+    lowered = raw.lower()
     return UNIT_ALIASES.get(lowered, lowered)
 
 

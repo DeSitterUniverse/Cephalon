@@ -9,6 +9,7 @@ from cephalon_core import storage
 from cephalon_core.config import Settings
 from cephalon_core.services.evidence_ledger import build_evidence_ledger
 from cephalon_core.services.generation import _deterministic_unit_answer
+from cephalon_core.services import evaluation, support
 from cephalon_core.services.table_ingestion import persistence_rows
 from cephalon_core.services.table_models import build_table
 from cephalon_core.services.table_planning import (
@@ -20,6 +21,7 @@ from cephalon_core.services.table_planning import (
 from cephalon_core.services import table_retrieval
 from cephalon_core.services.table_retrieval import (
     TableExecutionError,
+    _sources_for_execution,
     document_unit_sources,
     execute_plan,
     execute_table_route,
@@ -100,7 +102,7 @@ def test_direct_lookup_is_bounded_repeatable_and_source_compatible():
     assert first_trace["status"] == second_trace["status"] == "executed"
     assert first_trace["model_calls"] == 0
     assert first_trace["result_count"] == 3
-    assert first_sources[0].source_kind == "table"
+    assert first_sources[0].source_kind == "cell"
     assert first_sources[0].provenance["table_id"] == table_id
     assert first_sources[0].provenance["cell_refs"] == ["csv:r2c3", "csv:r3c3", "csv:r4c3"]
 
@@ -295,3 +297,193 @@ def test_deterministic_unit_answer_lists_every_unique_candidate_with_valid_citat
     assert answer.count("40 percent") == 1
     assert "not guessed" in answer
     assert _deterministic_unit_answer("Summarize the paper.", meta) is None
+
+
+@pytest.mark.parametrize(("plan", "claim", "method"), [
+    ({"operation": "sum", "value_column": 2}, "The deterministic sum is 60 kg. [[src:S1]]", "cell_sum"),
+    ({"operation": "mean", "value_column": 2}, "The deterministic mean is 20 kg. [[src:S1]]", "cell_mean"),
+    ({"operation": "min", "value_column": 2}, "The deterministic minimum is 10 kg. [[src:S1]]", "cell_min"),
+    ({"operation": "max", "value_column": 2}, "The deterministic maximum is 30 kg. [[src:S1]]", "cell_max"),
+    ({"operation": "count"}, "The deterministic count is 3. [[src:S1]]", "cell_count"),
+    ({"operation": "difference", "operand_cell_refs": ["csv:r2c3", "csv:r3c3"]}, "The deterministic difference is -10 kg. [[src:S1]]", "cell_difference"),
+    ({"operation": "percentage", "operand_cell_refs": ["csv:r3c3", "csv:r2c3"]}, "The deterministic percentage is 100%. [[src:S1]]", "cell_percentage"),
+])
+def test_cell_verifier_recomputes_supported_arithmetic(plan, claim, method):
+    state, table_id = table_state()
+    plan = TablePlan.from_payload({**plan, "table_ids": [table_id]})
+    execution = execute_plan(state.sqlite, plan)
+    source = _sources_for_execution(state.sqlite, execution, plan)[0]
+
+    result = support.validate_answer_claims(claim, [source])
+
+    numeric = result["claims"][0]["numeric_verification"]
+    assert numeric["status"] == "entailed"
+    assert numeric["checks"][-1]["method"] == method
+    assert source.table_id == table_id
+    assert source.cells
+    assert source.header_refs
+
+
+def test_xlsx_percentage_points_reach_cell_citations_and_verifier():
+    state, table_id = table_state(
+        [["Name", "Rate"], ["alpha", 0.125]],
+        name="percentages.xlsx",
+        source_type="xlsx",
+        number_formats={(1, 1): "0.0%"},
+    )
+    plan = TablePlan("mean", (table_id,), value_column=1)
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    cited = {cell.cell_ref: cell for cell in source.cells}["Sheet!B2"]
+    correct = support.validate_answer_claims("The mean is 12.5%. [[src:S1]]", [source])
+    underlying_scalar = support.validate_answer_claims("The mean is 0.125%. [[src:S1]]", [source])
+
+    assert cited.raw_value == "0.125"
+    assert cited.normalized_value == "12.5"
+    assert cited.unit == "%"
+    assert correct["claims"][0]["numeric_verification"]["status"] == "entailed"
+    assert underlying_scalar["claims"][0]["numeric_verification"]["status"] == "contradicted"
+
+
+def test_cell_verifier_reports_contradiction_unit_mismatch_missing_cell_and_comparison():
+    state, table_id = table_state()
+    sum_plan = TablePlan("sum", (table_id,), value_column=2)
+    sum_source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, sum_plan), sum_plan)[0]
+
+    wrong = support.validate_answer_claims("The deterministic sum is 59 kg. [[src:S1]]", [sum_source])
+    mismatch = support.validate_answer_claims("The deterministic sum is 60 m. [[src:S1]]", [sum_source])
+    missing = support.validate_answer_claims(
+        "The deterministic sum is 60 kg. [[src:S1]]",
+        [sum_source.model_copy(update={"cells": []})],
+    )
+    ambiguous = support.validate_answer_claims(
+        "The deterministic sum is 60 kg. [[src:S1]]",
+        [sum_source.model_copy(update={"table_operation": None})],
+    )
+
+    assert wrong["claims"][0]["numeric_verification"]["status"] == "contradicted"
+    assert mismatch["claims"][0]["numeric_verification"]["status"] == "unit_mismatch"
+    assert missing["claims"][0]["numeric_verification"]["status"] == "missing_cell"
+    assert ambiguous["claims"][0]["numeric_verification"]["status"] == "ambiguous_operation"
+
+    compare_plan = TablePlan(
+        "compare", (table_id,), operand_cell_refs=("csv:r2c3", "csv:r3c3")
+    )
+    compare_source = _sources_for_execution(
+        state.sqlite, execute_plan(state.sqlite, compare_plan), compare_plan
+    )[0]
+    comparison = support.validate_answer_claims(
+        "10 kg is less than 20 kg. [[src:S1]]", [compare_source]
+    )
+    assert comparison["claims"][0]["numeric_verification"]["status"] == "entailed"
+
+
+def test_cell_verifier_preserves_case_sensitive_single_letter_units():
+    state, table_id = table_state([
+        ["Name", "Value"], ["a", "10 M"], ["b", "20 M"],
+    ])
+    plan = TablePlan("sum", (table_id,), value_column=1)
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    exact = support.validate_answer_claims("The sum is 30 M. [[src:S1]]", [source])
+    mismatched = support.validate_answer_claims("The sum is 30 m. [[src:S1]]", [source])
+
+    assert exact["claims"][0]["numeric_verification"]["status"] == "entailed"
+    assert mismatched["claims"][0]["numeric_verification"]["status"] == "unit_mismatch"
+
+
+@pytest.mark.parametrize(("plan", "claim"), [
+    (TablePlan("lookup", ("tbl-aaaaaaaaaaaaaaaaaaaaaaaa",), target_unit="kg"), "One result is 20 kg. [[src:S1]]"),
+    (TablePlan("filter", ("tbl-aaaaaaaaaaaaaaaaaaaaaaaa",), filters=(TableFilter(2, "gt", "15", "kg"),)),
+     "One filtered result is 30 kg. [[src:S1]]"),
+    (TablePlan("sort", ("tbl-aaaaaaaaaaaaaaaaaaaaaaaa",), value_column=2, sort_direction="desc", limit=2),
+     "The leading result is 30 kg. [[src:S1]]"),
+    (TablePlan("group", ("tbl-aaaaaaaaaaaaaaaaaaaaaaaa",), value_column=2, group_column=1, aggregate="mean"),
+     "The first group mean is 15 kg. [[src:S1]]"),
+])
+def test_cell_verifier_checks_values_for_non_scalar_table_operations(plan, claim):
+    state, table_id = table_state()
+    plan = TablePlan.from_payload({**plan.trace_payload(), "table_ids": [table_id]})
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    result = support.validate_answer_claims(claim, [source])
+
+    assert result["claims"][0]["numeric_verification"]["status"] == "entailed"
+
+
+def test_cell_source_round_trips_through_saved_conversation():
+    state, table_id = table_state()
+    plan = TablePlan("mean", (table_id,), value_column=2)
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+    conversation = storage.create_conversation(state.sqlite, "Cell citation")
+    message = storage.append_message(state.sqlite, conversation["id"], "assistant", "20 kg [[src:S1]]")
+    storage.save_message_sources(state.sqlite, message["id"], [source.model_dump()])
+    support_payload = support.classify_answer_support("The mean is 20 kg. [[src:S1]]", [source])
+    storage.save_answer_record(state.sqlite, {
+        "id": message["id"],
+        "message_id": message["id"],
+        "answer_text": "The mean is 20 kg. [[src:S1]]",
+        "support_status": support_payload["status"],
+        "citations": support_payload["citations"],
+    })
+
+    restored = storage.get_conversation(state.sqlite, conversation["id"])["messages"][0]["sources"][0]
+
+    assert restored["table_id"] == table_id
+    assert restored["cell_refs"] == source.cell_refs
+    assert restored["header_refs"] == source.header_refs
+    assert restored["cells"] == [cell.model_dump(mode="json") for cell in source.cells]
+    assert restored["table_operation"] == "mean"
+    citation = state.sqlite.execute(
+        "SELECT payload_json FROM answer_citations WHERE answer_id = ?", (message["id"],)
+    ).fetchone()[0]
+    assert f'"table_id":"{table_id}"' in citation
+    assert '"cell_refs":["csv:r2c3","csv:r3c3","csv:r4c3"]' in citation
+
+
+@pytest.mark.parametrize(("payload", "expected_refs"), [
+    ({"operation": "lookup", "target_unit": "kg"},
+     {"csv:r2c3", "csv:r3c3", "csv:r4c3"}),
+    ({"operation": "filter", "filters": [{"column_index": 2, "operator": "gt", "value": "15", "unit": "kg"}]},
+     {f"csv:r{row}c{column}" for row in (3, 4) for column in range(1, 5)}),
+    ({"operation": "sort", "value_column": 2, "sort_direction": "desc", "limit": 2},
+     {f"csv:r{row}c{column}" for row in (3, 4) for column in range(1, 5)}),
+    ({"operation": "group", "value_column": 2, "group_column": 1, "aggregate": "mean"},
+     {"csv:r2c3", "csv:r3c3", "csv:r4c3"}),
+    ({"operation": "sum", "value_column": 2},
+     {"csv:r2c3", "csv:r3c3", "csv:r4c3"}),
+    ({"operation": "mean", "value_column": 2},
+     {"csv:r2c3", "csv:r3c3", "csv:r4c3"}),
+    ({"operation": "min", "value_column": 2}, {"csv:r2c3"}),
+    ({"operation": "max", "value_column": 2}, {"csv:r4c3"}),
+    ({"operation": "difference", "operand_cell_refs": ["csv:r2c3", "csv:r3c3"]},
+     {"csv:r2c3", "csv:r3c3"}),
+    ({"operation": "percentage", "operand_cell_refs": ["csv:r3c3", "csv:r2c3"]},
+     {"csv:r2c3", "csv:r3c3"}),
+    ({"operation": "compare", "operand_cell_refs": ["csv:r2c3", "csv:r3c3"]},
+     {"csv:r2c3", "csv:r3c3"}),
+])
+def test_all_cell_bearing_operations_reach_exact_gold_citation_scores(payload, expected_refs):
+    state, table_id = table_state()
+    plan = TablePlan.from_payload({**payload, "table_ids": [table_id]})
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    metrics = evaluation.answer_metrics(
+        item={"gold_evidence": [{"source_kind": "cell", "cell_refs": sorted(expected_refs)}]},
+        answer="Deterministic result. [[src:S1]]",
+        sources=[source.model_dump(mode="json")],
+    )
+
+    assert set(source.cell_refs) == expected_refs
+    assert metrics["cell_citation_precision"] == 1.0
+    assert metrics["cell_citation_recall"] == 1.0
+
+
+def test_count_has_table_level_provenance_when_no_result_cell_exists():
+    state, table_id = table_state()
+    plan = TablePlan("count", (table_id,))
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    assert source.source_kind == "table"
+    assert source.cell_refs == []
+    assert source.verification_cell_refs == ["csv:r2c1", "csv:r3c1", "csv:r4c1"]
