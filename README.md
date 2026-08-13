@@ -8,19 +8,17 @@ Cephalon is particularly useful with models fine-tuned for specialised knowledge
 
 I built this originally for running LLM inference on a large corpus of scientific and technical papers. I improved the architecture by incorporating the best RAG techniques I found:
 
-- Hybrid retrieval with independent signals
-- True full-set listwise reranking
-- Citation accounting and fail-safe behavior
-- Exact evidence and provenance
-- RATE-style validation
-- High document fidelity: PDF ingestion preserves page, layout, tables, captions, bounding boxes, and asset provenance.
-- Auditable retrieval
-
-` `
+- **Local-first operation:** documents, indexes, conversations, and diagnostics stay on your computer. The chat model is your choice and runs through an external llama.cpp server.
+- **Hybrid retrieval:** semantic search finds passages with similar meaning, while SQLite FTS5 finds exact terms. Cephalon keeps both result sets independent, combines their ranks, and preserves strong candidates from either path.
+- **Full-set listwise reranking:** Jina Reranker v3.5 compares the complete fused candidate set in one pass before Cephalon selects the final context. This avoids discarding a useful passage too early.
+- **Hierarchical context assembly:** precise child chunks are retrieved first, then bounded sibling or parent context is added when it improves completeness. The original child remains the citation anchor. Adapted from [HiChunk](https://arxiv.org/abs/2509.11552).
+- **Layout-aware PDF evidence:** text can be expanded to related headings, captions, tables, figures, and cross-page continuations instead of treating every block as unrelated. Adapted from [LAD-RAG](https://arxiv.org/abs/2510.07233).
+- **Coverage-aware evidence control:** Cephalon breaks a question into concrete evidence needs, selects sources that cover them, and can run one targeted follow-up search for missing evidence in Thorough mode. Adapted from [S2G-RAG](https://arxiv.org/abs/2604.23783).
+- **Verified answers:** cited claims are checked for missing support, contradictions, negation errors, and incorrect numbers or units. Thorough mode can audit the draft and repair it once; hard failures cannot be overridden. Adapted from [OpenScholar](https://arxiv.org/abs/2411.14199) and [RAGChecker](https://arxiv.org/abs/2408.08067).
+- **Structured table reasoning:** PDF, CSV, and XLSX tables retain row, column, cell, and location data. Cephalon can run bounded lookups, filters, comparisons, and arithmetic, then cite and recheck the exact cells used. Adapted from [T-RAG](https://arxiv.org/abs/2203.16714) and [T²-RAGBench](https://arxiv.org/abs/2506.12071).
+- **Exact provenance and retrieval traces:** citations point to stable source chunks with page, layout, bounding-box, table-cell, and asset details when available. The Sources and Trace views show what was retrieved, reranked, selected, and verified.
 
 ![A cited answer to a question about the RATE paper](docs/screenshots/rag-cited-answer.png)
-
-` ` 
 
 ![A cited long-form explanation with evidence and citations](docs/screenshots/long-evidence-answer.png)
 
