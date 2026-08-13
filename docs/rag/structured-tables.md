@@ -31,16 +31,21 @@ replacement occurs in the same SQLite transaction as chunks and assets.
 - Signs, scientific notation, percentages, units, missing values, booleans,
   dates, and datetimes are recognized conservatively. Units are stored apart
   from the normalized number.
+- `normalized_value` stores percentages in percentage points. For example, an
+  XLSX scalar `0.125` formatted as `0.0%` retains raw value `0.125` and
+  normalizes to `12.5` with unit `%`, matching textual `12.5%` input.
 - IDs derive from document identity, structural location, and unchanged table
   content, so identical reingestion produces identical IDs.
 - PDF boxes remain in the original page coordinate system. Line tables use
   parser cell boxes when available; borderless tables derive boxes from words.
-- CSV records detected encoding and delimiter and preserves blank cells and row
-  order. Row, column, cell-count, and cell-length limits emit explicit warnings.
+- CSV validates decoding across the complete stream, records the selected
+  encoding and delimiter, and preserves blank cells and row order. Row, column,
+  cell-count, and cell-length limits emit explicit warnings.
 - XLSX treats each non-empty worksheet as one deterministic table. It preserves
   sheet/cell references, merged ranges, number formats, and formula text.
-  Cephalon does not ask openpyxl to recalculate formulas and does not invent a
-  cached value when one is unavailable.
+  A cached formula value is retained as `effective_value` when the workbook
+  supplies one. Cephalon does not ask openpyxl to recalculate formulas and does
+  not invent a result when a cache is unavailable.
 
 ## Reindex and rollback
 

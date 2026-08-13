@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 
-TABLE_PARSER_VERSION = "cephalon-typed-tables-2026-08"
+TABLE_PARSER_VERSION = "cephalon-typed-tables-2026-08-v2"
 MAX_TABLE_ROWS = 100_000
 MAX_TABLE_COLUMNS = 256
 MAX_TABLE_CELLS = 2_000_000
@@ -132,12 +132,13 @@ def type_value(value: Any, *, number_format: str | None = None) -> TypedValue:
         return TypedValue(raw, value.isoformat(), "datetime")
     if isinstance(value, date):
         return TypedValue(raw, value.isoformat(), "date")
-    if isinstance(value, int):
-        return TypedValue(raw, str(value), "integer")
-    if isinstance(value, (float, Decimal)):
-        normalized = _decimal_string(Decimal(str(value)))
-        is_percent = bool(number_format and "%" in number_format)
-        return TypedValue(raw, normalized, "percentage" if is_percent else "decimal", "%" if is_percent else None)
+    if isinstance(value, (int, float, Decimal)):
+        decimal_value = Decimal(str(value))
+        if _is_percentage_number_format(number_format):
+            # XLSX stores 12.5% as 0.125. Normalized percentages consistently
+            # use percentage points so XLSX and textual/CSV values agree.
+            return TypedValue(raw, _decimal_string(decimal_value * 100), "percentage", "%")
+        return TypedValue(raw, _decimal_string(decimal_value), "integer" if isinstance(value, int) else "decimal")
     lowered = stripped.casefold()
     if lowered in {"true", "false"}:
         return TypedValue(raw, lowered, "boolean")
@@ -171,6 +172,7 @@ def build_table(
     bounding_box: tuple[float, float, float, float] | None = None,
     cell_boxes: list[list[tuple[float, float, float, float] | None]] | None = None,
     formulas: dict[tuple[int, int], str] | None = None,
+    effective_values: dict[tuple[int, int], Any] | None = None,
     number_formats: dict[tuple[int, int], str] | None = None,
     merged_ranges: list[str] | None = None,
     provenance: dict[str, Any] | None = None,
@@ -191,17 +193,19 @@ def build_table(
     for row_index, row in enumerate(rows[: len(normalized_rows)]):
         for column_index in range(width):
             value = row[column_index] if column_index < len(row) else None
-            typed = type_value(value, number_format=(number_formats or {}).get((row_index, column_index)))
+            formula = (formulas or {}).get((row_index, column_index))
+            effective_value = (effective_values or {}).get((row_index, column_index)) if formula else None
+            typed_source = effective_value if effective_value is not None else value
+            typed = type_value(typed_source, number_format=(number_formats or {}).get((row_index, column_index)))
             cell_ref = _cell_ref(source_type, row_index, column_index, sheet_name, page_number)
             cell_warnings = list(typed.parse_warnings)
-            formula = (formulas or {}).get((row_index, column_index))
-            if formula:
+            if formula and effective_value is None:
                 cell_warnings.append("formula_cached_value_unavailable")
             typed_cells.append(TableCell(
                 row_index=row_index,
                 column_index=column_index,
                 cell_ref=cell_ref,
-                raw_value=typed.raw_value,
+                raw_value=raw_text(value),
                 normalized_value=typed.normalized_value,
                 value_type=typed.value_type,
                 unit=typed.unit,
@@ -209,6 +213,7 @@ def build_table(
                 sheet_name=sheet_name,
                 bounding_box=_box_at(cell_boxes, row_index, column_index),
                 formula=formula,
+                effective_value=raw_text(effective_value) if effective_value is not None else None,
                 parse_warnings=cell_warnings,
             ))
             if row_index > 0:
@@ -261,6 +266,27 @@ def _parse_decimal(value: str) -> str | None:
         return _decimal_string(Decimal(value.replace(",", "")))
     except InvalidOperation:
         return None
+
+
+def _is_percentage_number_format(number_format: str | None) -> bool:
+    """Return whether an XLSX format contains a non-literal percent token."""
+    if not number_format:
+        return False
+    quoted = False
+    escaped = False
+    for character in number_format:
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            quoted = not quoted
+            continue
+        if character == "%" and not quoted:
+            return True
+    return False
 
 
 def _decimal_string(value: Decimal) -> str:
