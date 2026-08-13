@@ -265,21 +265,27 @@ def execute_plan(conn, plan: TablePlan) -> TableExecution:
     with storage.SQLITE_LOCK:
         conn.set_progress_handler(progress, SQL_PROGRESS_STEPS)
         try:
-            tables = _load_tables(conn, plan.table_ids)
+            tables = _load_tables(conn, plan.table_ids, deadline)
             if len(tables) != len(plan.table_ids):
                 raise TableExecutionError("unknown_table")
-            columns = _load_columns(conn, plan.table_ids)
-            _validate_columns(plan, columns)
-            cells = _load_cells(conn, plan.table_ids)
+            columns = _load_columns(conn, plan.table_ids, deadline)
+            _validate_columns(plan, columns, deadline)
+            cells = _load_cells(conn, plan.table_ids, deadline)
         except Exception as error:
             if "interrupted" in str(error).casefold():
                 raise TimeoutError("table_execution_timeout") from error
             raise
         finally:
             conn.set_progress_handler(None, 0)
-    rows = _execute_cells(plan, tables, columns, cells)
-    text = _format_rows(plan, tables, columns, rows)[:MAX_CONTEXT_CHARACTERS]
-    result_cells = sorted({ref for row in rows for ref in row.get("cell_refs", [])})
+    _check_deadline(deadline)
+    rows = _execute_cells(plan, tables, columns, cells, deadline)
+    text = _format_rows(plan, tables, columns, rows, deadline)[:MAX_CONTEXT_CHARACTERS]
+    result_cell_set: set[str] = set()
+    for row in rows:
+        _check_deadline(deadline)
+        result_cell_set.update(row.get("cell_refs", []))
+    result_cells = sorted(result_cell_set)
+    _check_deadline(deadline)
     return TableExecution(rows, text, {
         "route": "typed_table",
         "validated_plan": plan.trace_payload(),
@@ -302,7 +308,7 @@ def execute_plan(conn, plan: TablePlan) -> TableExecution:
     })
 
 
-def _load_tables(conn, table_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+def _load_tables(conn, table_ids: tuple[str, ...], deadline: float) -> dict[str, dict[str, Any]]:
     placeholders = ",".join("?" for _ in table_ids)
     rows = conn.execute(
         f"""
@@ -312,10 +318,14 @@ def _load_tables(conn, table_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         """,
         table_ids,
     ).fetchall()
-    return {row["id"]: dict(row) for row in rows}
+    result = {}
+    for row in rows:
+        _check_deadline(deadline)
+        result[row["id"]] = dict(row)
+    return result
 
 
-def _load_columns(conn, table_ids: tuple[str, ...]) -> dict[str, dict[int, dict[str, Any]]]:
+def _load_columns(conn, table_ids: tuple[str, ...], deadline: float) -> dict[str, dict[int, dict[str, Any]]]:
     placeholders = ",".join("?" for _ in table_ids)
     rows = conn.execute(
         f"SELECT * FROM table_columns WHERE table_id IN ({placeholders}) ORDER BY table_id, column_index",
@@ -323,11 +333,12 @@ def _load_columns(conn, table_ids: tuple[str, ...]) -> dict[str, dict[int, dict[
     ).fetchall()
     result: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
     for row in rows:
+        _check_deadline(deadline)
         result[row["table_id"]][row["column_index"]] = dict(row)
     return result
 
 
-def _load_cells(conn, table_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+def _load_cells(conn, table_ids: tuple[str, ...], deadline: float) -> list[dict[str, Any]]:
     placeholders = ",".join("?" for _ in table_ids)
     rows = conn.execute(
         f"""
@@ -338,10 +349,15 @@ def _load_cells(conn, table_ids: tuple[str, ...]) -> list[dict[str, Any]]:
     ).fetchall()
     if len(rows) > MAX_SCANNED_CELLS:
         raise TableExecutionError("cell_scan_limit")
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        _check_deadline(deadline)
+        result.append(dict(row))
+    return result
 
 
-def _validate_columns(plan: TablePlan, columns: dict[str, dict[int, dict[str, Any]]]) -> None:
+def _validate_columns(plan: TablePlan, columns: dict[str, dict[int, dict[str, Any]]], deadline: float) -> None:
+    _check_deadline(deadline)
     requested = {
         *plan.select_columns,
         *(item.column_index for item in plan.filters),
@@ -357,36 +373,44 @@ def _execute_cells(
     tables: dict[str, dict[str, Any]],
     columns: dict[str, dict[int, dict[str, Any]]],
     cells: list[dict[str, Any]],
+    deadline: float,
 ) -> list[dict[str, Any]]:
+    _check_deadline(deadline)
     if plan.operation == "lookup":
-        return _lookup(plan, cells)
+        return _lookup(plan, cells, deadline)
     if len(plan.table_ids) != 1:
         raise TableExecutionError("ambiguous_multi_table_operation")
     table_id = plan.table_ids[0]
-    by_row = _rows_for_table(cells, table_id)
+    by_row = _rows_for_table(cells, table_id, deadline)
     # Row zero is the declared header row and is never aggregated as data.
-    data_rows = [row for index, row in sorted(by_row.items()) if index > 0 and _matches_filters(row, plan.filters)]
+    data_rows = []
+    for index, row in sorted(by_row.items()):
+        _check_deadline(deadline)
+        if index > 0 and _matches_filters(row, plan.filters, deadline):
+            data_rows.append(row)
     if plan.operation == "filter":
-        return [_row_result(table_id, row) for row in data_rows[:plan.limit]]
+        return [_row_result(table_id, row, deadline) for row in data_rows[:plan.limit]]
     if plan.operation == "count":
         return [{"table_id": table_id, "value": str(len(data_rows)), "unit": None, "cell_refs": []}]
     if plan.operation in {"compare", "difference", "percentage"}:
-        return _binary_result(plan, cells)
-    values = _numeric_values(data_rows, plan.value_column, plan.target_unit)
+        return _binary_result(plan, cells, deadline)
+    values = _numeric_values(data_rows, plan.value_column, plan.target_unit, deadline)
     if plan.operation in {"sum", "mean", "min", "max"}:
-        return _aggregate_result(plan, table_id, values)
+        return _aggregate_result(plan, table_id, values, deadline)
     if plan.operation == "sort":
         reverse = plan.sort_direction == "desc"
         ordered = sorted(values, key=lambda item: (item[0], item[2]["row_index"]), reverse=reverse)
-        return [_row_result(table_id, row) for _, row, _ in ordered[:plan.limit]]
+        _check_deadline(deadline)
+        return [_row_result(table_id, row, deadline) for _, row, _ in ordered[:plan.limit]]
     if plan.operation == "group":
-        return _group_result(plan, table_id, data_rows)
+        return _group_result(plan, table_id, data_rows, deadline)
     raise TableExecutionError("unsupported_operation")
 
 
-def _lookup(plan: TablePlan, cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _lookup(plan: TablePlan, cells: list[dict[str, Any]], deadline: float) -> list[dict[str, Any]]:
     matched = []
     for cell in cells:
+        _check_deadline(deadline)
         if plan.operand_cell_refs and cell["cell_ref"] not in plan.operand_cell_refs:
             continue
         unit_values = _unit_values(cell, plan.target_unit) if plan.target_unit else []
@@ -416,16 +440,18 @@ def _lookup(plan: TablePlan, cells: list[dict[str, Any]]) -> list[dict[str, Any]
     return matched
 
 
-def _rows_for_table(cells: list[dict[str, Any]], table_id: str) -> dict[int, dict[int, dict[str, Any]]]:
+def _rows_for_table(cells: list[dict[str, Any]], table_id: str, deadline: float) -> dict[int, dict[int, dict[str, Any]]]:
     result: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
     for cell in cells:
+        _check_deadline(deadline)
         if cell["table_id"] == table_id:
             result[cell["row_index"]][cell["column_index"]] = cell
     return result
 
 
-def _matches_filters(row: dict[int, dict[str, Any]], filters: tuple[TableFilter, ...]) -> bool:
+def _matches_filters(row: dict[int, dict[str, Any]], filters: tuple[TableFilter, ...], deadline: float) -> bool:
     for item in filters:
+        _check_deadline(deadline)
         cell = row.get(item.column_index)
         if cell is None or (item.unit and not _has_unit(cell, item.unit)):
             return False
@@ -452,12 +478,13 @@ def _compare(left: str, right: str, operator: str) -> bool:
     }[operator]
 
 
-def _numeric_values(rows, column: int | None, requested_unit: str | None):
+def _numeric_values(rows, column: int | None, requested_unit: str | None, deadline: float):
     if column is None:
         raise TableExecutionError("value_column_required")
     result = []
     units = set()
     for row in rows:
+        _check_deadline(deadline)
         cell = row.get(column)
         if not cell or cell["value_type"] not in NUMERIC_TYPES or cell["normalized_value"] is None:
             continue
@@ -472,8 +499,10 @@ def _numeric_values(rows, column: int | None, requested_unit: str | None):
     return result
 
 
-def _aggregate_result(plan: TablePlan, table_id: str, values) -> list[dict[str, Any]]:
+def _aggregate_result(plan: TablePlan, table_id: str, values, deadline: float) -> list[dict[str, Any]]:
+    _check_deadline(deadline)
     numbers = [item[0] for item in values]
+    _check_deadline(deadline)
     if plan.operation == "sum":
         value = sum(numbers, Decimal(0))
         cells = [item[2] for item in values]
@@ -486,16 +515,25 @@ def _aggregate_result(plan: TablePlan, table_id: str, values) -> list[dict[str, 
     else:
         value, _, cell = max(values, key=lambda item: item[0])
         cells = [cell]
+    refs = []
+    for cell in cells:
+        _check_deadline(deadline)
+        refs.append(cell["cell_ref"])
     return [{
         "table_id": table_id,
         "value": _decimal_text(value),
         "unit": cells[0]["unit"],
-        "cell_refs": [cell["cell_ref"] for cell in cells],
+        "cell_refs": refs,
     }]
 
 
-def _binary_result(plan: TablePlan, cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    operands = [cell for ref in plan.operand_cell_refs for cell in cells if cell["cell_ref"] == ref]
+def _binary_result(plan: TablePlan, cells: list[dict[str, Any]], deadline: float) -> list[dict[str, Any]]:
+    operands = []
+    for ref in plan.operand_cell_refs:
+        for cell in cells:
+            _check_deadline(deadline)
+            if cell["cell_ref"] == ref:
+                operands.append(cell)
     if len(operands) != 2 or len({cell["cell_ref"] for cell in operands}) != 2:
         raise TableExecutionError("missing_or_ambiguous_operand")
     if any(cell["value_type"] not in NUMERIC_TYPES or cell["normalized_value"] is None for cell in operands):
@@ -523,17 +561,19 @@ def _binary_result(plan: TablePlan, cells: list[dict[str, Any]]) -> list[dict[st
     }]
 
 
-def _group_result(plan: TablePlan, table_id: str, rows) -> list[dict[str, Any]]:
+def _group_result(plan: TablePlan, table_id: str, rows, deadline: float) -> list[dict[str, Any]]:
     if plan.group_column is None:
         raise TableExecutionError("group_column_required")
     groups: dict[str, list[dict[int, dict[str, Any]]]] = defaultdict(list)
     for row in rows:
+        _check_deadline(deadline)
         cell = row.get(plan.group_column)
         if cell:
             groups[cell["raw_value"]].append(row)
     output = []
     aggregate = plan.aggregate or "count"
     for key in sorted(groups, key=str.casefold):
+        _check_deadline(deadline)
         group_rows = groups[key]
         if aggregate == "count":
             value, unit, refs = str(len(group_rows)), None, [row[plan.group_column]["cell_ref"] for row in group_rows]
@@ -544,7 +584,8 @@ def _group_result(plan: TablePlan, table_id: str, rows) -> list[dict[str, Any]]:
                 value_column=plan.value_column,
                 target_unit=plan.target_unit,
             )
-            item = _aggregate_result(nested, table_id, _numeric_values(group_rows, plan.value_column, plan.target_unit))[0]
+            values = _numeric_values(group_rows, plan.value_column, plan.target_unit, deadline)
+            item = _aggregate_result(nested, table_id, values, deadline)[0]
             value, unit, refs = item["value"], item["unit"], item["cell_refs"]
         output.append({"table_id": table_id, "group": key, "value": value, "unit": unit, "cell_refs": refs})
         if len(output) >= plan.limit:
@@ -552,7 +593,8 @@ def _group_result(plan: TablePlan, table_id: str, rows) -> list[dict[str, Any]]:
     return output
 
 
-def _row_result(table_id: str, row: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def _row_result(table_id: str, row: dict[int, dict[str, Any]], deadline: float) -> dict[str, Any]:
+    _check_deadline(deadline)
     ordered = [row[index] for index in sorted(row)]
     return {
         "table_id": table_id,
@@ -589,14 +631,22 @@ def _unit_values(cell: dict[str, Any], target: str | None) -> list[tuple[str, st
     return values
 
 
-def _format_rows(plan, tables, columns, rows) -> str:
+def _format_rows(plan, tables, columns, rows, deadline: float) -> str:
     lines = [f"Deterministic table operation: {plan.operation}."]
     for row in rows:
+        _check_deadline(deadline)
         table = tables[row["table_id"]]
         location = table.get("sheet_name") or (f"page {table['page_number']}" if table.get("page_number") else "table")
         payload = {key: value for key, value in row.items() if key not in {"table_id", "bounding_box"}}
-        lines.append(f"{table.get('display_name') or table.get('path')} | {location} | {json.dumps(payload, ensure_ascii=False)}")
+        serialized = json.dumps(payload, ensure_ascii=False)
+        _check_deadline(deadline)
+        lines.append(f"{table.get('display_name') or table.get('path')} | {location} | {serialized}")
     return "\n".join(lines)
+
+
+def _check_deadline(deadline: float) -> None:
+    if time.perf_counter() > deadline:
+        raise TimeoutError("table_execution_timeout")
 
 
 def _sources_for_execution(conn, execution: TableExecution, plan: TablePlan) -> list[SourceChunk]:
