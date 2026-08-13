@@ -29,7 +29,15 @@ from cephalon_core.services.table_retrieval import (
 )
 
 
-def table_state(rows=None, *, doc_id="doc-1", name="study-results.csv", second_document=False):
+def table_state(
+    rows=None,
+    *,
+    doc_id="doc-1",
+    name="study-results.csv",
+    second_document=False,
+    source_type="csv",
+    number_formats=None,
+):
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     settings = Settings()
@@ -44,7 +52,7 @@ def table_state(rows=None, *, doc_id="doc-1", name="study-results.csv", second_d
         ["beta", "A", "20 kg", "50%"],
         ["gamma", "B", "30 kg", "75%"],
     ]
-    table = build_table(rows, source_type="csv", table_index=0)
+    table = build_table(rows, source_type=source_type, table_index=0, number_formats=number_formats)
     persisted = persistence_rows(doc_id, [table])
     _insert_rows(conn, persisted)
     if second_document:
@@ -148,6 +156,21 @@ def test_grouping_and_binary_arithmetic_are_exact():
     assert percentage.rows[0]["unit"] == "%"
 
 
+def test_executor_uses_xlsx_percent_points_not_underlying_scalars():
+    state, table_id = table_state(
+        [["Name", "Rate"], ["alpha", 0.125]],
+        name="percentages.xlsx",
+        source_type="xlsx",
+        number_formats={(1, 1): "0.0%"},
+    )
+
+    result = execute_plan(state.sqlite, TablePlan("mean", (table_id,), value_column=1))
+
+    assert result.rows[0]["value"] == "12.5"
+    assert result.rows[0]["unit"] == "%"
+    assert result.rows[0]["cell_refs"] == ["Sheet!B2"]
+
+
 def test_mixed_units_zero_division_and_ambiguous_columns_fail_closed():
     mixed, table_id = table_state([
         ["Name", "Value"], ["a", "10 kg"], ["b", "20 m"],
@@ -195,6 +218,23 @@ def test_injection_text_is_bound_data_large_results_are_limited_and_timeout_fall
 
     monkeypatch.setattr(table_retrieval, "EXECUTION_TIMEOUT_MS", -1)
     monkeypatch.setattr(table_retrieval, "SQL_PROGRESS_STEPS", 1)
+    with pytest.raises(TimeoutError, match="table_execution_timeout"):
+        execute_plan(state.sqlite, TablePlan("count", (table_id,)))
+
+
+def test_execution_deadline_remains_active_after_sqlite_returns(monkeypatch):
+    state, table_id = table_state()
+    clock = {"now": 0.0}
+    original_load_cells = table_retrieval._load_cells
+
+    def load_cells_then_expire(conn, table_ids, deadline):
+        rows = original_load_cells(conn, table_ids, deadline)
+        clock["now"] = 1.0
+        return rows
+
+    monkeypatch.setattr(table_retrieval.time, "perf_counter", lambda: clock["now"])
+    monkeypatch.setattr(table_retrieval, "_load_cells", load_cells_then_expire)
+
     with pytest.raises(TimeoutError, match="table_execution_timeout"):
         execute_plan(state.sqlite, TablePlan("count", (table_id,)))
 
@@ -282,6 +322,27 @@ def test_cell_verifier_recomputes_supported_arithmetic(plan, claim, method):
     assert source.table_id == table_id
     assert source.cells
     assert source.header_refs
+
+
+def test_xlsx_percentage_points_reach_cell_citations_and_verifier():
+    state, table_id = table_state(
+        [["Name", "Rate"], ["alpha", 0.125]],
+        name="percentages.xlsx",
+        source_type="xlsx",
+        number_formats={(1, 1): "0.0%"},
+    )
+    plan = TablePlan("mean", (table_id,), value_column=1)
+    source = _sources_for_execution(state.sqlite, execute_plan(state.sqlite, plan), plan)[0]
+
+    cited = {cell.cell_ref: cell for cell in source.cells}["Sheet!B2"]
+    correct = support.validate_answer_claims("The mean is 12.5%. [[src:S1]]", [source])
+    underlying_scalar = support.validate_answer_claims("The mean is 0.125%. [[src:S1]]", [source])
+
+    assert cited.raw_value == "0.125"
+    assert cited.normalized_value == "12.5"
+    assert cited.unit == "%"
+    assert correct["claims"][0]["numeric_verification"]["status"] == "entailed"
+    assert underlying_scalar["claims"][0]["numeric_verification"]["status"] == "contradicted"
 
 
 def test_cell_verifier_reports_contradiction_unit_mismatch_missing_cell_and_comparison():

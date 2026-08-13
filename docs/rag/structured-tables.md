@@ -31,16 +31,21 @@ replacement occurs in the same SQLite transaction as chunks and assets.
 - Signs, scientific notation, percentages, units, missing values, booleans,
   dates, and datetimes are recognized conservatively. Units are stored apart
   from the normalized number.
+- `normalized_value` stores percentages in percentage points. For example, an
+  XLSX scalar `0.125` formatted as `0.0%` retains raw value `0.125` and
+  normalizes to `12.5` with unit `%`, matching textual `12.5%` input.
 - IDs derive from document identity, structural location, and unchanged table
   content, so identical reingestion produces identical IDs.
 - PDF boxes remain in the original page coordinate system. Line tables use
   parser cell boxes when available; borderless tables derive boxes from words.
-- CSV records detected encoding and delimiter and preserves blank cells and row
-  order. Row, column, cell-count, and cell-length limits emit explicit warnings.
+- CSV validates decoding across the complete stream, records the selected
+  encoding and delimiter, and preserves blank cells and row order. Row, column,
+  cell-count, and cell-length limits emit explicit warnings.
 - XLSX treats each non-empty worksheet as one deterministic table. It preserves
   sheet/cell references, merged ranges, number formats, and formula text.
-  Cephalon does not ask openpyxl to recalculate formulas and does not invent a
-  cached value when one is unavailable.
+  A cached formula value is retained as `effective_value` when the workbook
+  supplies one. Cephalon does not ask openpyxl to recalculate formulas and does
+  not invent a result when a cache is unavailable.
 
 ## Reindex and rollback
 
@@ -69,11 +74,15 @@ future constrained model planner cannot smuggle SQL or identifiers into the
 executor.
 
 `services/table_retrieval.py` validates the plan against stored columns and
-executes application-owned parameterized reads. Supported operations are
-lookup, filter, sort, group, min, max, sum, mean, count, compare, difference,
-and percentage. Arithmetic uses `Decimal`. Generic expressed-unit lookups with
-several matches return the complete bounded candidate set with citations and
-zero generation calls; they never let the generation model guess one value.
+executes application-owned parameterized reads. The executor supports lookup,
+filter, sort, group, min, max, sum, mean, count, compare, difference, and
+percentage. Arithmetic uses `Decimal`. The normal deterministic language router
+currently produces lookup, filter, sort, min, max, sum, mean, and count plans.
+Group, compare, difference, and percentage require explicit validated operands
+and therefore fall back during ordinary question routing instead of guessing
+row or cell identity. Generic expressed-unit lookups with several matches
+return the complete bounded candidate set with citations and zero generation
+calls; they never let the generation model guess one value.
 Mixed units, missing columns,
 ambiguous tables/filters, missing operands, division by zero, and unrecognized
 questions fall back to ordinary hybrid retrieval.
@@ -81,8 +90,10 @@ questions fall back to ordinary hybrid retrieval.
 Hard bounds are 16 tables per plan, 64 candidate tables, 5,000 cells examined
 per candidate during planning, 50,000 cells scanned during execution, 24 result
 rows or requested-unit candidates, 8,000 context characters, 250 ms for
-planning and 250 ms for SQLite execution. A SQLite progress handler enforces
-the execution deadline and is always removed afterward.
+planning and 250 ms end-to-end for plan execution. A SQLite progress handler
+interrupts database work, and explicit deadline checks cover post-query cell
+materialization, filtering, arithmetic, grouping, sorting, and formatting. The
+progress handler is always removed afterward.
 
 Lookup evidence is additive: structured candidates cannot suppress nearby
 prose when several values share a unit. Selected table results are emitted as

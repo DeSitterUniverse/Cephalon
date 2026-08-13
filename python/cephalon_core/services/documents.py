@@ -155,22 +155,33 @@ def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
 
 def _extract_csv_document(path: str) -> ExtractedDocument:
     warnings: list[str] = []
-    handle = None
-    for encoding in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+    with open(path, "rb") as binary_handle:
+        prefix = binary_handle.read(4)
+    if prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings = ("utf-16",)
+    elif prefix.startswith(b"\xef\xbb\xbf"):
+        encodings = ("utf-8-sig", "latin-1")
+    else:
+        encodings = ("utf-8", "latin-1")
+    encoding = None
+    for candidate in encodings:
         try:
-            handle = open(path, newline="", encoding=encoding)
-            sample = handle.read(8192)
-            handle.seek(0)
+            # Validate the complete stream so a late invalid byte cannot pass
+            # sampling and fail halfway through table extraction.
+            with open(path, encoding=candidate) as validation_handle:
+                while validation_handle.read(64 * 1024):
+                    pass
+            encoding = candidate
             break
         except UnicodeError:
-            if handle is not None:
-                handle.close()
-            handle = None
-    if handle is None:
+            continue
+    if encoding is None:
         raise ValueError("CSV encoding could not be decoded safely.")
     if encoding not in {"utf-8-sig", "utf-8"}:
         warnings.append(f"csv_encoding_fallback:{encoding}")
-    with handle:
+    with open(path, newline="", encoding=encoding) as handle:
+        sample = handle.read(8192)
+        handle.seek(0)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         except csv.Error:
@@ -209,13 +220,16 @@ def _extract_csv_document(path: str) -> ExtractedDocument:
 
 def _extract_xlsx_document(path: str) -> ExtractedDocument:
     workbook = openpyxl.load_workbook(path, data_only=False, read_only=False)
+    cached_workbook = openpyxl.load_workbook(path, data_only=True, read_only=False)
     warnings: list[str] = []
     tables: list[StructuredTable] = []
     blocks: list[DocumentBlock] = []
     try:
         for sheet_index, sheet in enumerate(workbook.worksheets):
+            cached_sheet = cached_workbook[sheet.title]
             rows: list[list[object]] = []
             formulas: dict[tuple[int, int], str] = {}
+            effective_values: dict[tuple[int, int], object] = {}
             number_formats: dict[tuple[int, int], str] = {}
             for row_index, cells in enumerate(sheet.iter_rows()):
                 if row_index >= MAX_TABLE_ROWS:
@@ -227,6 +241,9 @@ def _extract_xlsx_document(path: str) -> ExtractedDocument:
                     if cell.data_type == "f" and value is not None:
                         formula = str(value)
                         formulas[(row_index, column_index)] = formula if formula.startswith("=") else f"={formula}"
+                        cached_value = cached_sheet.cell(row=cell.row, column=cell.column).value
+                        if cached_value is not None:
+                            effective_values[(row_index, column_index)] = cached_value
                     number_formats[(row_index, column_index)] = str(cell.number_format or "")
                     values.append(value)
                 rows.append(values)
@@ -242,9 +259,10 @@ def _extract_xlsx_document(path: str) -> ExtractedDocument:
                 sheet_name=sheet.title,
                 sheet_index=sheet_index,
                 formulas=formulas,
+                effective_values=effective_values,
                 number_formats=number_formats,
                 merged_ranges=merged_ranges,
-                provenance={"formula_mode": "preserve_formula_no_recalculation"},
+                provenance={"formula_mode": "preserve_formula_use_cached_value_without_recalculation"},
             )
             tables.append(table)
             blocks.append(DocumentBlock(
@@ -256,6 +274,7 @@ def _extract_xlsx_document(path: str) -> ExtractedDocument:
             ))
     finally:
         workbook.close()
+        cached_workbook.close()
     return ExtractedDocument(
         text="\n\n".join(block.text for block in blocks),
         extraction_mode="native_structured",

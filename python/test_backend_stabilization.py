@@ -1,7 +1,9 @@
 import asyncio
 from datetime import date
 import os
+import re
 import sqlite3
+import zipfile
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -577,6 +579,10 @@ def test_typed_table_values_are_conservative_and_exact():
         typed = table_models.type_value(raw)
         assert (typed.normalized_value, typed.value_type, typed.unit) == expected
     assert table_models.type_value(date(2026, 8, 12)).normalized_value == "2026-08-12"
+    xlsx_percent = table_models.type_value(0.125, number_format="0.0%")
+    assert (xlsx_percent.raw_value, xlsx_percent.normalized_value, xlsx_percent.unit) == ("0.125", "12.5", "%")
+    assert table_models.type_value(0, number_format="0%").normalized_value == "0"
+    assert table_models.type_value(0.125, number_format='0.0"%"').value_type == "decimal"
 
 
 def test_typed_table_limits_are_bounded_and_warn(monkeypatch):
@@ -625,6 +631,17 @@ def test_csv_typed_tables_round_trip_stable_ids_and_cascade(monkeypatch, tmp_pat
     delete_document_rows(state, first["doc_id"])
     assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM tables")["count"] == 0
     assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM table_cells")["count"] == 0
+
+
+def test_csv_encoding_validation_covers_bytes_after_the_dialect_sample(tmp_path):
+    path = tmp_path / "late-latin1.csv"
+    path.write_bytes(b"Name,Value\nrow," + (b"a" * 8200) + b"\xe9\n")
+
+    extracted = documents.extract_document(str(path))
+
+    assert "csv_encoding_fallback:latin-1" in extracted.warnings
+    assert extracted.tables[0].provenance["encoding"] == "latin-1"
+    assert extracted.tables[0].raw_rows[1][1].endswith("\xe9")
 
 
 def test_typed_table_reindex_failure_rolls_back_previous_rows(monkeypatch, tmp_path):
@@ -705,11 +722,50 @@ def test_xlsx_typed_tables_preserve_sheets_formulas_formats_and_merges(tmp_path)
     cells = {cell.cell_ref: cell for cell in table.cells}
     assert cells["Results!A2"].normalized_value == "123456789012345"
     assert cells["Results!B2"].value_type == "percentage"
-    assert cells["Results!B2"].normalized_value == "0.125"
+    assert cells["Results!B2"].raw_value == "0.125"
+    assert cells["Results!B2"].normalized_value == "12.5"
     assert cells["Results!C2"].formula == "=A2*2"
     assert cells["Results!C2"].effective_value is None
     assert cells["Results!F2"].value_type == "datetime"
     assert table.provenance["merged_ranges"] == ["D1:E1"]
+
+
+def test_xlsx_formula_uses_cached_value_without_recalculation(tmp_path):
+    path = tmp_path / "cached-formula.xlsx"
+    workbook = documents.openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Results"
+    sheet.append(["Input", "Formula"])
+    sheet.append([4, "=A2*2"])
+    workbook.save(path)
+    workbook.close()
+
+    with zipfile.ZipFile(path, "r") as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    worksheet_name = "xl/worksheets/sheet1.xml"
+    worksheet = members[worksheet_name].decode("utf-8")
+    worksheet, replacements = re.subn(
+        r'(<c r="B2"[^>]*><f>.*?</f><v>).*?(</v></c>)',
+        r"\g<1>8\g<2>",
+        worksheet,
+        count=1,
+    )
+    assert replacements == 1
+    members[worksheet_name] = worksheet.encode("utf-8")
+    rewritten = tmp_path / "cached-formula-rewritten.xlsx"
+    with zipfile.ZipFile(rewritten, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    rewritten.replace(path)
+
+    extracted = documents.extract_document(str(path))
+    formula_cell = {cell.cell_ref: cell for cell in extracted.tables[0].cells}["Results!B2"]
+    assert formula_cell.raw_value == "=A2*2"
+    assert formula_cell.formula == "=A2*2"
+    assert formula_cell.effective_value == "8"
+    assert formula_cell.normalized_value == "8"
+    assert formula_cell.value_type == "integer"
+    assert "formula_cached_value_unavailable" not in formula_cell.parse_warnings
 
 
 def test_corrupt_xlsx_fails_without_creating_partial_table(tmp_path):
