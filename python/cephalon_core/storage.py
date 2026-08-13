@@ -584,6 +584,10 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "018_typed_tables")
 
+    if not migration_applied(conn, "019_table_execution_trace"):
+        add_column_if_missing(conn, "retrieval_queries", "table_execution_json", "TEXT NOT NULL DEFAULT '{}'")
+        mark_migration(conn, "019_table_execution_trace")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1021,9 +1025,9 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
             """
             INSERT INTO retrieval_queries (
                 id, raw_query, normalized_query, rewritten_query, retrieval_mode,
-                created_at, subqueries_json, no_answer_json, ledger_json
+                created_at, subqueries_json, no_answer_json, ledger_json, table_execution_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 query_id,
@@ -1035,6 +1039,7 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
                 json.dumps(subqueries, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(no_answer, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(trace.get("evidence_ledger") or {}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(trace.get("table_execution") or {}, ensure_ascii=False, separators=(",", ":")),
             ),
         )
         stage_map = {
@@ -1157,6 +1162,7 @@ def get_retrieval_trace(conn: sqlite3.Connection, query_id: str) -> dict[str, An
         "subqueries": json.loads(row["subqueries_json"] or "[]"),
         "no_answer": json.loads(row["no_answer_json"] or "{}"),
         "evidence_ledger": json.loads(row["ledger_json"] or "{}") if "ledger_json" in row.keys() else {},
+        "table_execution": json.loads(row["table_execution_json"] or "{}") if "table_execution_json" in row.keys() else {},
         "latency": json.loads(latency["payload_json"] or "{}") if latency else {},
         "candidates": candidates,
         "final_context": [json.loads(item["payload_json"]) for item in context_rows],

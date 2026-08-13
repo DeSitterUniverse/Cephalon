@@ -59,3 +59,18 @@ support classifier before storage. Reasoning-channel tokens and explicit
 `<think>` blocks are removed before this final classification, and validator
 JSON-schema failures are recorded with a deterministic fallback rather than a
 second repair loop.
+
+## Structured table evidence
+
+B2 table results enter the existing ledger as ordinary source records with
+`source_kind=table`. Their provenance carries the validated operation, stable
+table ID, and exact result-cell references. Named-document unit fallback
+sources remain `source_kind=text` and carry their bounded candidate values on
+the original chunk; this prevents a text fallback from masquerading as exact
+cell evidence. Planning ambiguity, invalid units, bounds, and timeouts return
+to hybrid retrieval and never mark an unresolved requirement sufficient.
+
+The `[[src:S1]]` marker and ledger evidence IDs are unchanged. Migration 019
+persists the complete `table_execution` trace so reload and diagnostics retain
+the plan, bounds, fallback reason, candidate sources, and zero-model-call
+decision.

@@ -148,3 +148,16 @@ argument invalidates a paired baseline.
 
 Generated JSON and PDFs must remain untracked. Only compact PR descriptions and
 durable production code/docs belong in Git.
+
+## B2 table-execution result
+
+The 2026-08-12 B1/B2 pair reused one immutable 72-paper index and ran
+`tables-v1` with Ling 3.0 Tiny Q6_K and the adopted Jina v3.5 Q8_0 reranker.
+B1 scored 1/18 numeric assertions (5.56%); B2 scored 17/18 (94.44%), a 94.12%
+relative reduction in numeric error and above the 90% exact-value gate. There
+were no request failures. Mean answer latency changed from 21.47 s to 5.95 s;
+the bounded unit-answer route made zero chat-completion calls. Exact-string
+accepted-answer matching fell to zero because ambiguity-preserving candidate
+lists intentionally do not copy the frozen prose answer, so numeric grading,
+valid citation accounting, and the explicit safety behavior are the relevant
+B2 gates.

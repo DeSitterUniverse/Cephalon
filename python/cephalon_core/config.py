@@ -105,6 +105,7 @@ class Settings:
         if self.reranker_backend not in {"auto", "gguf", "transformers"}:
             self.reranker_backend = "auto"
         self.typed_tables = os.getenv("CEPHALON_TYPED_TABLES", "1") != "0"
+        self.table_execution = os.getenv("CEPHALON_TABLE_EXECUTION", "1") != "0"
         self.obsidian_vault_dir = os.path.abspath(os.path.expanduser(
             os.getenv("CEPHALON_OBSIDIAN_VAULT_DIR", "~/Documents/Obsidian Vault")
         ))

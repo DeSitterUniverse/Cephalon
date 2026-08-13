@@ -181,6 +181,20 @@ def build_system_instruction(
         "for general reasoning, conversation, brainstorming, coding help, or synthesis that does not require document evidence. "
         "Use retrieved citations only for claims that rely on local documents. "
     )
+    table_trace = ((query_meta or {}).get("trace") or {}).get("table_execution") or {}
+    table_instruction = ""
+    if table_trace.get("requested_unit_candidate_count"):
+        candidate_rows = table_trace.get("requested_unit_candidates") or []
+        candidate_text = " | ".join(
+            f"{row.get('source_id')}: {'; '.join(str(value) for value in row.get('values') or [])}"
+            for row in candidate_rows
+            if row.get("values")
+        )
+        table_instruction = (
+            "For an expressed-unit lookup, preserve the deterministic candidate values exactly. "
+            "If the question does not disambiguate several supported values, report every bounded candidate with its source tag instead of choosing or inventing one. "
+            f"The complete bounded candidate set is: {candidate_text}. "
+        )
     return (
         "You are Cephalon, a local assistant with persistent chat memory and optional document retrieval. "
         "Answer in a capable, direct voice that fits the current conversation and the configured external server model's natural style. "
@@ -194,6 +208,7 @@ def build_system_instruction(
         "Do not invent source tags. Do not expose internal parsing instructions. "
         "For multi-part questions, answer each subquestion separately and keep citations attached to the relevant subquestion. "
         f"{no_answer_instruction}"
+        f"{table_instruction}"
         f"Current retrieval confidence: {confidence.get('confidence', 'unknown')} / uncertainty: {confidence.get('uncertainty', 'unknown')} / no_answer: {confidence.get('no_answer', False)}.\n\n"
         f"{extra_instruction.strip()}\n\n"
         f"{architecture_context}"
@@ -442,6 +457,15 @@ def stream_response_events(
     *,
     response_effort: ResponseEffort = "balanced",
 ) -> Iterator[tuple[str, str]]:
+    deterministic_answer = _deterministic_unit_answer(prompt, query_meta)
+    if deterministic_answer is not None:
+        if query_meta is not None:
+            query_meta["completion_call_count"] = 0
+            query_meta["deterministic_answer"] = "bounded_expressed_unit_candidates"
+        yield "phase", "deterministic_table"
+        yield "token", deterministic_answer
+        return
+
     effort = response_effort if response_effort in {"quick", "balanced", "thorough"} else "balanced"
     extra_instruction = ""
     generation_settings = _settings_for_response_effort(settings, effort)
@@ -497,6 +521,43 @@ def stream_response_events(
             yield "token", content
     if query_meta is not None:
         query_meta["completion_call_count"] = completion_calls
+
+
+def _deterministic_unit_answer(prompt: str, query_meta: dict[str, Any] | None) -> str | None:
+    """Render a cited ambiguity-preserving answer for bounded unit lookups."""
+    if not re.search(r"\bexpressed\s+in\s+(?:[A-Za-zµμ%]+|percent)\b", prompt):
+        return None
+    table_trace = ((query_meta or {}).get("trace") or {}).get("table_execution") or {}
+    candidate_rows = table_trace.get("requested_unit_candidates") or []
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for row in candidate_rows:
+        source_id = str(row.get("source_id") or "")
+        if not re.fullmatch(r"S\d+", source_id):
+            continue
+        for raw_value in row.get("values") or []:
+            value = str(raw_value).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            candidates.append((value, source_id))
+            if len(candidates) >= 24:
+                break
+        if len(candidates) >= 24:
+            break
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        value, source_id = candidates[0]
+        return f"The named document reports **{value}**. [[src:{source_id}]]"
+    lines = [
+        "The named document contains these bounded matches for the requested unit:",
+        "",
+        *(f"- **{value}** [[src:{source_id}]]" for value, source_id in candidates),
+        "",
+        "The question does not identify which result is intended, so I have not guessed among them.",
+    ]
+    return "\n".join(lines)
 
 
 def _active_context_window(app_state, fallback: int) -> int:
