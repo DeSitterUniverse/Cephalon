@@ -1,6 +1,9 @@
 import asyncio
+from datetime import date
 import os
+import re
 import sqlite3
+import zipfile
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -15,7 +18,7 @@ from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.routes import documents as document_routes
 from cephalon_core.app_factory import create_app
 from cephalon_core import routes
-from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval
+from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval, table_ingestion, table_models
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -562,6 +565,233 @@ def test_document_readers_stream_hash_and_avoid_duplicate_extraction(monkeypatch
     assert calls[-1]["read_only"] is True
 
 
+def test_typed_table_values_are_conservative_and_exact():
+    cases = {
+        "-12": ("-12", "integer", None),
+        "1.20e-7": ("0.00000012", "decimal", None),
+        "12.50%": ("12.5", "percentage", "%"),
+        "-4.25 kg": ("-4.25", "decimal", "kg"),
+        "12345678901234567890.123400": ("12345678901234567890.1234", "decimal", None),
+        "1,23": ("1,23", "text", None),
+        "": (None, "missing", None),
+    }
+    for raw, expected in cases.items():
+        typed = table_models.type_value(raw)
+        assert (typed.normalized_value, typed.value_type, typed.unit) == expected
+    assert table_models.type_value(date(2026, 8, 12)).normalized_value == "2026-08-12"
+    xlsx_percent = table_models.type_value(0.125, number_format="0.0%")
+    assert (xlsx_percent.raw_value, xlsx_percent.normalized_value, xlsx_percent.unit) == ("0.125", "12.5", "%")
+    assert table_models.type_value(0, number_format="0%").normalized_value == "0"
+    assert table_models.type_value(0.125, number_format='0.0"%"').value_type == "decimal"
+
+
+def test_typed_table_limits_are_bounded_and_warn(monkeypatch):
+    monkeypatch.setattr(table_models, "MAX_TABLE_ROWS", 2)
+    monkeypatch.setattr(table_models, "MAX_CELL_CHARACTERS", 4)
+    table = table_models.build_table(
+        [["Head"], ["12345"], ["discarded"]], source_type="csv", table_index=0
+    )
+    assert table.row_count == 2
+    assert "row_limit_reached" in table.warnings
+    assert table.cells[1].raw_value == "12345"
+    assert table.cells[1].parse_warnings == ["cell_length_limit_exceeded"]
+
+
+def test_csv_typed_tables_round_trip_stable_ids_and_cascade(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "measurements.csv"
+    file_path.write_text(
+        "Name,Percent,Mass,Scientific,Missing\nalpha,12.50%,-4.25 kg,1.20e-7,\n",
+        encoding="utf-8",
+    )
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    assert first["status"] == "ready"
+    first_tables = table_ingestion.load_document_tables(state.sqlite, first["doc_id"])
+    first_ids = [cell["id"] for cell in first_tables[0]["cells"]]
+    values = {cell["cell_ref"]: cell for cell in first_tables[0]["cells"]}
+    assert values["csv:r2c2"]["normalized_value"] == "12.5"
+    assert values["csv:r2c2"]["unit"] == "%"
+    assert values["csv:r2c3"]["normalized_value"] == "-4.25"
+    assert values["csv:r2c3"]["unit"] == "kg"
+    assert values["csv:r2c4"]["normalized_value"] == "0.00000012"
+    assert values["csv:r2c5"]["value_type"] == "missing"
+
+    repeated = asyncio.run(process_single_file(
+        state, str(file_path), RagSettings(), existing_doc_id=first["doc_id"]
+    ))
+    assert repeated["status"] == "ready", repeated
+    second_ids = [cell["id"] for cell in table_ingestion.load_document_tables(state.sqlite, first["doc_id"])[0]["cells"]]
+    assert second_ids == first_ids
+
+    delete_document_rows(state, first["doc_id"])
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM tables")["count"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM table_cells")["count"] == 0
+
+
+def test_csv_encoding_validation_covers_bytes_after_the_dialect_sample(tmp_path):
+    path = tmp_path / "late-latin1.csv"
+    path.write_bytes(b"Name,Value\nrow," + (b"a" * 8200) + b"\xe9\n")
+
+    extracted = documents.extract_document(str(path))
+
+    assert "csv_encoding_fallback:latin-1" in extracted.warnings
+    assert extracted.tables[0].provenance["encoding"] == "latin-1"
+    assert extracted.tables[0].raw_rows[1][1].endswith("\xe9")
+
+
+def test_typed_table_reindex_failure_rolls_back_previous_rows(monkeypatch, tmp_path):
+    state = build_memory_state()
+    file_path = tmp_path / "atomic.csv"
+    file_path.write_text("Name,Value\nold,1\n", encoding="utf-8")
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
+    original = table_ingestion.persistence_rows
+    file_path.write_text("Name,Value\nnew,2\n", encoding="utf-8")
+
+    def duplicate_cell(*args, **kwargs):
+        rows = original(*args, **kwargs)
+        rows["cells"].append(rows["cells"][0])
+        return rows
+
+    monkeypatch.setattr(table_ingestion, "persistence_rows", duplicate_cell)
+    failed = asyncio.run(process_single_file(
+        state, str(file_path), RagSettings(), existing_doc_id=first["doc_id"]
+    ))
+    assert failed["status"] == "failed"
+    restored = table_ingestion.load_document_tables(state.sqlite, first["doc_id"])
+    assert [cell["raw_value"] for cell in restored[0]["cells"]] == ["Name", "Value", "old", "1"]
+    assert state.sqlite.execute(
+        "SELECT status FROM documents WHERE id = ?", (first["doc_id"],)
+    ).fetchone()[0] == "ready"
+
+
+def test_typed_table_migration_preserves_existing_stack_a_rows():
+    state = build_memory_state()
+    state.sqlite.execute(
+        "INSERT INTO documents (id, path, content_hash, status) VALUES ('old-doc', 'old.txt', 'hash', 'ready')"
+    )
+    state.sqlite.commit()
+    for table in ("table_cells", "table_rows", "table_columns", "tables"):
+        state.sqlite.execute(f"DROP TABLE {table}")
+    state.sqlite.execute("DELETE FROM schema_migrations WHERE version = '018_typed_tables'")
+    state.sqlite.commit()
+
+    storage.run_migrations(state.sqlite, state.settings)
+
+    assert state.sqlite.execute("SELECT path FROM documents WHERE id = 'old-doc'").fetchone()[0] == "old.txt"
+    assert state.sqlite.execute(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = '018_typed_tables'"
+    ).fetchone()[0] == 1
+
+
+def test_structured_table_parser_version_requires_explicit_reindex():
+    from cephalon_core.services.ingestion import parser_version_for_path
+
+    assert parser_version_for_path("measurements.csv") == table_models.TABLE_PARSER_VERSION
+    assert parser_version_for_path("measurements.xlsx") == table_models.TABLE_PARSER_VERSION
+    assert parser_version_for_path("paper.pdf") == documents.PDF_PARSER_VERSION
+
+
+def test_xlsx_typed_tables_preserve_sheets_formulas_formats_and_merges(tmp_path):
+    path = tmp_path / "workbook.xlsx"
+    workbook = documents.openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Results"
+    sheet.append(["Count", "Rate", "Formula", "Merged", None, "Date"])
+    # Excel stores numeric cells with about 15 significant digits. Large exact
+    # decimal handling is covered by the raw-text/CSV tests instead.
+    sheet.append([123456789012345, 0.125, "=A2*2", "group", None, date(2026, 8, 12)])
+    sheet["B2"].number_format = "0.0%"
+    sheet.merge_cells("D1:E1")
+    workbook.save(path)
+    workbook.close()
+
+    extracted = documents.extract_document(str(path))
+    assert extracted.extraction_mode == "native_structured"
+    assert len(extracted.tables) == 1
+    table = extracted.tables[0]
+    cells = {cell.cell_ref: cell for cell in table.cells}
+    assert cells["Results!A2"].normalized_value == "123456789012345"
+    assert cells["Results!B2"].value_type == "percentage"
+    assert cells["Results!B2"].raw_value == "0.125"
+    assert cells["Results!B2"].normalized_value == "12.5"
+    assert cells["Results!C2"].formula == "=A2*2"
+    assert cells["Results!C2"].effective_value is None
+    assert cells["Results!F2"].value_type == "datetime"
+    assert table.provenance["merged_ranges"] == ["D1:E1"]
+
+
+def test_xlsx_formula_uses_cached_value_without_recalculation(tmp_path):
+    path = tmp_path / "cached-formula.xlsx"
+    workbook = documents.openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Results"
+    sheet.append(["Input", "Formula"])
+    sheet.append([4, "=A2*2"])
+    workbook.save(path)
+    workbook.close()
+
+    with zipfile.ZipFile(path, "r") as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    worksheet_name = "xl/worksheets/sheet1.xml"
+    worksheet = members[worksheet_name].decode("utf-8")
+    worksheet, replacements = re.subn(
+        r'(<c r="B2"[^>]*><f>.*?</f><v>).*?(</v></c>)',
+        r"\g<1>8\g<2>",
+        worksheet,
+        count=1,
+    )
+    assert replacements == 1
+    members[worksheet_name] = worksheet.encode("utf-8")
+    rewritten = tmp_path / "cached-formula-rewritten.xlsx"
+    with zipfile.ZipFile(rewritten, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    rewritten.replace(path)
+
+    extracted = documents.extract_document(str(path))
+    formula_cell = {cell.cell_ref: cell for cell in extracted.tables[0].cells}["Results!B2"]
+    assert formula_cell.raw_value == "=A2*2"
+    assert formula_cell.formula == "=A2*2"
+    assert formula_cell.effective_value == "8"
+    assert formula_cell.normalized_value == "8"
+    assert formula_cell.value_type == "integer"
+    assert "formula_cached_value_unavailable" not in formula_cell.parse_warnings
+
+
+def test_corrupt_xlsx_fails_without_creating_partial_table(tmp_path):
+    path = tmp_path / "corrupt.xlsx"
+    path.write_bytes(b"not an office archive")
+
+    with pytest.raises(Exception):
+        documents.extract_document(str(path))
+
+
+def test_typed_tables_flag_rolls_back_to_existing_text_index(monkeypatch, tmp_path):
+    state = build_memory_state()
+    state.settings.typed_tables = False
+    path = tmp_path / "rollback.csv"
+    path.write_text("Metric,Value\nRecall,0.93\n", encoding="utf-8")
+
+    async def fake_embedding(_app_state, _text: str):
+        return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
+
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    result = asyncio.run(process_single_file(state, str(path), RagSettings()))
+    assert result["status"] == "ready"
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM tables")["count"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM chunks WHERE doc_id = ?", (result["doc_id"],))["count"] > 0
+
+
 def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_footer(monkeypatch):
     def word(text, x0, top, x1, bottom, size=10, fontname="Regular"):
         return {
@@ -576,6 +806,11 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
 
     class FakeTable:
         bbox = (40, 180, 300, 240)
+        rows = [
+            SimpleNamespace(cells=[(40, 180, 160, 200), (160, 180, 300, 200)]),
+            SimpleNamespace(cells=[(40, 200, 160, 220), (160, 200, 300, 220)]),
+            SimpleNamespace(cells=[(40, 220, 160, 240), (160, 220, 300, 240)]),
+        ]
 
         def extract(self):
             return [["Model", "Recall"], ["Baseline", "72.4"], ["RATE", "81.7"]]
@@ -642,6 +877,7 @@ def test_rich_pdf_parser_preserves_pages_headings_tables_and_removes_repeated_fo
     assert parsed.page_count == 2
     assert "Proceedings" not in parsed.text
     assert any(block.block_type == "table" and "RATE | 81.7" in block.text for block in parsed.blocks)
+    assert parsed.tables[0].cells[0].bounding_box == (40.0, 180.0, 160.0, 200.0)
     paragraph = next(block for block in parsed.blocks if "improved substantially" in block.text)
     assert paragraph.page_number == 1
     assert paragraph.heading_path == ["3 Results"]

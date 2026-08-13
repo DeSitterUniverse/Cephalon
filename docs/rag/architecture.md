@@ -30,6 +30,17 @@ The Jina reranker is an external llama.cpp Vulkan service. Retrieval and
 context assembly do not load a chat model; the selected chat model is required
 only for answer generation and later model-assisted verification.
 
+## Typed table index
+
+Migration 018 adds normalized `tables`, `table_columns`, `table_rows`, and
+`table_cells` records for PDF, CSV, and XLSX sources. Structured records and
+their legacy table-text chunks are produced from the same extraction result and
+replaced in one transaction. PDF cell boxes remain page-relative; CSV retains
+dialect/encoding; XLSX retains worksheet references, merged ranges, formats,
+and formulas without claiming recalculation. Stable content/location-derived
+IDs make identical reingestion deterministic. See [structured-tables.md](structured-tables.md)
+for the complete schema, limits, and rollback contract.
+
 ## Hierarchical context assembly
 
 `services/context_assembly.py` converts reranked child hits into non-overlapping
@@ -139,7 +150,8 @@ No generated code, SQL, or expression is executed.
 The answer boundary discards the external server's `reasoning_content` and
 filters explicit `<think>` blocks, including tags split across stream chunks.
 Only clean final prose is streamed, stored, rendered, and passed to
-verification. Thorough mode drafts once and audits once with Gemma. The audit
+verification. Thorough mode drafts once and audits once with the selected chat
+model. The audit
 uses llama.cpp JSON-schema constrained output when available and records a
 deterministic fallback reason when parsing or transport fails; this never adds
 another model call. Deterministic arithmetic, negation, citation, and

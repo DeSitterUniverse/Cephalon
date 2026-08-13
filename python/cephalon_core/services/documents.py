@@ -11,6 +11,7 @@ import pptx
 from .. import storage
 from ..validators import is_supported_file
 from .pdf_parser import DocumentBlock, PdfAsset, PARSER_VERSION as PDF_PARSER_VERSION, parse_pdf
+from .table_models import MAX_TABLE_ROWS, StructuredTable, TABLE_PARSER_VERSION, build_table
 
 SKIPPED_DIRECTORY_NAMES = {
     ".git",
@@ -31,6 +32,7 @@ class ExtractedDocument:
     warnings: list[str] = field(default_factory=list)
     parser_version: str = "cephalon-basic-2026-05"
     assets: list[PdfAsset] = field(default_factory=list)
+    tables: list[StructuredTable] = field(default_factory=list)
 
 
 def get_file_hash(path: str) -> str:
@@ -132,7 +134,13 @@ def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
             warnings=parsed.warnings,
             parser_version=parsed.parser_version,
             assets=parsed.assets,
+            tables=parsed.tables,
         )
+
+    if ext == ".csv" and not force_text:
+        return _extract_csv_document(path)
+    if ext == ".xlsx" and not force_text:
+        return _extract_xlsx_document(path)
 
     text, extraction_mode = extract_text(path, force_text=force_text)
     block = DocumentBlock(text=text, page_number=1) if text.strip() else None
@@ -142,6 +150,139 @@ def extract_document(path: str, force_text: bool = False) -> ExtractedDocument:
         blocks=[block] if block else [],
         page_count=1 if block else 0,
         parser_version=PDF_PARSER_VERSION if ext == ".pdf" else "cephalon-basic-2026-05",
+    )
+
+
+def _extract_csv_document(path: str) -> ExtractedDocument:
+    warnings: list[str] = []
+    with open(path, "rb") as binary_handle:
+        prefix = binary_handle.read(4)
+    if prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings = ("utf-16",)
+    elif prefix.startswith(b"\xef\xbb\xbf"):
+        encodings = ("utf-8-sig", "latin-1")
+    else:
+        encodings = ("utf-8", "latin-1")
+    encoding = None
+    for candidate in encodings:
+        try:
+            # Validate the complete stream so a late invalid byte cannot pass
+            # sampling and fail halfway through table extraction.
+            with open(path, encoding=candidate) as validation_handle:
+                while validation_handle.read(64 * 1024):
+                    pass
+            encoding = candidate
+            break
+        except UnicodeError:
+            continue
+    if encoding is None:
+        raise ValueError("CSV encoding could not be decoded safely.")
+    if encoding not in {"utf-8-sig", "utf-8"}:
+        warnings.append(f"csv_encoding_fallback:{encoding}")
+    with open(path, newline="", encoding=encoding) as handle:
+        sample = handle.read(8192)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        except csv.Error:
+            dialect = csv.excel
+            warnings.append("csv_dialect_fallback")
+        rows = []
+        for index, row in enumerate(csv.reader(handle, dialect)):
+            if index >= MAX_TABLE_ROWS:
+                warnings.append("row_limit_reached")
+                break
+            rows.append(row)
+    table = build_table(
+        rows,
+        source_type="csv",
+        table_index=0,
+        provenance={"encoding": encoding, "delimiter": dialect.delimiter},
+        warnings=warnings,
+    )
+    block = DocumentBlock(
+        text=table.text,
+        page_number=1,
+        block_type="table",
+        provenance={"table_index": 0, "source_type": "csv"},
+        structured_table=table,
+    )
+    return ExtractedDocument(
+        text=table.text,
+        extraction_mode="native_structured",
+        blocks=[block] if table.text.strip() else [],
+        page_count=1,
+        warnings=warnings,
+        parser_version=TABLE_PARSER_VERSION,
+        tables=[table],
+    )
+
+
+def _extract_xlsx_document(path: str) -> ExtractedDocument:
+    workbook = openpyxl.load_workbook(path, data_only=False, read_only=False)
+    cached_workbook = openpyxl.load_workbook(path, data_only=True, read_only=False)
+    warnings: list[str] = []
+    tables: list[StructuredTable] = []
+    blocks: list[DocumentBlock] = []
+    try:
+        for sheet_index, sheet in enumerate(workbook.worksheets):
+            cached_sheet = cached_workbook[sheet.title]
+            rows: list[list[object]] = []
+            formulas: dict[tuple[int, int], str] = {}
+            effective_values: dict[tuple[int, int], object] = {}
+            number_formats: dict[tuple[int, int], str] = {}
+            for row_index, cells in enumerate(sheet.iter_rows()):
+                if row_index >= MAX_TABLE_ROWS:
+                    warnings.append(f"sheet:{sheet.title}:row_limit_reached")
+                    break
+                values = []
+                for column_index, cell in enumerate(cells):
+                    value = cell.value
+                    if cell.data_type == "f" and value is not None:
+                        formula = str(value)
+                        formulas[(row_index, column_index)] = formula if formula.startswith("=") else f"={formula}"
+                        cached_value = cached_sheet.cell(row=cell.row, column=cell.column).value
+                        if cached_value is not None:
+                            effective_values[(row_index, column_index)] = cached_value
+                    number_formats[(row_index, column_index)] = str(cell.number_format or "")
+                    values.append(value)
+                rows.append(values)
+            while rows and not any(value not in (None, "") for value in rows[-1]):
+                rows.pop()
+            if not rows:
+                continue
+            merged_ranges = [str(cell_range) for cell_range in sheet.merged_cells.ranges]
+            table = build_table(
+                rows,
+                source_type="xlsx",
+                table_index=sheet_index,
+                sheet_name=sheet.title,
+                sheet_index=sheet_index,
+                formulas=formulas,
+                effective_values=effective_values,
+                number_formats=number_formats,
+                merged_ranges=merged_ranges,
+                provenance={"formula_mode": "preserve_formula_use_cached_value_without_recalculation"},
+            )
+            tables.append(table)
+            blocks.append(DocumentBlock(
+                text=f"--- Sheet: {sheet.title} ---\n{table.text}",
+                page_number=sheet_index + 1,
+                block_type="table",
+                provenance={"table_index": sheet_index, "source_type": "xlsx", "sheet_name": sheet.title},
+                structured_table=table,
+            ))
+    finally:
+        workbook.close()
+        cached_workbook.close()
+    return ExtractedDocument(
+        text="\n\n".join(block.text for block in blocks),
+        extraction_mode="native_structured",
+        blocks=blocks,
+        page_count=len(blocks),
+        warnings=warnings,
+        parser_version=TABLE_PARSER_VERSION,
+        tables=tables,
     )
 
 

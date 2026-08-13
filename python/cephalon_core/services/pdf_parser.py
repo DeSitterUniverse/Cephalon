@@ -11,8 +11,10 @@ from typing import Any
 import pdfplumber
 from pypdf import PdfReader
 
+from .table_models import StructuredTable, build_table
 
-PARSER_VERSION = "cephalon-pdf-layout-2026-07"
+
+PARSER_VERSION = "cephalon-pdf-layout-tables-2026-08"
 TABLE_SETTINGS = {
     "vertical_strategy": "lines",
     "horizontal_strategy": "lines",
@@ -35,6 +37,7 @@ class DocumentBlock:
     element_id: str | None = None
     asset_ids: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
+    structured_table: StructuredTable | None = None
 
     @property
     def section_heading(self) -> str | None:
@@ -63,6 +66,7 @@ class ParsedPdf:
     assets: list[PdfAsset] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     parser_version: str = PARSER_VERSION
+    tables: list[StructuredTable] = field(default_factory=list)
 
 
 @dataclass
@@ -126,6 +130,7 @@ def parse_pdf(path: str) -> ParsedPdf:
         page_count=page_count,
         assets=assets,
         warnings=warnings,
+        tables=[block.structured_table for block in searchable if block.structured_table is not None],
     )
 
 
@@ -317,6 +322,15 @@ def _extract_tables(page, page_number: int, warnings: list[str]) -> tuple[list[D
                     "column_count": width,
                     "table_settings": "lines",
                 },
+                structured_table=build_table(
+                    normalized_rows,
+                    source_type="pdf",
+                    table_index=table_index,
+                    page_number=page_number,
+                    bounding_box=bbox,
+                    cell_boxes=_line_table_cell_boxes(table, len(normalized_rows), width),
+                    provenance={"table_settings": "lines", "coordinate_system": "pdf_page"},
+                ),
             )
         )
     return blocks, boxes
@@ -440,8 +454,43 @@ def _extract_borderless_tables(
                 "column_count": len(text_rows[0]),
                 "table_settings": "text_alignment",
             },
+            structured_table=build_table(
+                text_rows,
+                source_type="pdf",
+                table_index=table_index,
+                page_number=page_number,
+                bounding_box=bbox,
+                provenance={"table_settings": "text_alignment", "coordinate_system": "pdf_page"},
+                cell_boxes=[
+                    [
+                        (
+                            round(min(float(word["x0"]) for word in cell), 3),
+                            round(min(float(word["top"]) for word in cell), 3),
+                            round(max(float(word["x1"]) for word in cell), 3),
+                            round(max(float(word["bottom"]) for word in cell), 3),
+                        ) if cell else None
+                        for cell in row
+                    ]
+                    for row in group
+                ],
+            ),
         ))
     return blocks, boxes
+
+
+def _line_table_cell_boxes(table, row_count: int, column_count: int):
+    """Return pdfplumber cell boxes when its table geometry exposes them."""
+    table_rows = getattr(table, "rows", None)
+    if not table_rows:
+        return None
+    result = []
+    for row in list(table_rows)[:row_count]:
+        cells = list(getattr(row, "cells", []) or [])[:column_count]
+        result.append([
+            tuple(round(float(value), 3) for value in cell) if cell is not None else None
+            for cell in cells
+        ] + [None] * max(0, column_count - len(cells)))
+    return result + [[None] * column_count for _ in range(max(0, row_count - len(result)))]
 
 
 def _words_to_lines(words: list[dict[str, Any]], tolerance: float = 3.0) -> list[_Line]:
