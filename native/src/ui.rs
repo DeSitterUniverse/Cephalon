@@ -80,7 +80,7 @@ impl NativeApp {
     }
 
     fn render_history(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut list = div().flex().flex_col().gap_1().flex_1();
+        let mut list = div().flex().flex_col().gap_1();
         for conversation in &self.data.conversations {
             let id = conversation.id.clone();
             let title = if conversation.title.is_empty() {
@@ -391,7 +391,7 @@ impl NativeApp {
                 .text_color(muted())
                 .child("Sources will appear here after an answer uses the library.");
         }
-        let mut list = div().flex().flex_col().gap_2().flex_1();
+        let mut list = div().flex().flex_col().gap_2();
         for (index, source) in self.selected_sources.iter().enumerate() {
             let doc_id = source.doc_id.clone();
             let key = source_key(source);
@@ -998,7 +998,7 @@ impl NativeApp {
     }
 
     fn render_trace(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut list = div().flex().flex_col().gap_1().flex_1();
+        let mut list = div().flex().flex_col().gap_1();
         for trace in &self.data.traces {
             let id = trace.query_id.clone();
             list = list.child(ui_button(
@@ -1227,7 +1227,7 @@ impl NativeApp {
     }
 
     fn render_evaluation(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut runs = div().flex().flex_col().gap_1().flex_1();
+        let mut runs = div().flex().flex_col().gap_1();
         for run in &self.data.eval_runs {
             runs = runs.child(
                 div()
@@ -3407,7 +3407,7 @@ impl NativeApp {
         } else {
             yellow()
         };
-        let mut body = div().flex().flex_1();
+        let mut body = div().flex().flex_1().min_h_0();
         if self.left_open {
             body = body.child(self.render_library(cx));
         }
@@ -3500,7 +3500,7 @@ impl NativeApp {
     }
 
     fn render_library(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut list = div().flex().flex_col().gap_1().flex_1();
+        let mut list = div().flex().flex_col().gap_1();
         let mut visible_count = 0;
         let query = self.search.to_ascii_lowercase();
         for document in self.data.documents.iter().filter(|document| {
@@ -3774,7 +3774,7 @@ impl NativeApp {
             })
             .map(|conversation| conversation.title.clone())
             .unwrap_or_else(|| "New conversation".into());
-        let mut messages = div().flex().flex_col().gap_3().p_5().flex_1();
+        let mut messages = div().flex().flex_col().gap_3().p_5();
         if self.messages.is_empty() {
             messages = messages.child(
                 div()
@@ -3900,6 +3900,7 @@ impl NativeApp {
             .flex_col()
             .flex_1()
             .h_full()
+            .min_h_0()
             .bg(bg())
             .child(
                 div()
@@ -3926,6 +3927,7 @@ impl NativeApp {
                 div()
                     .id("chat-message-scroll")
                     .flex_1()
+                    .h(px(0.))
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.chat_scroll)
@@ -3936,6 +3938,7 @@ impl NativeApp {
                     .p_4()
                     .flex()
                     .flex_col()
+                    .flex_none()
                     .gap_2()
                     .border_t_1()
                     .border_color(line())
