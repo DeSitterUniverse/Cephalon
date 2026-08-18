@@ -41,8 +41,40 @@ def main() -> None:
     executable_name = "cephalon.exe" if os.name == "nt" else "cephalon"
     shutil.copy2(REPO_ROOT / "target" / "release" / executable_name, package_dir / executable_name)
     shutil.copytree(REPO_ROOT / "backend" / "engine", package_dir / "backend" / "engine")
+    shutil.copytree(REPO_ROOT / "assets", package_dir / "assets")
     for filename in ("README.md", "LICENSE", "LOCAL_STARTUP_NOTES.md"):
         shutil.copy2(REPO_ROOT / filename, package_dir / filename)
+
+    if os.name == "nt":
+        (package_dir / "cephalon-launch.cmd").write_text(
+            "@echo off\r\ncd /d \"%~dp0\"\r\nstart \"Cephalon\" \"%~dp0cephalon.exe\"\r\n",
+            encoding="utf-8",
+        )
+    else:
+        launcher = package_dir / "cephalon-launch.sh"
+        launcher.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "cd \"$(dirname \"$0\")\"\n"
+            "exec ./cephalon \"$@\"\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        desktop_entry = "\n".join(
+            [
+                "[Desktop Entry]",
+                "Type=Application",
+                "Name=Cephalon",
+                "Comment=Native Cephalon RAG workbench",
+                f"Exec={launcher}",
+                f"Icon={package_dir / 'assets' / 'cephalon.svg'}",
+                "Terminal=false",
+                "Categories=Office;Utility;",
+                "",
+            ]
+        )
+        (package_dir / "cephalon.desktop").write_text(desktop_entry, encoding="utf-8")
+        (package_dir / executable_name).chmod(0o755)
 
     print(f"Cephalon release build completed for {sys.platform}: {package_dir}")
 

@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BackendStatus {
     pub reachable: bool,
@@ -76,6 +77,7 @@ impl BackendService {
         Ok(self.status())
     }
 
+    #[allow(dead_code)]
     pub fn restart(&self) -> Result<BackendStatus, String> {
         self.shutdown();
         self.start()
@@ -110,8 +112,7 @@ impl BackendService {
     pub fn shutdown(&self) {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_process_tree(&mut child);
             }
         }
     }
@@ -264,16 +265,24 @@ fn resolve_python_command() -> Option<PythonCommand> {
         }
         command
             .arg("-c")
-            .arg("import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)")
+            .arg("import sys\nif sys.version_info[:2] == (3, 14): print(sys.executable)\nelse: raise SystemExit(1)")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        if command
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            return Some(candidate);
+        if let Ok(output) = command.output() {
+            if output.status.success() {
+                if cfg!(target_os = "windows") {
+                    let executable = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !executable.is_empty() {
+                        return Some(PythonCommand {
+                            program: PathBuf::from(executable),
+                            prefix_args: Vec::new(),
+                        });
+                    }
+                } else {
+                    return Some(candidate);
+                }
+            }
         }
     }
     eprintln!(
@@ -296,6 +305,7 @@ fn spawn_dev_backend() -> Option<Child> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     apply_backend_env(&mut command, Some(&repo_root), None);
+    configure_process_group(&mut command);
     command.spawn().map_or_else(
         |error| {
             eprintln!("Failed to start source backend: {error}");
@@ -346,6 +356,7 @@ fn spawn_release_backend() -> Option<Child> {
             .exists()
             .then_some(sidecar_internal.as_path()),
     );
+    configure_process_group(&mut command);
     command.spawn().map_or_else(
         |error| {
             eprintln!("Failed to start backend sidecar: {error}");
@@ -353,6 +364,55 @@ fn spawn_release_backend() -> Option<Child> {
         },
         Some,
     )
+}
+
+fn terminate_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .status();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        unsafe {
+            libc::kill(process_group, libc::SIGTERM);
+        }
+        for _ in 0..20 {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+        let _ = child.wait();
+    }
+}
+
+fn configure_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    let _ = command;
 }
 
 #[cfg(test)]

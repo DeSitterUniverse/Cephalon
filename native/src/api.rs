@@ -162,12 +162,12 @@ impl ApiClient {
         self.request_json(Method::GET, "/reindex/progress", None)
     }
 
-    pub fn reindex_all(&self) -> Result<Value, ApiError> {
-        self.request_value(Method::POST, "/reindex/full", None)
+    pub fn reindex_all(&self) -> Result<ReindexResponse, ApiError> {
+        self.request_json(Method::POST, "/reindex/full", None)
     }
 
-    pub fn reindex_stale(&self) -> Result<Value, ApiError> {
-        self.request_value(Method::POST, "/reindex/stale", None)
+    pub fn reindex_stale(&self) -> Result<ReindexResponse, ApiError> {
+        self.request_json(Method::POST, "/reindex/stale", None)
     }
 
     pub fn documents(&self) -> Result<Vec<Document>, ApiError> {
@@ -242,9 +242,22 @@ impl ApiClient {
     }
 
     pub fn conversation(&self, id: &str) -> Result<Conversation, ApiError> {
+        self.conversation_page(id, 100, None)
+    }
+
+    pub fn conversation_page(
+        &self,
+        id: &str,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Conversation, ApiError> {
+        let limit = limit.clamp(1, 200);
+        let query = before
+            .map(|cursor| format!("?limit={limit}&before={cursor}"))
+            .unwrap_or_else(|| format!("?limit={limit}"));
         self.request_json(
             Method::GET,
-            &format!("/conversations/{}?limit=100", path_segment(id)),
+            &format!("/conversations/{}{}", path_segment(id), query),
             None,
         )
     }
@@ -447,7 +460,18 @@ fn parse_error_response(response: Response) -> ApiError {
 }
 
 fn path_segment(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 fn unix_seconds() -> u64 {
@@ -496,15 +520,23 @@ fn decode_query_event(event_name: &str, data: &str) -> Option<QueryEvent> {
 }
 
 fn decode_event_stream_event(event_name: &str, data: &str) -> Option<EventStreamEvent> {
+    let payload = serde_json::from_str::<Value>(data).unwrap_or_else(|_| json!({"raw": data}));
     match event_name {
         "ready" | "heartbeat" => Some(EventStreamEvent::Heartbeat),
-        "job" | "document" | "settings" | "llama_server" => Some(EventStreamEvent::DataChanged),
+        "job" => Some(EventStreamEvent::JobChanged(payload)),
+        "document" | "documents" => Some(EventStreamEvent::DocumentChanged(payload)),
+        "conversation" => Some(EventStreamEvent::ConversationChanged(payload)),
+        "settings" => Some(EventStreamEvent::SettingsChanged(payload)),
+        "llama_server" => Some(EventStreamEvent::LlamaServerChanged(payload)),
         "" | "message" => None,
         _ => {
             if data.is_empty() {
                 None
             } else {
-                Some(EventStreamEvent::DataChanged)
+                Some(EventStreamEvent::Other {
+                    name: event_name.to_string(),
+                    payload,
+                })
             }
         }
     }
@@ -521,12 +553,40 @@ pub enum QueryEvent {
     Done,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum EventStreamEvent {
     Connected,
     Heartbeat,
-    DataChanged,
+    DocumentChanged(Value),
+    JobChanged(Value),
+    ConversationChanged(Value),
+    SettingsChanged(Value),
+    LlamaServerChanged(Value),
+    Other { name: String, payload: Value },
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventStreamRefresh {
+    Documents,
+    Jobs,
+    Conversations,
+    Settings,
+    LlamaServer,
+}
+
+impl EventStreamEvent {
+    pub fn refresh_target(&self) -> Option<EventStreamRefresh> {
+        match self {
+            Self::DocumentChanged(_) => Some(EventStreamRefresh::Documents),
+            Self::JobChanged(_) => Some(EventStreamRefresh::Jobs),
+            Self::ConversationChanged(_) => Some(EventStreamRefresh::Conversations),
+            Self::SettingsChanged(_) => Some(EventStreamRefresh::Settings),
+            Self::LlamaServerChanged(_) => Some(EventStreamRefresh::LlamaServer),
+            Self::Connected | Self::Heartbeat | Self::Other { .. } | Self::Error(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -567,6 +627,22 @@ pub struct Document {
     pub stale_embedding: bool,
     #[serde(default)]
     pub chunk_preview: Vec<Value>,
+    #[serde(default)]
+    pub modified_at: Option<i64>,
+    #[serde(default)]
+    pub last_indexed_at: Option<i64>,
+    #[serde(default)]
+    pub embedding_model_id: Option<String>,
+    #[serde(default)]
+    pub embedding_dim: Option<i64>,
+    #[serde(default)]
+    pub stale_reasons: Vec<Value>,
+    #[serde(default)]
+    pub extraction_mode: Option<String>,
+    #[serde(default)]
+    pub last_retrieved_at: Option<i64>,
+    #[serde(default)]
+    pub retrieval_count: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -582,6 +658,10 @@ pub struct SourceChunk {
     #[serde(default)]
     pub chunk_id: String,
     #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
     pub score: f64,
     #[serde(default)]
     pub final_score: Option<f64>,
@@ -594,7 +674,17 @@ pub struct SourceChunk {
     #[serde(default)]
     pub lexical_score: Option<f64>,
     #[serde(default)]
+    pub fusion_score: Option<f64>,
+    #[serde(default)]
     pub rerank_score: Option<f64>,
+    #[serde(default)]
+    pub reranker_raw_score: Option<f64>,
+    #[serde(default)]
+    pub listwise_rank: Option<i64>,
+    #[serde(default)]
+    pub subquery_id: Option<String>,
+    #[serde(default)]
+    pub block_type: Option<String>,
     #[serde(default)]
     pub page_number: Option<i64>,
     #[serde(default)]
@@ -604,11 +694,49 @@ pub struct SourceChunk {
     #[serde(default)]
     pub heading_path: Vec<String>,
     #[serde(default)]
+    pub block_index: Option<i64>,
+    #[serde(default)]
+    pub bounding_box: Option<Vec<f64>>,
+    #[serde(default)]
+    pub table_id: Option<String>,
+    #[serde(default)]
+    pub table_title: Option<String>,
+    #[serde(default)]
+    pub sheet_name: Option<String>,
+    #[serde(default)]
+    pub table_bounding_box: Option<Vec<f64>>,
+    #[serde(default)]
+    pub cell_refs: Vec<String>,
+    #[serde(default)]
+    pub verification_cell_refs: Vec<String>,
+    #[serde(default)]
+    pub header_refs: Vec<String>,
+    #[serde(default)]
     pub table_operation: Option<String>,
     #[serde(default)]
     pub table_result: Vec<Value>,
     #[serde(default)]
     pub cells: Vec<Value>,
+    #[serde(default)]
+    pub element_ids: Vec<String>,
+    #[serde(default)]
+    pub provenance: Value,
+    #[serde(default)]
+    pub context_assembly: Value,
+    #[serde(default)]
+    pub context_selection: Value,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub requirement_ids: Vec<String>,
+    #[serde(default)]
+    pub retrieval_round: i64,
+    #[serde(default)]
+    pub triggering_gap: Option<String>,
+    #[serde(default)]
+    pub assets: Vec<Value>,
+    #[serde(default)]
+    pub raw_chunk: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -642,6 +770,30 @@ pub struct Conversation {
     pub has_more: bool,
     #[serde(default)]
     pub next_before: Option<i64>,
+}
+
+/// Merge an older conversation page into the currently visible messages.
+///
+/// The service returns each page in display order, so the result is rebuilt by
+/// message id and then sorted chronologically. This keeps a retry or overlapping
+/// page from duplicating messages already on screen.
+pub fn merge_conversation_messages(existing: &mut Vec<StoredMessage>, page: &Conversation) {
+    let mut by_id = std::collections::HashMap::with_capacity(existing.len() + page.messages.len());
+    for message in existing.drain(..) {
+        by_id.insert(message.id.clone(), message);
+    }
+    for message in &page.messages {
+        by_id
+            .entry(message.id.clone())
+            .or_insert_with(|| message.clone());
+    }
+    let mut merged: Vec<_> = by_id.into_values().collect();
+    merged.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    *existing = merged;
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -906,11 +1058,17 @@ struct EvalRunsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_query_event, path_segment, QueryEvent};
+    use serde_json::json;
+
+    use super::{
+        decode_event_stream_event, decode_query_event, merge_conversation_messages, path_segment,
+        Conversation, EventStreamEvent, EventStreamRefresh, QueryEvent, StoredMessage,
+    };
 
     #[test]
     fn path_segments_are_url_encoded() {
-        assert_eq!(path_segment("a document/#1"), "a+document%2F%231");
+        assert_eq!(path_segment("a document/#1"), "a%20document%2F%231");
+        assert_eq!(path_segment("café + notes"), "caf%C3%A9%20%2B%20notes");
     }
 
     #[test]
@@ -923,5 +1081,64 @@ mod tests {
             decode_query_event("conversation", r#"{"conversation_id":"c1"}"#),
             Some(QueryEvent::Conversation(id)) if id == "c1"
         ));
+    }
+
+    #[test]
+    fn backend_sse_packets_keep_targeted_event_types() {
+        let settings_event =
+            decode_event_stream_event("settings", r#"{"type":"settings","payload":{"top_k":4}}"#)
+                .expect("settings event");
+        assert_eq!(
+            settings_event.refresh_target(),
+            Some(EventStreamRefresh::Settings)
+        );
+        assert!(matches!(
+            settings_event,
+            EventStreamEvent::SettingsChanged(value)
+                if value["payload"]["top_k"] == json!(4)
+        ));
+        assert!(matches!(
+            decode_event_stream_event("job", r#"{"type":"job","payload":{"status":"running"}}"#),
+            Some(EventStreamEvent::JobChanged(value))
+                if value["payload"]["status"] == json!("running")
+        ));
+        assert!(matches!(
+            decode_event_stream_event("other", r#"{"ok":true}"#),
+            Some(EventStreamEvent::Other { name, .. }) if name == "other"
+        ));
+    }
+
+    #[test]
+    fn older_conversation_pages_prepend_without_duplicates() {
+        let mut existing = vec![StoredMessage {
+            id: "m2".into(),
+            created_at: 20,
+            ..StoredMessage::default()
+        }];
+        let page = Conversation {
+            messages: vec![
+                StoredMessage {
+                    id: "m1".into(),
+                    created_at: 10,
+                    ..StoredMessage::default()
+                },
+                StoredMessage {
+                    id: "m2".into(),
+                    created_at: 20,
+                    role: "assistant".into(),
+                    ..StoredMessage::default()
+                },
+            ],
+            ..Conversation::default()
+        };
+        merge_conversation_messages(&mut existing, &page);
+        assert_eq!(
+            existing
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+        assert_eq!(existing[1].role, "");
     }
 }
