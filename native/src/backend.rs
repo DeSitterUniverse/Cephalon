@@ -1,0 +1,378 @@
+use std::env;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct BackendStatus {
+    pub reachable: bool,
+    pub managed_process: bool,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+    pub address: String,
+}
+
+pub struct BackendService {
+    child: Mutex<Option<Child>>,
+}
+
+impl BackendService {
+    pub fn new() -> Self {
+        Self {
+            child: Mutex::new(None),
+        }
+    }
+
+    pub fn start(&self) -> Result<BackendStatus, String> {
+        if backend_is_cephalon() {
+            return Ok(self.status());
+        }
+        if backend_is_listening() {
+            return Err(format!(
+                "Port {} is occupied by a service that is not a compatible Cephalon backend.",
+                backend_addr()
+            ));
+        }
+        if env::var("CEPHALON_EXTERNAL_BACKEND").ok().as_deref() == Some("1") {
+            return Err(
+                "Cephalon is configured to use an external backend. Start that backend, then retry."
+                    .to_string(),
+            );
+        }
+
+        let mut guard = self
+            .child
+            .lock()
+            .map_err(|_| "Backend process state is unavailable.".to_string())?;
+        let already_running = if let Some(child) = guard.as_mut() {
+            child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+        } else {
+            false
+        };
+        if already_running {
+            drop(guard);
+            return Ok(self.status());
+        }
+
+        let child = if cfg!(debug_assertions) {
+            spawn_dev_backend()
+        } else {
+            spawn_release_backend()
+        };
+        if child.is_none() {
+            return Err(
+                "Cephalon could not start its local backend. Check that the packaged backend and Python runtime are available."
+                    .to_string(),
+            );
+        }
+        *guard = child;
+        drop(guard);
+        Ok(self.status())
+    }
+
+    pub fn restart(&self) -> Result<BackendStatus, String> {
+        self.shutdown();
+        self.start()
+    }
+
+    pub fn status(&self) -> BackendStatus {
+        let mut managed_process = false;
+        let mut exited = false;
+        let mut exit_code = None;
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(child) = guard.as_mut() {
+                managed_process = true;
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        exited = true;
+                        exit_code = status.code();
+                        *guard = None;
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+            }
+        }
+        BackendStatus {
+            reachable: backend_is_cephalon(),
+            managed_process,
+            exited,
+            exit_code,
+            address: backend_addr().to_string(),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+impl Default for BackendService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for BackendService {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn backend_addr() -> SocketAddr {
+    let host = env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string());
+    format!("{host}:{port}")
+        .parse()
+        .expect("CEPHALON_HOST and CEPHALON_PORT must form a valid socket address")
+}
+
+fn backend_is_listening() -> bool {
+    TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(250)).is_ok()
+}
+
+fn backend_is_cephalon() -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    let host = backend_addr();
+    let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    backend_health_is_compatible(&response)
+}
+
+fn backend_health_is_compatible(response: &str) -> bool {
+    response.contains("\"service\":\"cephalon\"") && response.contains("\"api_version\":1")
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn default_data_dir() -> PathBuf {
+    env::var_os("CEPHALON_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join("cephalon-data"))
+}
+
+fn default_model_dir(data_dir: &Path) -> PathBuf {
+    env::var_os("CEPHALON_MODEL_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("models"))
+}
+
+fn prepend_path(existing: Option<String>, paths: &[PathBuf]) -> String {
+    let mut parts: Vec<PathBuf> = paths.iter().filter(|path| path.exists()).cloned().collect();
+    if let Some(existing) = existing {
+        parts.extend(env::split_paths(&existing));
+    }
+    env::join_paths(parts)
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn apply_backend_env(
+    command: &mut Command,
+    repo_root: Option<&Path>,
+    sidecar_internal: Option<&Path>,
+) {
+    let data_dir = default_data_dir();
+    let model_dir = default_model_dir(&data_dir);
+    command.env("CEPHALON_DATA_DIR", data_dir);
+    command.env("CEPHALON_MODEL_DIR", model_dir);
+    command.env(
+        "CEPHALON_HOST",
+        env::var("CEPHALON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+    );
+    command.env(
+        "CEPHALON_PORT",
+        env::var("CEPHALON_PORT").unwrap_or_else(|_| "8765".to_string()),
+    );
+    command.env("PYTHONNOUSERSITE", "1");
+
+    if let Some(internal) = sidecar_internal {
+        command.env(
+            "PATH",
+            prepend_path(env::var("PATH").ok(), &[internal.to_path_buf()]),
+        );
+        if let Some(root) = repo_root {
+            command.env(
+                "PYTHONPATH",
+                prepend_path(
+                    env::var("PYTHONPATH").ok(),
+                    &[root.join("python"), internal.to_path_buf()],
+                ),
+            );
+        }
+    } else if let Some(root) = repo_root {
+        command.env(
+            "PYTHONPATH",
+            prepend_path(env::var("PYTHONPATH").ok(), &[root.join("python")]),
+        );
+    }
+}
+
+struct PythonCommand {
+    program: PathBuf,
+    prefix_args: Vec<String>,
+}
+
+fn python_candidates() -> Vec<PythonCommand> {
+    if cfg!(target_os = "windows") {
+        vec![PythonCommand {
+            program: PathBuf::from("py"),
+            prefix_args: vec!["-3.14".to_string()],
+        }]
+    } else {
+        ["python3.14", "python3", "python"]
+            .into_iter()
+            .map(|program| PythonCommand {
+                program: PathBuf::from(program),
+                prefix_args: vec![],
+            })
+            .collect()
+    }
+}
+
+fn resolve_python_command() -> Option<PythonCommand> {
+    for candidate in python_candidates() {
+        let mut command = Command::new(&candidate.program);
+        for arg in &candidate.prefix_args {
+            command.arg(arg);
+        }
+        command
+            .arg("-c")
+            .arg("import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if command
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+    eprintln!(
+        "Cephalon requires Python 3.14. Install it, then ensure `py -3.14` (Windows) or `python3.14` (Linux) is on PATH."
+    );
+    None
+}
+
+fn spawn_dev_backend() -> Option<Child> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let python = resolve_python_command()?;
+    let mut command = Command::new(&python.program);
+    for arg in &python.prefix_args {
+        command.arg(arg);
+    }
+    command
+        .arg(repo_root.join("python").join("main.py"))
+        .current_dir(&repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    apply_backend_env(&mut command, Some(&repo_root), None);
+    command.spawn().map_or_else(
+        |error| {
+            eprintln!("Failed to start source backend: {error}");
+            None
+        },
+        Some,
+    )
+}
+
+fn spawn_release_backend() -> Option<Child> {
+    let binary_name = if cfg!(target_os = "windows") {
+        "engine.exe"
+    } else {
+        "engine"
+    };
+    let resource_root = env::var_os("CEPHALON_RESOURCE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()?
+                .parent()
+                .map(Path::to_path_buf)
+        })?;
+    let candidates = [
+        resource_root.join("backend").join("engine"),
+        resource_root
+            .join("resources")
+            .join("backend")
+            .join("engine"),
+    ];
+    let engine_dir = candidates.iter().find(|path| path.exists())?.to_path_buf();
+    let binary_path = engine_dir.join(binary_name);
+    let sidecar_internal = engine_dir.join("_internal");
+    if !binary_path.exists() {
+        eprintln!("Backend sidecar not found at {}.", binary_path.display());
+        return None;
+    }
+    let mut command = Command::new(binary_path);
+    command
+        .current_dir(&resource_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    apply_backend_env(
+        &mut command,
+        None,
+        sidecar_internal
+            .exists()
+            .then_some(sidecar_internal.as_path()),
+    );
+    command.spawn().map_or_else(
+        |error| {
+            eprintln!("Failed to start backend sidecar: {error}");
+            None
+        },
+        Some,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backend_health_is_compatible;
+
+    #[test]
+    fn accepts_compatible_cephalon_health_response() {
+        let response =
+            "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":1,\"status\":\"ok\"}";
+        assert!(backend_health_is_compatible(response));
+    }
+
+    #[test]
+    fn rejects_unrelated_or_incompatible_services() {
+        assert!(!backend_health_is_compatible(
+            "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\"}"
+        ));
+        assert!(!backend_health_is_compatible(
+            "{\"service\":\"cephalon\",\"api_version\":2}"
+        ));
+    }
+}

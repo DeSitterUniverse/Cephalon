@@ -52,13 +52,12 @@ Both models are licensed under [CC BY-NC 4.0](https://creativecommons.org/licens
 
 Cephalon supports Windows and Linux. The commands below use Windows PowerShell; see [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for Linux and detailed setup notes.
 
-1. Install Node.js, Python 3.14, and a recent llama.cpp build with `llama-server`.
+1. Install Rust, Python 3.14, and a recent llama.cpp build with `llama-server`.
 
 2. Install Cephalon dependencies:
 
    ```powershell
    py -3.14 scripts\setup_python.py
-   npm.cmd install
    ```
 
 3. Start the chat server with the GGUF you want to use. Cephalon does not choose or load this model for you:
@@ -73,7 +72,7 @@ Cephalon supports Windows and Linux. The commands below use Windows PowerShell; 
 4. Start the desktop app:
 
    ```powershell
-   npm.cmd run tauri dev
+   cargo run
    ```
 
 5. Build `llama-embedding` from llama.cpp revision
@@ -163,7 +162,7 @@ Set environment variables before launching Cephalon. For example:
 ```powershell
 $env:CEPHALON_EMBEDDER_DEVICE="Vulkan0"
 $env:CEPHALON_EMBEDDER_GPU_LAYERS="999"
-npm.cmd run tauri dev
+cargo run
 ```
 
 ### Default ports
@@ -171,7 +170,6 @@ npm.cmd run tauri dev
 | Service                    | Port |
 | -------------------------- | ---: |
 | Cephalon local API         | 8765 |
-| Browser development server | 1420 |
 | Chat llama.cpp server      | 8080 |
 | Managed embedding server   | 8090 |
 
@@ -181,12 +179,11 @@ See [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for the complete environmen
 
 | Task                                    | Windows command                                    |
 | --------------------------------------- | -------------------------------------------------- |
-| Run the desktop application             | `npm.cmd run tauri dev`                            |
-| Run the browser development environment | `npm.cmd run dev:full`                             |
+| Run the native desktop application      | `cargo run`                                         |
 | Run only the Python backend             | `py -3.14 python\main.py`                          |
-| Build the frontend                      | `npm.cmd run build`                                |
-| Check the Tauri project                 | `cargo check --manifest-path src-tauri\Cargo.toml` |
-| Build the desktop package               | `npm.cmd run tauri build`                          |
+| Check the native GPUI application       | `cargo check`                                       |
+| Build the native release                | `cargo build --release`                             |
+| Build the packaged desktop directory    | `py -3.14 scripts\build_release.py`                |
 
 The packaged application includes Cephalon’s Python backend. It does not include llama.cpp, a chat GGUF, or the retrieval-model weights. Retrieval models can be installed from the Settings page after Cephalon is launched.
 
@@ -216,9 +213,9 @@ Run the complete validation suite before packaging or submitting substantial cha
 
 ```powershell
 py -3.14 -m pytest python -q
-npm.cmd run test:frontend
-npm.cmd run build
-cargo check --manifest-path src-tauri\Cargo.toml
+cargo fmt --check
+cargo check
+cargo test
 ```
 
 ## License

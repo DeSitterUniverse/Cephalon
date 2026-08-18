@@ -58,29 +58,14 @@ The managed embedding server uses Vulkan GPU offload automatically. To operate i
 
 The Nano endpoint must return normalized 768-dimensional vectors. Confirm `http://127.0.0.1:8090/health` before starting the app.
 
-## Browser development
+## Native GPUI development
 
 ```powershell
-npm.cmd run dev:full
+cargo run
 ```
 
-Open `http://127.0.0.1:1420`.
-
-Or run the components separately:
-
-```powershell
-py -3.14 python\main.py
-```
-
-```powershell
-npm.cmd run dev
-```
-
-## Tauri development
-
-```powershell
-npm.cmd run tauri dev
-```
+The GPUI shell starts the Python backend automatically in development mode.
+Use `CEPHALON_EXTERNAL_BACKEND=1` when the API is already running elsewhere.
 
 ## Health and shutdown
 

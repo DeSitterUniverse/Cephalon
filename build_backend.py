@@ -58,10 +58,10 @@ def build():
         
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
     
-    print("Build complete. Moving to src-tauri/backend...")
+    print("Build complete. Moving to backend/...")
     
     source_dir = REPO_ROOT / "dist" / "engine"
-    target_dir = REPO_ROOT / "src-tauri" / "backend"
+    target_dir = REPO_ROOT / "backend"
     destination_dir = target_dir / "engine"
     
     if target_dir.exists():
