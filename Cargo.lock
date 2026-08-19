@@ -818,7 +818,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "unicode-segmentation",
  "winresource",
 ]
 

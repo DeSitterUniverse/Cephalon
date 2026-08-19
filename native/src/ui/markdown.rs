@@ -218,7 +218,7 @@ pub(crate) fn external_url_allowed(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulldown_cmark::Tag;
+    use pulldown_cmark::{Alignment, Tag};
 
     fn contains_tag(nodes: &[MarkdownNode], predicate: &impl Fn(&Tag<'static>) -> bool) -> bool {
         nodes.iter().any(|node| match node {
@@ -265,13 +265,23 @@ mod tests {
         let nodes = parse_markdown("**bold _nested_ [[src:S1]]**");
         let rendered_text = text_content(&nodes);
         assert!(rendered_text.contains("nested"));
+        let original = "before [[src:S1]]  after [[src:S2]]";
+        let fragments = split_citations(original);
         assert_eq!(
-            split_citations("before [[src:S1]] after [[src:S2]]")
+            fragments
                 .iter()
                 .filter(|fragment| matches!(fragment, InlineFragment::Citation(_)))
                 .count(),
             2
         );
+        let reconstructed = fragments
+            .iter()
+            .map(|fragment| match fragment {
+                InlineFragment::Text(value) => value.clone(),
+                InlineFragment::Citation(value) => format!("[[src:{value}]]"),
+            })
+            .collect::<String>();
+        assert_eq!(reconstructed, original);
     }
 
     #[test]
@@ -289,5 +299,67 @@ mod tests {
     fn hidden_thinking_is_removed_before_markdown_parsing() {
         let nodes = parse_markdown("visible <think>secret **not shown**</think> answer");
         assert_eq!(text_content(&nodes), "visible  answer");
+    }
+
+    #[test]
+    fn long_prose_preserves_native_text_layout_input() {
+        let paragraph = "The quick brown fox crosses a deliberately long paragraph so that the native layout engine must wrap at a word boundary without any renderer-owned chunks or lost whitespace.";
+        let nodes = parse_markdown(paragraph);
+
+        assert_eq!(text_content(&nodes), paragraph);
+        assert!(!text_content(&nodes).contains('\u{200b}'));
+    }
+
+    #[test]
+    fn code_blocks_preserve_long_lines_and_whitespace() {
+        let code = format!(
+            "```json\n{{\"url\":\"https://example.com/{}\",\"items\":[1,2,3]}}\n```",
+            "x".repeat(220)
+        );
+        let nodes = parse_markdown(&code);
+        let rendered = text_content(&nodes);
+
+        assert!(rendered.contains("https://example.com/"));
+        assert!(rendered.contains(&"x".repeat(220)));
+        assert!(!rendered.contains('\u{200b}'));
+    }
+
+    #[test]
+    fn tables_keep_one_multi_cell_header_and_alignment() {
+        let nodes = parse_markdown(
+            "| Name | Score | Page |\n|:-----|------:|-----:|\n| **Alpha** | 0.91 | [[src:S1]] 4 |\n| Beta | 0.82 | 8 |",
+        );
+        let MarkdownNode::Container {
+            tag: Tag::Table(alignments),
+            children,
+        } = nodes.first().expect("table root")
+        else {
+            panic!("expected a table root");
+        };
+        assert_eq!(
+            alignments,
+            &vec![Alignment::Left, Alignment::Right, Alignment::Right]
+        );
+
+        let MarkdownNode::Container {
+            tag: Tag::TableHead,
+            children: head_rows,
+        } = children.first().expect("table head")
+        else {
+            panic!("expected a table head");
+        };
+        assert_eq!(head_rows.len(), 3);
+        assert!(head_rows.iter().all(|node| matches!(
+            node,
+            MarkdownNode::Container {
+                tag: Tag::TableCell,
+                ..
+            }
+        )));
+
+        assert!(text_content(&nodes).contains("Alpha"));
+        assert!(split_citations("[[src:S1]]")
+            .iter()
+            .any(|fragment| matches!(fragment, InlineFragment::Citation(value) if value == "S1")));
     }
 }

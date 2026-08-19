@@ -14,76 +14,35 @@ use super::theme::{
 };
 use super::{ChatMessage, NativeApp, Panel, SourceChunk};
 
-fn soft_wrap_code(value: &str) -> String {
-    const WRAP_COLUMN: usize = 96;
-    let mut output = String::with_capacity(value.len());
-    let mut column = 0;
-    for character in value.chars() {
-        if character == '\n' {
-            output.push(character);
-            column = 0;
-            continue;
-        }
-        if column >= WRAP_COLUMN {
-            output.push('\u{200b}');
-            column = 0;
-        }
-        output.push(character);
-        column += 1;
+fn is_inline_markdown_node(node: &MarkdownNode) -> bool {
+    match node {
+        MarkdownNode::Text(_)
+        | MarkdownNode::Code(_)
+        | MarkdownNode::Html(_)
+        | MarkdownNode::InlineHtml(_)
+        | MarkdownNode::InlineMath(_)
+        | MarkdownNode::DisplayMath(_)
+        | MarkdownNode::FootnoteReference(_)
+        | MarkdownNode::SoftBreak
+        | MarkdownNode::HardBreak => true,
+        MarkdownNode::Container { tag, .. } => matches!(
+            tag,
+            Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Superscript
+                | Tag::Subscript
+                | Tag::Link { .. }
+                | Tag::Image { .. }
+        ),
+        MarkdownNode::Rule | MarkdownNode::TaskListMarker(_) => false,
     }
-    output
 }
 
-fn soft_wrap_text(value: &str) -> Vec<String> {
-    const WRAP_COLUMN: usize = 56;
-    let leading_space = value.chars().next().is_some_and(char::is_whitespace);
-    let trailing_space = value.chars().next_back().is_some_and(char::is_whitespace);
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    for word in value.split_whitespace() {
-        let word_chars: Vec<_> = word.chars().collect();
-        if word_chars.len() > WRAP_COLUMN {
-            if !chunk.is_empty() {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-            for segment in word_chars.chunks(WRAP_COLUMN) {
-                chunks.push(segment.iter().collect());
-            }
-        } else if chunk.is_empty() {
-            chunk.push_str(word);
-        } else if chunk.chars().count() + 1 + word_chars.len() <= WRAP_COLUMN {
-            chunk.push(' ');
-            chunk.push_str(word);
-        } else {
-            chunks.push(std::mem::take(&mut chunk));
-            chunk.push_str(word);
-        }
-    }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-    if chunks.is_empty() {
-        return if leading_space || trailing_space {
-            vec![" ".to_string()]
-        } else {
-            chunks
-        };
-    }
-    if leading_space {
-        chunks[0].insert(0, ' ');
-    }
-    if trailing_space {
-        chunks
-            .last_mut()
-            .expect("soft wrap produced a non-empty chunk")
-            .push(' ');
-    }
-    chunks
-}
-
-pub(crate) fn code_block(value: &str, language: &str) -> gpui::Div {
+pub(crate) fn code_block(id: &str, value: &str, language: &str) -> gpui::Div {
     let mut block = div()
         .w_full()
+        .min_w_0()
         .p_2()
         .bg(panel_3())
         .border_1()
@@ -91,8 +50,7 @@ pub(crate) fn code_block(value: &str, language: &str) -> gpui::Div {
         .rounded_sm()
         .font_family(".ZedMono")
         .text_size(px(11.))
-        .text_color(text())
-        .overflow_hidden();
+        .text_color(text());
     if !language.is_empty() {
         block = block.child(
             div()
@@ -102,7 +60,15 @@ pub(crate) fn code_block(value: &str, language: &str) -> gpui::Div {
                 .child(language.to_string()),
         );
     }
-    block.child(soft_wrap_code(value))
+    block.child(
+        div()
+            .id(SharedString::from(format!("{id}-horizontal-scroll")))
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .whitespace_nowrap()
+            .child(value.to_string()),
+    )
 }
 
 impl NativeApp {
@@ -211,9 +177,9 @@ impl NativeApp {
                         CodeBlockKind::Fenced(value) => value.as_ref(),
                         CodeBlockKind::Indented => "",
                     };
-                    code_block(&text_content(children), language)
+                    code_block(id_prefix, &text_content(children), language)
                 }
-                Tag::HtmlBlock => code_block(&text_content(children), "HTML"),
+                Tag::HtmlBlock => code_block(id_prefix, &text_content(children), "HTML"),
                 Tag::List(start) => {
                     self.render_list(message_index, message, children, *start, id_prefix, cx)
                 }
@@ -274,8 +240,14 @@ impl NativeApp {
                 ),
             },
             MarkdownNode::Rule => div().w_full().h(px(1.)).bg(line()),
-            MarkdownNode::Text(_)
-            | MarkdownNode::Code(_)
+            MarkdownNode::Text(_) => self.render_inline_nodes(
+                message_index,
+                message,
+                std::slice::from_ref(node),
+                id_prefix,
+                cx,
+            ),
+            MarkdownNode::Code(_)
             | MarkdownNode::Html(_)
             | MarkdownNode::InlineHtml(_)
             | MarkdownNode::InlineMath(_)
@@ -324,16 +296,25 @@ impl NativeApp {
             let marker = task_checked
                 .map(|checked| if checked { "☑" } else { "☐" }.to_string())
                 .unwrap_or(marker);
-            let item_body = self
-                .render_markdown_blocks(
+            let item_body = if item_content.iter().all(is_inline_markdown_node) {
+                self.render_inline_nodes(
                     message_index,
                     message,
                     item_content,
                     &format!("{id_prefix}-item-{item_index}"),
                     cx,
                 )
-                .flex_1()
-                .min_w_0();
+            } else {
+                self.render_markdown_blocks(
+                    message_index,
+                    message,
+                    item_content,
+                    &format!("{id_prefix}-item-{item_index}"),
+                    cx,
+                )
+            }
+            .flex_1()
+            .min_w_0();
             let item = div()
                 .w_full()
                 .flex()
@@ -375,19 +356,17 @@ impl NativeApp {
             match child {
                 MarkdownNode::Container {
                     tag: Tag::TableHead,
-                    children: head_rows,
+                    children: head_cells,
                 } => {
-                    for (index, row) in head_rows.iter().enumerate() {
-                        table = table.child(self.render_table_row(
-                            message_index,
-                            message,
-                            std::slice::from_ref(row),
-                            alignments,
-                            true,
-                            &format!("{id_prefix}-head-{index}"),
-                            cx,
-                        ));
-                    }
+                    table = table.child(self.render_table_row(
+                        message_index,
+                        message,
+                        head_cells,
+                        alignments,
+                        true,
+                        &format!("{id_prefix}-head"),
+                        cx,
+                    ));
                 }
                 MarkdownNode::Container {
                     tag: Tag::TableRow,
@@ -398,7 +377,7 @@ impl NativeApp {
                         message,
                         row_children,
                         alignments,
-                        row_index == 0,
+                        false,
                         &format!("{id_prefix}-row-{row_index}"),
                         cx,
                     ));
@@ -509,9 +488,28 @@ impl NativeApp {
         if full_width {
             row = row.w_full();
         }
-        for (index, node) in nodes.iter().enumerate() {
-            let id = format!("{id_prefix}-{index}");
-            row = row.child(self.render_inline_node(message_index, message, node, &id, cx));
+        let mut child_index = 0;
+        for node in nodes {
+            match node {
+                MarkdownNode::Text(value) => {
+                    for fragment in split_citations(value) {
+                        let id = format!("{id_prefix}-{child_index}");
+                        row = row.child(self.render_inline_fragment(
+                            message_index,
+                            message,
+                            fragment,
+                            &id,
+                            cx,
+                        ));
+                        child_index += 1;
+                    }
+                }
+                _ => {
+                    let id = format!("{id_prefix}-{child_index}");
+                    row = row.child(self.render_inline_node(message_index, message, node, &id, cx));
+                    child_index += 1;
+                }
+            }
         }
         row
     }
@@ -525,43 +523,15 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match node {
-            MarkdownNode::Text(value) => {
-                let mut row = div()
-                    .flex()
-                    .flex_wrap()
-                    .items_baseline()
-                    .flex_initial()
-                    .min_w_0()
-                    .whitespace_normal();
-                for (index, fragment) in split_citations(value).into_iter().enumerate() {
-                    match fragment {
-                        InlineFragment::Text(value) => {
-                            for (chunk_index, chunk) in
-                                soft_wrap_text(&value).into_iter().enumerate()
-                            {
-                                row = row.child(self.render_inline_fragment(
-                                    message_index,
-                                    message,
-                                    InlineFragment::Text(chunk),
-                                    &format!("{id}-fragment-{index}-{chunk_index}"),
-                                    cx,
-                                ));
-                            }
-                        }
-                        citation @ InlineFragment::Citation(_) => {
-                            row = row.child(self.render_inline_fragment(
-                                message_index,
-                                message,
-                                citation,
-                                &format!("{id}-fragment-{index}"),
-                                cx,
-                            ));
-                        }
-                    }
-                }
-                row.into_any_element()
-            }
+            MarkdownNode::Text(value) => div()
+                .flex_initial()
+                .min_w_0()
+                .whitespace_normal()
+                .child(value.clone())
+                .into_any_element(),
             MarkdownNode::Code(value) => div()
+                .flex_initial()
+                .min_w_0()
                 .px_1()
                 .bg(panel_3())
                 .rounded_sm()
@@ -569,8 +539,8 @@ impl NativeApp {
                 .text_size(px(11.))
                 .child(value.clone())
                 .into_any_element(),
-            MarkdownNode::InlineMath(value) => code_block(value, "math").into_any_element(),
-            MarkdownNode::DisplayMath(value) => code_block(value, "math").into_any_element(),
+            MarkdownNode::InlineMath(value) => code_block(id, value, "math").into_any_element(),
+            MarkdownNode::DisplayMath(value) => code_block(id, value, "math").into_any_element(),
             MarkdownNode::InlineHtml(value) | MarkdownNode::Html(value) => div()
                 .text_color(muted())
                 .font_family(".ZedMono")
@@ -593,7 +563,8 @@ impl NativeApp {
             MarkdownNode::Rule => div().w_full().h(px(1.)).bg(line()).into_any_element(),
             MarkdownNode::Container { tag, children } => match tag {
                 Tag::Emphasis => div()
-                    .flex_none()
+                    .flex_initial()
+                    .min_w_0()
                     .italic()
                     .child(self.render_inline_group(
                         message_index,
@@ -604,7 +575,8 @@ impl NativeApp {
                     ))
                     .into_any_element(),
                 Tag::Strong => div()
-                    .flex_none()
+                    .flex_initial()
+                    .min_w_0()
                     .font_weight(FontWeight::BOLD)
                     .child(self.render_inline_group(
                         message_index,
@@ -615,7 +587,8 @@ impl NativeApp {
                     ))
                     .into_any_element(),
                 Tag::Strikethrough => div()
-                    .flex_none()
+                    .flex_initial()
+                    .min_w_0()
                     .text_color(muted())
                     .child(self.render_inline_group(
                         message_index,
@@ -626,7 +599,8 @@ impl NativeApp {
                     ))
                     .into_any_element(),
                 Tag::Superscript => div()
-                    .flex_none()
+                    .flex_initial()
+                    .min_w_0()
                     .text_size(px(10.))
                     .child(self.render_inline_group(
                         message_index,
@@ -637,7 +611,8 @@ impl NativeApp {
                     ))
                     .into_any_element(),
                 Tag::Subscript => div()
-                    .flex_none()
+                    .flex_initial()
+                    .min_w_0()
                     .text_size(px(10.))
                     .child(self.render_inline_group(
                         message_index,
@@ -651,7 +626,8 @@ impl NativeApp {
                     let safe = external_url_allowed(dest_url.as_ref());
                     let mut link = div()
                         .id(SharedString::from(id.to_string()))
-                        .flex_none()
+                        .flex_initial()
+                        .min_w_0()
                         .text_color(if safe { theme_link() } else { muted() })
                         .child(self.render_inline_group(
                             message_index,
@@ -697,7 +673,8 @@ impl NativeApp {
     ) -> gpui::AnyElement {
         match fragment {
             InlineFragment::Text(value) => div()
-                .flex_none()
+                .flex_initial()
+                .min_w_0()
                 .whitespace_normal()
                 .child(value)
                 .into_any_element(),
