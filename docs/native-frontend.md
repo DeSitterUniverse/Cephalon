@@ -7,8 +7,8 @@ The frontend talks to the existing local Python service over typed HTTP and
 SSE; retrieval, reranking, ingestion, model behavior, and backend process
 ownership remain in Python.
 
-The current GPUI-CE source revision is pinned in the root `Cargo.toml` and
-`Cargo.lock`:
+The current GPUI-CE source revision is pinned in `native/Cargo.toml` and the
+workspace `Cargo.lock`:
 
 ```text
 c738623ffbcec2aeddc44a645cc6b74646d5cf97

@@ -431,6 +431,42 @@ def test_conversation_persistence_roundtrip():
     assert loaded["messages"][1]["sources"][0]["source_id"] == "S1"
 
 
+def test_non_retrieval_answer_persistence_does_not_reference_missing_query():
+    state = build_memory_state()
+    route = routes.plan_retrieval_route("Write a short draft", "off")
+    meta = routes._empty_retrieval_meta(route, evidence_required=False)
+    conversation = storage.create_conversation(state.sqlite, "Non-retrieval answer")
+    assistant = storage.append_message(
+        state.sqlite,
+        conversation["id"],
+        "assistant",
+        "A generated answer.",
+        model="external-model",
+    )
+
+    assert meta["query_id"] is None
+    storage.save_answer_record(
+        state.sqlite,
+        {
+            "id": assistant["id"],
+            "query_id": "orphan-query-id",
+            "conversation_id": conversation["id"],
+            "message_id": assistant["id"],
+            "answer_text": assistant["content"],
+            "support_status": "unsupported",
+            "meta": meta,
+            "citations": [],
+        },
+    )
+
+    row = storage.fetchone(
+        state.sqlite,
+        "SELECT query_id FROM answer_records WHERE id = ?",
+        (assistant["id"],),
+    )
+    assert row["query_id"] is None
+
+
 def test_document_payloads_batch_tags_and_limit_previews():
     state = build_memory_state()
     for index in range(3):

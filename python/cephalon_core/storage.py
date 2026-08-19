@@ -1173,6 +1173,18 @@ def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> Non
     answer_id = payload["id"]
     with SQLITE_LOCK:
         cursor = conn.cursor()
+        query_id = payload.get("query_id")
+        if query_id:
+            query_exists = cursor.execute(
+                "SELECT 1 FROM retrieval_queries WHERE id = ?",
+                (query_id,),
+            ).fetchone()
+            if query_exists is None:
+                # Retrieval is optional. A caller can legitimately persist an
+                # answer without a retrieval query, and older callers may
+                # carry a stale diagnostic id. Do not let either case violate
+                # the answer_records foreign key and discard the answer.
+                query_id = None
         cursor.execute(
             """
             INSERT OR REPLACE INTO answer_records (
@@ -1183,7 +1195,7 @@ def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> Non
             """,
             (
                 answer_id,
-                payload.get("query_id"),
+                query_id,
                 payload.get("conversation_id"),
                 payload.get("message_id"),
                 payload.get("answer_text", ""),

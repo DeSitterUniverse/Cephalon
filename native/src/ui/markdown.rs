@@ -1,131 +1,186 @@
-//! Pure Markdown/citation parsing helpers used by the native chat renderer.
-//!
-//! Rendering adapters stay stateful in `ui.rs` so they can use the Cephalon theme
-//! and native click handlers, while this module keeps syntax recognition and
-//! safety policy independently testable.
+//! CommonMark/GFM parsing and safety helpers for the native chat renderer.
+
+use pulldown_cmark::{Event, Options, Parser, Tag};
 
 #[derive(Debug, Clone)]
 pub(crate) enum InlineFragment {
     Text(String),
-    Strong(String),
-    Emphasis(String),
-    Code(String),
-    Link { label: String, url: String },
     Citation(String),
 }
 
-pub(crate) fn parse_inline(line: &str) -> Vec<InlineFragment> {
-    let mut fragments = Vec::new();
-    let mut plain = String::new();
-    let mut index = 0;
-    let flush_plain = |fragments: &mut Vec<InlineFragment>, plain: &mut String| {
-        if !plain.is_empty() {
-            fragments.push(InlineFragment::Text(std::mem::take(plain)));
-        }
-    };
-    while index < line.len() {
-        let rest = &line[index..];
-        if rest.starts_with("[[src:") {
-            if let Some(end) = rest.find("]]") {
-                flush_plain(&mut fragments, &mut plain);
-                let marker = rest[2..end].to_string();
-                fragments.push(InlineFragment::Citation(
-                    marker.strip_prefix("src:").unwrap_or(&marker).to_string(),
-                ));
-                index += end + 2;
-                continue;
+#[derive(Debug, Clone)]
+pub(crate) enum MarkdownNode {
+    Container {
+        tag: Tag<'static>,
+        children: Vec<MarkdownNode>,
+    },
+    Text(String),
+    Code(String),
+    Html(String),
+    InlineHtml(String),
+    InlineMath(String),
+    DisplayMath(String),
+    FootnoteReference(String),
+    SoftBreak,
+    HardBreak,
+    Rule,
+    TaskListMarker(bool),
+}
+
+pub(crate) fn parse_markdown(raw: &str) -> Vec<MarkdownNode> {
+    let visible = visible_answer(raw);
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM
+        | Options::ENABLE_SMART_PUNCTUATION
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        | Options::ENABLE_MATH
+        | Options::ENABLE_DEFINITION_LIST
+        | Options::ENABLE_SUPERSCRIPT
+        | Options::ENABLE_SUBSCRIPT;
+    let parser = Parser::new_ext(&visible, options);
+    let mut roots = Vec::new();
+    let mut stack: Vec<(Tag<'static>, Vec<MarkdownNode>)> = Vec::new();
+
+    for event in parser {
+        match event.into_static() {
+            Event::Start(tag) => stack.push((tag, Vec::new())),
+            Event::End(_) => {
+                if let Some((tag, children)) = stack.pop() {
+                    push_node(
+                        &mut stack,
+                        &mut roots,
+                        MarkdownNode::Container { tag, children },
+                    );
+                }
             }
+            Event::Text(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::Text(value.into_string()),
+            ),
+            Event::Code(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::Code(value.into_string()),
+            ),
+            Event::Html(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::Html(value.into_string()),
+            ),
+            Event::InlineHtml(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::InlineHtml(value.into_string()),
+            ),
+            Event::InlineMath(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::InlineMath(value.into_string()),
+            ),
+            Event::DisplayMath(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::DisplayMath(value.into_string()),
+            ),
+            Event::FootnoteReference(value) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::FootnoteReference(value.into_string()),
+            ),
+            Event::SoftBreak => push_node(&mut stack, &mut roots, MarkdownNode::SoftBreak),
+            Event::HardBreak => push_node(&mut stack, &mut roots, MarkdownNode::HardBreak),
+            Event::Rule => push_node(&mut stack, &mut roots, MarkdownNode::Rule),
+            Event::TaskListMarker(checked) => push_node(
+                &mut stack,
+                &mut roots,
+                MarkdownNode::TaskListMarker(checked),
+            ),
         }
-        let marker = if rest.starts_with("**") || rest.starts_with("__") {
-            Some((2, true))
-        } else if rest.starts_with('*') || rest.starts_with('_') {
-            Some((1, false))
-        } else if rest.starts_with(char::from(96)) {
-            Some((1, false))
+    }
+
+    while let Some((tag, children)) = stack.pop() {
+        push_node(
+            &mut stack,
+            &mut roots,
+            MarkdownNode::Container { tag, children },
+        );
+    }
+    roots
+}
+
+fn push_node(
+    stack: &mut [(Tag<'static>, Vec<MarkdownNode>)],
+    roots: &mut Vec<MarkdownNode>,
+    node: MarkdownNode,
+) {
+    if let Some((_, children)) = stack.last_mut() {
+        if let MarkdownNode::Text(value) = node {
+            if let Some(MarkdownNode::Text(previous)) = children.last_mut() {
+                previous.push_str(&value);
+            } else {
+                children.push(MarkdownNode::Text(value));
+            }
         } else {
-            None
+            children.push(node);
+        }
+    } else {
+        roots.push(node);
+    }
+}
+
+pub(crate) fn text_content(nodes: &[MarkdownNode]) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        match node {
+            MarkdownNode::Text(value)
+            | MarkdownNode::Code(value)
+            | MarkdownNode::Html(value)
+            | MarkdownNode::InlineHtml(value)
+            | MarkdownNode::InlineMath(value)
+            | MarkdownNode::DisplayMath(value)
+            | MarkdownNode::FootnoteReference(value) => output.push_str(value),
+            MarkdownNode::Container { children, .. } => output.push_str(&text_content(children)),
+            MarkdownNode::SoftBreak | MarkdownNode::HardBreak => output.push('\n'),
+            MarkdownNode::Rule | MarkdownNode::TaskListMarker(_) => {}
+        }
+    }
+    output
+}
+
+pub(crate) fn split_citations(text: &str) -> Vec<InlineFragment> {
+    let mut fragments = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find("[[src:") {
+        let start = cursor + relative_start;
+        if start > cursor {
+            fragments.push(InlineFragment::Text(text[cursor..start].to_string()));
+        }
+        let marker_start = start + 2;
+        let Some(relative_end) = text[marker_start..].find("]]") else {
+            fragments.push(InlineFragment::Text(text[start..].to_string()));
+            cursor = text.len();
+            break;
         };
-        if let Some((delimiter_len, strong)) = marker {
-            let delimiter = &rest[..delimiter_len];
-            if let Some(relative_end) = rest[delimiter_len..].find(delimiter) {
-                flush_plain(&mut fragments, &mut plain);
-                let start = delimiter_len;
-                let end = start + relative_end;
-                let value = rest[start..end].to_string();
-                if delimiter == char::from(96).to_string() {
-                    fragments.push(InlineFragment::Code(value));
-                } else if strong {
-                    fragments.push(InlineFragment::Strong(value));
-                } else {
-                    fragments.push(InlineFragment::Emphasis(value));
-                }
-                index += end + delimiter_len;
-                continue;
-            }
-        }
-        if rest.starts_with('[') {
-            if let Some(label_end) = rest.find("](") {
-                if let Some(url_end) = rest[label_end + 2..].find(')') {
-                    flush_plain(&mut fragments, &mut plain);
-                    let label = rest[1..label_end].to_string();
-                    let url_start = label_end + 2;
-                    let url = rest[url_start..url_start + url_end].to_string();
-                    fragments.push(InlineFragment::Link { label, url });
-                    index += url_start + url_end + 1;
-                    continue;
-                }
-            }
-        }
-        let character = rest
-            .chars()
-            .next()
-            .expect("index is on a character boundary");
-        plain.push(character);
-        index += character.len_utf8();
+        let end = marker_start + relative_end;
+        let marker = text[marker_start..end].to_string();
+        fragments.push(InlineFragment::Citation(
+            marker.strip_prefix("src:").unwrap_or(&marker).to_string(),
+        ));
+        cursor = end + 2;
     }
-    flush_plain(&mut fragments, &mut plain);
+    if cursor < text.len() {
+        fragments.push(InlineFragment::Text(text[cursor..].to_string()));
+    }
+    if fragments.is_empty() && !text.is_empty() {
+        fragments.push(InlineFragment::Text(text.to_string()));
+    }
     fragments
-}
-
-pub(crate) fn markdown_prefix(line: &str) -> (Option<String>, &str) {
-    let trimmed = line.trim_start();
-    if let Some(body) = trimmed.strip_prefix("> ") {
-        return (Some("›".into()), body);
-    }
-    if let Some(body) = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-        .or_else(|| trimmed.strip_prefix("+ "))
-    {
-        return (Some("•".into()), body);
-    }
-    let digits = trimmed
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .count();
-    if digits > 0 && trimmed.as_bytes().get(digits..digits + 2) == Some(b". ") {
-        return (Some(trimmed[..digits + 2].into()), &trimmed[digits + 2..]);
-    }
-    (None, line)
-}
-
-pub(crate) fn is_table_separator(line: &str) -> bool {
-    let cells = table_cells(line);
-    !cells.is_empty()
-        && cells.iter().all(|cell| {
-            cell.chars().filter(|character| *character == '-').count() >= 3
-                && cell
-                    .chars()
-                    .all(|character| character == '-' || character == ':' || character == ' ')
-        })
-}
-
-pub(crate) fn table_cells(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|cell| cell.trim().to_string())
-        .collect()
 }
 
 pub(crate) fn visible_answer(raw: &str) -> String {
@@ -157,11 +212,67 @@ pub(crate) fn external_url_allowed(url: &str) -> bool {
     matches!(scheme.as_str(), "http" | "https")
         && !authority.trim().is_empty()
         && !authority.chars().any(char::is_whitespace)
+        && !authority.chars().any(char::is_control)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::external_url_allowed;
+    use super::*;
+    use pulldown_cmark::Tag;
+
+    fn contains_tag(nodes: &[MarkdownNode], predicate: &impl Fn(&Tag<'static>) -> bool) -> bool {
+        nodes.iter().any(|node| match node {
+            MarkdownNode::Container { tag, children } => {
+                predicate(tag) || contains_tag(children, predicate)
+            }
+            _ => false,
+        })
+    }
+
+    fn contains_task_marker(nodes: &[MarkdownNode], checked: bool) -> bool {
+        nodes.iter().any(|node| match node {
+            MarkdownNode::TaskListMarker(value) => *value == checked,
+            MarkdownNode::Container { children, .. } => contains_task_marker(children, checked),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn parses_commonmark_and_gfm_blocks() {
+        let nodes = parse_markdown(
+            "# Heading\n\n- [x] done\n- [ ] todo\n\n| A | B |\n| :- | -: |\n| 1 | 2 |\n\n~~old~~ and [^1]\n\n[^1]: note",
+        );
+        assert!(contains_tag(&nodes, &|tag| matches!(
+            tag,
+            Tag::Heading { .. }
+        )));
+        assert!(contains_tag(&nodes, &|tag| matches!(tag, Tag::List(_))));
+        assert!(contains_tag(&nodes, &|tag| matches!(tag, Tag::Table(_))));
+        assert!(contains_tag(&nodes, &|tag| matches!(
+            tag,
+            Tag::Strikethrough
+        )));
+        assert!(contains_tag(&nodes, &|tag| matches!(
+            tag,
+            Tag::FootnoteDefinition(_)
+        )));
+        assert!(contains_task_marker(&nodes, true));
+        assert!(contains_task_marker(&nodes, false));
+    }
+
+    #[test]
+    fn preserves_nested_formatting_and_citations() {
+        let nodes = parse_markdown("**bold _nested_ [[src:S1]]**");
+        let rendered_text = text_content(&nodes);
+        assert!(rendered_text.contains("nested"));
+        assert_eq!(
+            split_citations("before [[src:S1]] after [[src:S2]]")
+                .iter()
+                .filter(|fragment| matches!(fragment, InlineFragment::Citation(_)))
+                .count(),
+            2
+        );
+    }
 
     #[test]
     fn external_urls_require_http_or_https_authority() {
@@ -172,5 +283,11 @@ mod tests {
         assert!(!external_url_allowed("data:text/html,hello"));
         assert!(!external_url_allowed("https://"));
         assert!(!external_url_allowed("https://example.com/a path"));
+    }
+
+    #[test]
+    fn hidden_thinking_is_removed_before_markdown_parsing() {
+        let nodes = parse_markdown("visible <think>secret **not shown**</think> answer");
+        assert_eq!(text_content(&nodes), "visible  answer");
     }
 }

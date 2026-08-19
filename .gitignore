@@ -31,6 +31,12 @@ __pycache__/
 build/
 *.spec
 .pytest-tmp*/
+.pytest_cache/
+python/.pytest_cache/
+python/_cache/
+python/bin/
+python/pythoncore-3.14-64/
+%SystemDrive%/
 .smoke-data*/
 .shot-data*/
 .codex-working-context.md

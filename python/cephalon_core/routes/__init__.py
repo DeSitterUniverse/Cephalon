@@ -111,7 +111,11 @@ def plan_retrieval_route(
 def _empty_retrieval_meta(route: dict, *, evidence_required: bool) -> dict:
     no_answer = bool(evidence_required)
     return {
-        "query_id": str(uuid.uuid4()),
+        # Non-retrieval requests do not create a row in retrieval_queries.
+        # Keep the optional answer_records foreign key unset instead of
+        # manufacturing an orphan query id that fails when the answer is
+        # persisted.
+        "query_id": None,
         "subqueries": [],
         "retrieval_latency_ms": 0.0,
         "search_modes": ["disabled"],
