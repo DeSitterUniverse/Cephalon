@@ -1,11 +1,19 @@
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, App, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Window,
+    actions, div, px, App, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, SharedString, Subscription, Window,
 };
-use gpui_elements::editable_text::{self, EditableTextState, StringStorage};
+use gpui_elements::editable_text::{
+    self,
+    actions::{Cut, EditableTextActionHandler},
+    EditableTextState, StringStorage,
+};
 
-actions!([Submit]);
+use super::theme::{
+    input_caret, input_marked, input_placeholder, input_selection, line, orange, panel_2, text,
+};
+
+actions!([Submit, FocusNextInput, FocusPreviousInput, CutSelectionOnly]);
 
 #[derive(Debug, Clone, Copy)]
 pub struct TextChanged;
@@ -43,7 +51,7 @@ impl TextInput {
         let content = content.into();
         let state =
             cx.new(|cx| EditableTextState::new(StringStorage::from(content.to_string()), cx));
-        let focus_handle = state.read(cx).focus_handle(cx);
+        let focus_handle = state.read(cx).focus_handle(cx).tab_stop(true);
         let state_subscription = cx.subscribe(
             &state,
             |this, state, _: &gpui_elements::editable_text::TextChanged, cx| {
@@ -83,13 +91,52 @@ impl TextInput {
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextSubmitted);
     }
+
+    fn focus_next_input(
+        &mut self,
+        _: &FocusNextInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus_next(cx);
+    }
+
+    fn focus_previous_input(
+        &mut self,
+        _: &FocusPreviousInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus_prev(cx);
+    }
+
+    /// Keep ordinary form fields from inheriting the editor convention of cutting
+    /// the current line when there is no selection. GPUI-CE still owns selection,
+    /// clipboard and mutation behavior; this adapter only declines the action when
+    /// its maintained selection is empty.
+    fn cut_selection_only(
+        &mut self,
+        _: &CutSelectionOnly,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            let Some(selection) = state.selected_text_range(false, window, cx) else {
+                return;
+            };
+            if selection.range.start != selection.range.end {
+                state.cut(&Cut, window, cx);
+            }
+        });
+    }
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.to_string();
         let state = self.state.downgrade();
         let placeholder = self.placeholder.clone();
+        let focused = self.focus_handle.is_focused(window);
 
         let input = if self.multiline {
             editable_text::text_area(id)
@@ -112,14 +159,29 @@ impl Render for TextInput {
                 .whitespace_nowrap()
                 .overflow_x_scroll()
         };
+        let input = input
+            .text_color(text())
+            .placeholder_color(input_placeholder())
+            .selection_color(input_selection())
+            .caret_color(input_caret())
+            .marked_color(input_marked());
 
         div()
             .w_full()
             .key_context("TextInput")
             .track_focus(&self.focus_handle)
+            .tab_stop(true)
             .cursor(CursorStyle::IBeam)
             .text_size(px(12.))
+            .bg(panel_2())
+            .border_1()
+            .border_color(if focused { orange() } else { line() })
+            .rounded_sm()
+            .overflow_hidden()
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::focus_next_input))
+            .on_action(cx.listener(Self::focus_previous_input))
+            .on_action(cx.listener(Self::cut_selection_only))
             .child(input)
     }
 }

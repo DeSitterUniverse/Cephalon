@@ -8,7 +8,7 @@ use gpui_elements::editable_text::actions::{default_bindings, DEFAULT_INPUT_CONT
 use gpui_platform::application;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use ui::{NativeApp, Submit};
+use ui::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, NativeApp, Submit};
 
 fn main() {
     application().run(|cx: &mut App| {
@@ -16,6 +16,11 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-enter", Submit, None),
             KeyBinding::new("ctrl-enter", Submit, None),
+            // GPUI-CE's editor defaults are retained for all normal editing
+            // actions, while form semantics override only Tab and Cut.
+            KeyBinding::new("tab", FocusNextInput, Some(DEFAULT_INPUT_CONTEXT)),
+            KeyBinding::new("shift-tab", FocusPreviousInput, Some(DEFAULT_INPUT_CONTEXT)),
+            KeyBinding::new("secondary-x", CutSelectionOnly, Some(DEFAULT_INPUT_CONTEXT)),
         ]);
         let api = api::ApiClient::configured();
         let backend = Arc::new(BackendService::new());
@@ -36,10 +41,17 @@ fn main() {
                     title: Some("Cephalon".into()),
                     ..Default::default()
                 }),
+                icon: application_icon(),
                 ..Default::default()
             },
             move |_window, cx| cx.new(|cx| NativeApp::new(api, backend, stop, cx)),
         )
         .expect("failed to open Cephalon window");
     });
+}
+
+fn application_icon() -> Option<Arc<image::RgbaImage>> {
+    image::load_from_memory(include_bytes!("../../assets/cephalon.png"))
+        .ok()
+        .map(|image| Arc::new(image.to_rgba8()))
 }

@@ -1,8 +1,8 @@
 //! Pure Markdown/citation parsing helpers used by the native chat renderer.
 //!
-//! Rendering stays in `ui.rs` so it can use the Cephalon theme and native
-//! click handlers, while this module keeps syntax recognition independently
-//! testable and out of the main workbench state implementation.
+//! Rendering adapters stay stateful in `ui.rs` so they can use the Cephalon theme
+//! and native click handlers, while this module keeps syntax recognition and
+//! safety policy independently testable.
 
 #[derive(Debug, Clone)]
 pub(crate) enum InlineFragment {
@@ -142,4 +142,35 @@ pub(crate) fn visible_answer(raw: &str) -> String {
     }
     visible.push_str(&raw[cursor..]);
     visible
+}
+
+/// Only ordinary web links are eligible for OS/browser dispatch. Cephalon
+/// citations are parsed into a separate fragment and never pass through this
+/// policy.
+pub(crate) fn external_url_allowed(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some((scheme, remainder)) = trimmed.split_once(':') else {
+        return false;
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = remainder.strip_prefix("//").unwrap_or_default();
+    matches!(scheme.as_str(), "http" | "https")
+        && !authority.trim().is_empty()
+        && !authority.chars().any(char::is_whitespace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::external_url_allowed;
+
+    #[test]
+    fn external_urls_require_http_or_https_authority() {
+        assert!(external_url_allowed("https://example.com/docs?q=1"));
+        assert!(external_url_allowed("HTTP://example.com"));
+        assert!(!external_url_allowed("file:///C:/secret.txt"));
+        assert!(!external_url_allowed("javascript:alert(1)"));
+        assert!(!external_url_allowed("data:text/html,hello"));
+        assert!(!external_url_allowed("https://"));
+        assert!(!external_url_allowed("https://example.com/a path"));
+    }
 }

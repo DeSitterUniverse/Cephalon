@@ -30,3 +30,9 @@ cargo run
 The managed Python backend remains the source of truth for application data
 and is launched or connected by `BackendService` according to the normal
 development, packaged, and external-backend modes.
+
+The desktop identity is kept with the native shell: `assets/cephalon.png` is
+passed to GPUI for the X11 window icon, while `assets/cephalon.ico` is embedded
+as the Windows executable resource so the title bar and taskbar use the same
+Cephalon mark. The portable Linux package keeps the SVG beside its relocatable
+`.desktop` entry.

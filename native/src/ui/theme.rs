@@ -101,3 +101,35 @@ pub(super) fn yellow() -> gpui::Rgba {
 pub(super) fn red() -> gpui::Rgba {
     gpui::rgb(0xf87171)
 }
+
+pub(super) fn input_placeholder() -> gpui::Hsla {
+    if graphite() {
+        gpui::hsla(0.58, 0.12, 0.72, 0.78)
+    } else {
+        gpui::hsla(0.08, 0.22, 0.72, 0.72)
+    }
+}
+
+pub(super) fn input_selection() -> gpui::Hsla {
+    if graphite() {
+        gpui::hsla(0.58, 0.72, 0.46, 0.48)
+    } else {
+        gpui::hsla(0.08, 0.72, 0.42, 0.48)
+    }
+}
+
+pub(super) fn input_caret() -> gpui::Hsla {
+    if graphite() {
+        gpui::hsla(0.58, 0.82, 0.72, 1.0)
+    } else {
+        gpui::hsla(0.08, 0.86, 0.68, 1.0)
+    }
+}
+
+pub(super) fn input_marked() -> gpui::Hsla {
+    if graphite() {
+        gpui::hsla(0.58, 0.82, 0.72, 0.92)
+    } else {
+        gpui::hsla(0.08, 0.86, 0.68, 0.92)
+    }
+}

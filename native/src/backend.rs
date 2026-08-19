@@ -143,25 +143,33 @@ fn backend_is_listening() -> bool {
 }
 
 fn backend_is_cephalon() -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400))
-    else {
-        return false;
-    };
-    // `/health` probes retrieval/model readiness as well as the API identity. On a
-    // cold local install that work can take a few seconds, so a sub-second read
-    // timeout incorrectly classified a healthy Cephalon process as an unrelated
-    // service occupying the configured port.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
+    if let Some(response) = backend_probe("/identity", Duration::from_millis(750)) {
+        if backend_identity_is_compatible(&response) {
+            return true;
+        }
+    }
+
+    // Keep the health fallback for older external or packaged backends that do
+    // not yet expose `/identity`. Health remains the readiness endpoint, not the
+    // normal process-identity path.
+    backend_probe("/health", Duration::from_secs(4))
+        .is_some_and(|response| backend_health_is_compatible(&response))
+}
+
+fn backend_probe(path: &str, timeout: Duration) -> Option<String> {
+    let mut stream =
+        TcpStream::connect_timeout(&backend_addr(), Duration::from_millis(400)).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
     let host = backend_addr();
-    let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
     let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return false;
-    }
-    backend_health_is_compatible(&response)
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
+}
+
+fn backend_identity_is_compatible(response: &str) -> bool {
+    response.contains("\"service\":\"cephalon\"") && response.contains("\"api_version\":1")
 }
 
 fn backend_health_is_compatible(response: &str) -> bool {
@@ -421,7 +429,20 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::backend_health_is_compatible;
+    use super::{backend_health_is_compatible, backend_identity_is_compatible};
+
+    #[test]
+    fn accepts_cheap_compatible_cephalon_identity_response() {
+        let response = "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":1}";
+        assert!(backend_identity_is_compatible(response));
+    }
+
+    #[test]
+    fn rejects_incompatible_identity_versions() {
+        assert!(!backend_identity_is_compatible(
+            "HTTP/1.1 200 OK\r\n\r\n{\"service\":\"cephalon\",\"api_version\":2}"
+        ));
+    }
 
     #[test]
     fn accepts_compatible_cephalon_health_response() {

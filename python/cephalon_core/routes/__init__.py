@@ -166,6 +166,12 @@ def health(request: Request):
     }
 
 
+@router.get("/identity")
+def identity():
+    """Return the cheap process identity used by native startup probing."""
+    return {"service": "cephalon", "api_version": 1}
+
+
 @router.get("/models/status")
 def get_model_status(request: Request):
     return jina_runtime.model_status(state(request))

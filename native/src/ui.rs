@@ -17,13 +17,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod chat;
+mod layout;
 mod markdown;
 pub(crate) mod text_input;
 mod theme;
+use chat::{code_block, render_markdown_table};
+use layout::{compact_navigation, layout_mode, LayoutMode};
 use markdown::{
-    is_table_separator, markdown_prefix, parse_inline, table_cells, visible_answer, InlineFragment,
+    external_url_allowed, is_table_separator, markdown_prefix, parse_inline, table_cells,
+    visible_answer, InlineFragment,
 };
-pub use text_input::Submit;
+pub use text_input::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, Submit};
 use text_input::{TextChanged, TextInput, TextSubmitted};
 use theme::*;
 
@@ -36,6 +41,11 @@ fn selected_request_is_current(
     request_generation == current_generation && selected_id == Some(expected_id)
 }
 
+/// Only dispatch ordinary web links from model-generated Markdown.
+///
+/// Cephalon citations are parsed separately and never pass through this policy.
+/// Requiring an authority after `//` also avoids treating values such as
+/// `https:javascript:...` as browser URLs.
 impl NativeApp {
     fn render_right_panel(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
         let content = match self.panel {
@@ -145,14 +155,7 @@ impl NativeApp {
                 true,
                 cx.listener(|this, _, _, cx| this.new_conversation(cx)),
             ))
-            .child(
-                div()
-                    .id("history-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list),
-            )
+            .child(list)
             .child(
                 if self
                     .data
@@ -556,14 +559,7 @@ impl NativeApp {
                 ),
             );
         }
-        div().flex().flex_col().gap_2().flex_1().child(
-            div()
-                .id("sources-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(list),
-        )
+        div().flex().flex_col().gap_2().flex_1().child(list)
     }
 
     fn render_fixed_model(&mut self, kind: &str, label: &str, cx: &mut Context<Self>) -> gpui::Div {
@@ -1045,14 +1041,7 @@ impl NativeApp {
                 false,
                 cx.listener(|this, _, _, cx| this.refresh_traces(cx)),
             ))
-            .child(
-                div()
-                    .id("trace-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list),
-            )
+            .child(list)
     }
 
     fn render_health(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1286,14 +1275,7 @@ impl NativeApp {
                     .text_color(muted())
                     .child("Saved runs"),
             )
-            .child(
-                div()
-                    .id("evaluation-runs-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(runs),
-            )
+            .child(runs)
     }
 
     fn render_support(&mut self, _cx: &mut Context<Self>) -> gpui::Div {
@@ -2525,6 +2507,7 @@ impl NativeApp {
     fn choose_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.panel = panel;
         self.right_open = true;
+        self.left_open = false;
         cx.notify();
     }
 
@@ -3403,9 +3386,16 @@ impl NativeApp {
 
     fn render_shell(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let viewport_width = window.viewport_size().width;
-        let show_library = self.left_open && viewport_width >= px(1260.);
-        let show_right_panel = self.right_open && viewport_width >= px(1500.);
-        let compact = viewport_width < px(1420.);
+        let mode = layout_mode(viewport_width);
+        let compact = compact_navigation(viewport_width);
+        let show_library_docked = self.left_open && mode == LayoutMode::Wide;
+        let show_right_panel_docked = self.right_open && mode != LayoutMode::Narrow;
+        let show_library_drawer = self.left_open
+            && mode != LayoutMode::Wide
+            && (mode == LayoutMode::Medium || self.panel == Panel::History || !self.right_open);
+        let show_right_panel_drawer = self.right_open
+            && mode == LayoutMode::Narrow
+            && (self.panel != Panel::History || !self.left_open);
         let library_width = if compact { 260. } else { 300. };
         let right_width = if viewport_width < px(1750.) {
             330.
@@ -3430,15 +3420,31 @@ impl NativeApp {
         } else {
             yellow()
         };
-        let mut body = div().flex().flex_1().min_h_0();
-        if show_library {
+        let mut body = div().relative().flex().flex_1().min_h_0();
+        if show_library_docked {
             body = body.child(self.render_library(library_width, cx));
         }
         body = body
             .child(self.render_nav(compact, cx))
             .child(self.render_chat(cx));
-        if show_right_panel {
+        if show_right_panel_docked {
             body = body.child(self.render_right_panel(right_width, cx));
+        }
+        if show_library_drawer || show_right_panel_drawer {
+            let mut drawers = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_between();
+            if show_library_drawer {
+                drawers = drawers.child(self.render_library(library_width, cx));
+            }
+            if show_right_panel_drawer {
+                drawers = drawers.child(self.render_right_panel(right_width, cx));
+            }
+            body = body.child(drawers);
         }
         let topbar = div()
             .h(px(58.))
@@ -3447,6 +3453,7 @@ impl NativeApp {
             .flex()
             .items_center()
             .justify_between()
+            .gap_2()
             .bg(panel_2())
             .border_b_1()
             .border_color(line())
@@ -3455,6 +3462,8 @@ impl NativeApp {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .flex_1()
+                    .min_w_0()
                     .child(
                         div()
                             .text_size(px(18.))
@@ -3476,6 +3485,7 @@ impl NativeApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .max_w(px(if compact { 180. } else { 300. }))
                             .overflow_hidden()
                             .truncate()
@@ -3498,26 +3508,32 @@ impl NativeApp {
                     })
                     .child(ui_button(
                         "toggle-library",
-                        if show_library {
+                        if self.left_open {
                             "Hide library"
                         } else {
                             "Show library"
                         },
                         false,
-                        cx.listener(|this, _, _, cx| {
+                        cx.listener(|this, _, window, cx| {
+                            if layout_mode(window.viewport_size().width) != LayoutMode::Wide {
+                                this.right_open = false;
+                            }
                             this.left_open = !this.left_open;
                             cx.notify();
                         }),
                     ))
                     .child(ui_button(
                         "toggle-details",
-                        if show_right_panel {
+                        if self.right_open {
                             "Hide details"
                         } else {
                             "Show details"
                         },
                         false,
-                        cx.listener(|this, _, _, cx| {
+                        cx.listener(|this, _, window, cx| {
+                            if layout_mode(window.viewport_size().width) == LayoutMode::Narrow {
+                                this.left_open = false;
+                            }
                             this.right_open = !this.right_open;
                             cx.notify();
                         }),
@@ -3595,7 +3611,22 @@ impl NativeApp {
             .bg(panel())
             .border_r_1()
             .border_color(line())
-            .child(div().text_size(px(15.)).text_color(text()).child("Library"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(15.)).text_color(text()).child("Library"))
+                    .child(ui_button(
+                        "close-library",
+                        "×",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.left_open = false;
+                            cx.notify();
+                        }),
+                    )),
+            )
             .child(input_field(
                 "library-search",
                 self.inputs.search.clone(),
@@ -3855,16 +3886,19 @@ impl NativeApp {
                         .child(value),
                 ),
                 InlineFragment::Link { label, url } => {
-                    let open_url = url.clone();
-                    row.child(
-                        div()
-                            .id(SharedString::from(id))
+                    let safe = external_url_allowed(&url);
+                    let mut link = div()
+                        .id(SharedString::from(id))
+                        .text_color(if safe { link() } else { muted() })
+                        .child(label);
+                    if safe {
+                        let open_url = url.clone();
+                        link = link
                             .cursor_pointer()
                             .underline()
-                            .text_color(link())
-                            .child(label)
-                            .on_click(move |_, _, cx| cx.open_url(&open_url)),
-                    )
+                            .on_click(move |_, _, cx| cx.open_url(&open_url));
+                    }
+                    row.child(link)
                 }
                 InlineFragment::Citation(marker) => {
                     let sources = message.sources.clone();
@@ -4367,70 +4401,6 @@ fn apply_rag_drafts(
     if let Some(value) = integer(InputTarget::RagMinSourceCount) {
         settings.no_answer_min_source_count = value;
     }
-}
-
-fn render_markdown_table(rows: Vec<Vec<String>>) -> gpui::Div {
-    let mut table = div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .bg(panel_2())
-        .border_1()
-        .border_color(line())
-        .rounded_sm();
-    for (row_index, row) in rows.into_iter().enumerate() {
-        let mut table_row = div()
-            .w_full()
-            .flex()
-            .items_start()
-            .border_b_1()
-            .border_color(line())
-            .px_1()
-            .py(px(2.));
-        for cell in row {
-            table_row = table_row.child(
-                div()
-                    .flex_1()
-                    .text_size(px(11.))
-                    .font_weight(if row_index == 0 {
-                        gpui::FontWeight::BOLD
-                    } else {
-                        gpui::FontWeight::NORMAL
-                    })
-                    .text_color(if row_index == 0 {
-                        orange_light()
-                    } else {
-                        text()
-                    })
-                    .child(cell),
-            );
-        }
-        table = table.child(table_row);
-    }
-    table
-}
-
-fn code_block(value: &str, language: &str) -> gpui::Div {
-    let mut block = div()
-        .w_full()
-        .p_2()
-        .bg(panel_3())
-        .border_1()
-        .border_color(line())
-        .rounded_sm()
-        .font_family(".ZedMono")
-        .text_size(px(11.))
-        .text_color(text());
-    if !language.is_empty() {
-        block = block.child(
-            div()
-                .font_family(".ZedSans")
-                .text_size(px(10.))
-                .text_color(muted())
-                .child(language.to_string()),
-        );
-    }
-    block.child(value.to_string())
 }
 
 fn clamp_text(value: &str, max_chars: usize) -> String {
