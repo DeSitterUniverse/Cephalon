@@ -42,6 +42,11 @@ def main() -> None:
     shutil.copy2(REPO_ROOT / "target" / "release" / executable_name, package_dir / executable_name)
     shutil.copytree(REPO_ROOT / "backend" / "engine", package_dir / "backend" / "engine")
     shutil.copytree(REPO_ROOT / "assets", package_dir / "assets")
+    if os.name != "nt":
+        # Keep the icon next to the portable desktop entry as well as in the
+        # asset directory. The desktop file must not capture the CI checkout
+        # path, because users commonly move or extract this directory.
+        shutil.copy2(REPO_ROOT / "assets" / "cephalon.svg", package_dir / "cephalon.svg")
     for filename in ("README.md", "LICENSE", "LOCAL_STARTUP_NOTES.md"):
         shutil.copy2(REPO_ROOT / filename, package_dir / filename)
 
@@ -66,8 +71,11 @@ def main() -> None:
                 "Type=Application",
                 "Name=Cephalon",
                 "Comment=Native Cephalon RAG workbench",
-                f"Exec={launcher}",
-                f"Icon={package_dir / 'assets' / 'cephalon.svg'}",
+                # %k is the installed/moved desktop-file path. Resolve the
+                # launcher relative to it at launch time instead of embedding
+                # the GitHub Actions checkout path in Exec.
+                'Exec=sh -c "cd \\\"$(dirname \\\"%k\\\")\\\" && exec ./cephalon-launch.sh"',
+                "Icon=cephalon.svg",
                 "Terminal=false",
                 "Categories=Office;Utility;",
                 "",

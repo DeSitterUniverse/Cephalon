@@ -82,6 +82,14 @@ pub(super) fn orange_light() -> gpui::Rgba {
     gpui::rgb(0xffbd6b)
 }
 
+pub(super) fn link() -> gpui::Rgba {
+    if graphite() {
+        gpui::rgb(0x79b8ff)
+    } else {
+        gpui::rgb(0x8fc7ff)
+    }
+}
+
 pub(super) fn green() -> gpui::Rgba {
     gpui::rgb(0x6ee7a8)
 }

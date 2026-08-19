@@ -17,17 +17,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod markdown;
 pub(crate) mod text_input;
 mod theme;
-pub use text_input::{
-    Backspace, Copy, Cut, Delete, Down, End, Home, Left, Newline, Paste, Right, SelectAll,
-    SelectDown, SelectLeft, SelectRight, SelectUp, Submit, Up,
+use markdown::{
+    is_table_separator, markdown_prefix, parse_inline, table_cells, visible_answer, InlineFragment,
 };
+pub use text_input::Submit;
 use text_input::{TextChanged, TextInput, TextSubmitted};
 use theme::*;
 
+fn selected_request_is_current(
+    request_generation: u64,
+    current_generation: u64,
+    expected_id: &str,
+    selected_id: Option<&str>,
+) -> bool {
+    request_generation == current_generation && selected_id == Some(expected_id)
+}
+
 impl NativeApp {
-    fn render_right_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_right_panel(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
         let content = match self.panel {
             Panel::History => self.render_history(cx),
             Panel::Document => self.render_document(cx),
@@ -39,7 +49,7 @@ impl NativeApp {
             Panel::Support => self.render_support(cx),
         };
         div()
-            .w(px(390.))
+            .w(px(width))
             .h_full()
             .p_3()
             .flex()
@@ -106,7 +116,14 @@ impl NativeApp {
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.select_conversation(id.clone(), cx)),
                 )
-                .child(div().flex_1().text_color(text()).child(title));
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_color(text())
+                        .child(title),
+                );
             row = row.child(ui_button(
                 format!("delete-chat-{}", delete_id),
                 "×",
@@ -197,26 +214,7 @@ impl NativeApp {
         }
         let mut chunk_preview = div().flex().flex_col().gap_1();
         for (index, chunk) in document.chunk_preview.iter().enumerate() {
-            chunk_preview = chunk_preview.child(
-                div()
-                    .p_2()
-                    .bg(panel_2())
-                    .border_1()
-                    .border_color(line())
-                    .rounded_sm()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(orange_light())
-                            .child(format!("Chunk {}", index + 1)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(muted())
-                            .child(pretty_value(chunk)),
-                    ),
-            );
+            chunk_preview = chunk_preview.child(render_chunk_preview(index, chunk));
         }
         let document_id = document.id.clone();
         let document_path = document.path.clone();
@@ -320,6 +318,7 @@ impl NativeApp {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_1()
                     .child(input_field(
                         "new-tag",
@@ -408,17 +407,22 @@ impl NativeApp {
                 .border_color(line())
                 .rounded_sm()
                 .child(div().text_color(orange_light()).child(format!(
-                    "#{} {} · {}",
-                    source.rank,
-                    source.doc_name,
-                    source.source_id.as_deref().unwrap_or("no source id")
+                    "{} · {}",
+                    source.source_id.as_deref().unwrap_or("source"),
+                    source.doc_name
                 )))
                 .child(div().text_size(px(11.)).text_color(muted()).child(format!(
-                    "score {:.3} · chunk {}",
+                    "rank {} · score {:.3} · chunk {}",
+                    source.rank,
                     source.final_score.unwrap_or(source.score),
                     source.chunk_id
                 )))
-                .child(div().text_color(text()).child(source.snippet.clone()));
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(text())
+                        .child(clamp_text(&source.snippet, 280)),
+                );
             if let Some(page) = source.page_number {
                 card = card.child(div().text_size(px(11.)).text_color(faint()).child(format!(
                             "page {}{}",
@@ -429,32 +433,32 @@ impl NativeApp {
                                 .unwrap_or_default()
                         )));
             }
-            if let Some(section) = &source.section_heading {
-                card = card.child(detail_line("Section", section, muted()));
-            }
-            if !source.heading_path.is_empty() {
-                let heading_path = source.heading_path.join(" › ");
-                card = card.child(detail_line("Heading path", &heading_path, muted()));
-            }
-            if let Some(kind) = source
-                .source_kind
-                .as_deref()
-                .or(source.block_type.as_deref())
-            {
-                card = card.child(detail_line("Type", kind, muted()));
-            }
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(score_badge("dense", source.vector_score))
-                    .child(score_badge("BM25", source.lexical_score))
-                    .child(score_badge("fusion", source.fusion_score))
-                    .child(score_badge("rerank", source.rerank_score))
-                    .child(score_badge("final", source.final_score)),
-            );
             if expanded {
+                if let Some(section) = &source.section_heading {
+                    card = card.child(detail_line("Section", section, muted()));
+                }
+                if !source.heading_path.is_empty() {
+                    let heading_path = source.heading_path.join(" › ");
+                    card = card.child(detail_line("Heading path", &heading_path, muted()));
+                }
+                if let Some(kind) = source
+                    .source_kind
+                    .as_deref()
+                    .or(source.block_type.as_deref())
+                {
+                    card = card.child(detail_line("Type", kind, muted()));
+                }
+                card = card.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(score_badge("dense", source.vector_score))
+                        .child(score_badge("BM25", source.lexical_score))
+                        .child(score_badge("fusion", source.fusion_score))
+                        .child(score_badge("rerank", source.rerank_score))
+                        .child(score_badge("final", source.final_score)),
+                );
                 if let Some(evidence) = &source.evidence_text {
                     card = card.child(disclosure_text("Evidence sent to model", evidence));
                 }
@@ -1027,7 +1031,7 @@ impl NativeApp {
                     .border_color(line())
                     .text_size(px(11.))
                     .text_color(muted())
-                    .child(pretty_value(trace)),
+                    .child(diagnostic_value("Trace details", trace)),
             );
         }
         div()
@@ -1247,7 +1251,7 @@ impl NativeApp {
                         div()
                             .text_size(px(11.))
                             .text_color(muted())
-                            .child(pretty_value(&run.aggregate)),
+                            .child(diagnostic_value("Aggregate", &run.aggregate)),
                     ),
             );
         }
@@ -1312,7 +1316,7 @@ impl NativeApp {
                         .border_color(line())
                         .text_size(px(11.))
                         .text_color(muted())
-                        .child(pretty_value(support)),
+                        .child(diagnostic_value("Support details", support)),
                 ),
             None => div()
                 .p_3()
@@ -2347,9 +2351,12 @@ impl NativeApp {
             async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || api.conversation(&id)).await;
                 let _ = this.update(&mut *cx, |this, cx| {
-                    if request_generation == this.conversation_request_generation
-                        && this.selected_conversation.as_deref() == Some(expected_id.as_str())
-                    {
+                    if selected_request_is_current(
+                        request_generation,
+                        this.conversation_request_generation,
+                        expected_id.as_str(),
+                        this.selected_conversation.as_deref(),
+                    ) {
                         if let Ok(conversation) = result {
                             this.data.conversation = Some(conversation.clone());
                             this.messages = conversation
@@ -2383,9 +2390,12 @@ impl NativeApp {
                 let result =
                     smol::unblock(move || api.conversation_page(&id, 100, Some(before))).await;
                 let _ = this.update(&mut *cx, |this, cx| {
-                    if request_generation == this.conversation_request_generation
-                        && this.selected_conversation.as_deref() == Some(expected_id.as_str())
-                    {
+                    if selected_request_is_current(
+                        request_generation,
+                        this.conversation_request_generation,
+                        expected_id.as_str(),
+                        this.selected_conversation.as_deref(),
+                    ) {
                         if let Ok(page) = result {
                             if let Some(current) = this.data.conversation.as_mut() {
                                 merge_conversation_messages(&mut current.messages, &page);
@@ -2421,9 +2431,8 @@ impl NativeApp {
     fn focus_input(&mut self, target: InputTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.active_input = target;
         let input = self.inputs.get(target);
-        let _ = input.update(cx, |input, _| {
-            window.focus(&input.focus_handle());
-        });
+        let focus_handle = input.read(cx).focus_handle();
+        window.focus(&focus_handle, cx);
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -2704,7 +2713,7 @@ impl NativeApp {
     }
 
     fn update_chat_following(&mut self) {
-        let max_offset = self.chat_scroll.max_offset().height;
+        let max_offset = self.chat_scroll.max_offset().y;
         let remaining = max_offset + self.chat_scroll.offset().y;
         self.chat_following = max_offset <= px(1.) || remaining <= px(24.);
     }
@@ -3003,13 +3012,17 @@ impl NativeApp {
             async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || api.retrieval_trace(&id)).await;
                 let _ = this.update(&mut *cx, |this, cx| {
-                    if request_generation == this.trace_request_generation
-                        && this
-                            .data
-                            .traces
-                            .iter()
-                            .any(|trace| trace.query_id == expected_id)
-                    {
+                    let trace_is_available = this
+                        .data
+                        .traces
+                        .iter()
+                        .any(|trace| trace.query_id == expected_id);
+                    if selected_request_is_current(
+                        request_generation,
+                        this.trace_request_generation,
+                        expected_id.as_str(),
+                        trace_is_available.then_some(expected_id.as_str()),
+                    ) {
                         if let Ok(trace) = result {
                             this.data.selected_trace = Some(trace);
                         }
@@ -3388,7 +3401,17 @@ impl NativeApp {
             .child(card)
     }
 
-    fn render_shell(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_shell(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let viewport_width = window.viewport_size().width;
+        let show_library = self.left_open && viewport_width >= px(1260.);
+        let show_right_panel = self.right_open && viewport_width >= px(1500.);
+        let compact = viewport_width < px(1420.);
+        let library_width = if compact { 260. } else { 300. };
+        let right_width = if viewport_width < px(1750.) {
+            330.
+        } else {
+            390.
+        };
         let model_name = self
             .data
             .models
@@ -3408,12 +3431,14 @@ impl NativeApp {
             yellow()
         };
         let mut body = div().flex().flex_1().min_h_0();
-        if self.left_open {
-            body = body.child(self.render_library(cx));
+        if show_library {
+            body = body.child(self.render_library(library_width, cx));
         }
-        body = body.child(self.render_nav(cx)).child(self.render_chat(cx));
-        if self.right_open {
-            body = body.child(self.render_right_panel(cx));
+        body = body
+            .child(self.render_nav(compact, cx))
+            .child(self.render_chat(cx));
+        if show_right_panel {
+            body = body.child(self.render_right_panel(right_width, cx));
         }
         let topbar = div()
             .h(px(58.))
@@ -3448,22 +3473,32 @@ impl NativeApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_color(model_color).child(model_name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .max_w(px(if compact { 180. } else { 300. }))
+                            .overflow_hidden()
+                            .truncate()
+                            .text_color(model_color)
+                            .child(model_name),
+                    )
                     .child(ui_button(
                         "connect-model",
                         "Connect",
                         self.data.models.active_model.is_some(),
                         cx.listener(|this, _, _, cx| this.connect_model(cx)),
                     ))
-                    .child(
+                    .child(if compact {
+                        div()
+                    } else {
                         div()
                             .text_size(px(11.))
                             .text_color(self.event_status.color())
-                            .child(format!("● {}", self.event_status.label())),
-                    )
+                            .child(format!("● {}", self.event_status.label()))
+                    })
                     .child(ui_button(
                         "toggle-library",
-                        if self.left_open {
+                        if show_library {
                             "Hide library"
                         } else {
                             "Show library"
@@ -3476,7 +3511,7 @@ impl NativeApp {
                     ))
                     .child(ui_button(
                         "toggle-details",
-                        if self.right_open {
+                        if show_right_panel {
                             "Hide details"
                         } else {
                             "Show details"
@@ -3499,7 +3534,7 @@ impl NativeApp {
             .child(self.render_overlays(cx))
     }
 
-    fn render_library(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_library(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
         let mut list = div().flex().flex_col().gap_1();
         let mut visible_count = 0;
         let query = self.search.to_ascii_lowercase();
@@ -3526,7 +3561,14 @@ impl NativeApp {
                 .bg(if selected { panel_3() } else { panel_2() })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.select_document(id.clone(), cx)))
-                .child(div().text_color(text()).child(document.name.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_color(text())
+                        .child(document.name.clone()),
+                )
                 .child(
                     div()
                         .text_size(px(11.))
@@ -3544,7 +3586,7 @@ impl NativeApp {
             list = list.child(div().p_2().text_color(muted()).child(empty));
         }
         div()
-            .w(px(300.))
+            .w(px(width))
             .h_full()
             .p_3()
             .flex()
@@ -3596,9 +3638,9 @@ impl NativeApp {
             )
     }
 
-    fn render_nav(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_nav(&mut self, compact: bool, cx: &mut Context<Self>) -> gpui::Div {
         let mut nav = div()
-            .w(px(112.))
+            .w(px(if compact { 96. } else { 112. }))
             .h_full()
             .p_2()
             .flex()
@@ -3663,58 +3705,192 @@ impl NativeApp {
         message: &ChatMessage,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut content = div().flex().flex_col().gap_1();
         let answer = if message.content.is_empty() && message.streaming {
             "…"
         } else {
             message.content.as_str()
         };
-        for (line_index, line) in answer.lines().enumerate() {
-            let heading =
-                line.starts_with("# ") || line.starts_with("## ") || line.starts_with("### ");
-            let line_color = if heading { orange_light() } else { text() };
-            let mut row = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_1()
-                .text_color(line_color);
-            let mut cursor = 0;
-            let mut citation_index = 0;
-            while let Some(relative_start) = line[cursor..].find("[[src:") {
-                let start = cursor + relative_start;
-                let Some(relative_end) = line[start..].find("]]") else {
-                    break;
-                };
-                let end = start + relative_end + 2;
-                if start > cursor {
-                    row = row.child(line[cursor..start].to_string());
+        let lines = answer.lines().collect::<Vec<_>>();
+        let mut content = div().flex().flex_col().gap_1().w_full();
+        let mut in_code = false;
+        let mut code_language = String::new();
+        let mut code_lines = Vec::new();
+        let mut line_index = 0;
+        while line_index < lines.len() {
+            let line = lines[line_index];
+            if let Some(fence) = line
+                .trim()
+                .strip_prefix(&format!("{0}{0}{0}", char::from(96)))
+            {
+                if in_code {
+                    content = content.child(code_block(&code_lines.join("\n"), &code_language));
+                    code_lines.clear();
+                    code_language.clear();
+                    in_code = false;
+                } else {
+                    in_code = true;
+                    code_language = fence.trim().to_string();
                 }
-                let marker = line[start + "[[src:".len()..end - 2].to_string();
-                let sources = message.sources.clone();
-                let citation = marker.clone();
-                row = row.child(ui_button(
-                    format!("citation-{message_index}-{line_index}-{citation_index}"),
-                    format!("[{marker}]"),
-                    false,
-                    cx.listener(move |this, _, _, cx| {
-                        this.open_source_citation(citation.clone(), sources.clone(), cx)
-                    }),
-                ));
-                citation_index += 1;
-                cursor = end;
+                line_index += 1;
+                continue;
             }
-            if cursor < line.len() {
-                row = row.child(line[cursor..].to_string());
-            } else if line.is_empty() {
-                row = row.child(" ");
+            if in_code {
+                code_lines.push(line);
+                line_index += 1;
+                continue;
+            }
+            if line.trim().is_empty() {
+                content = content.child(div().h(px(6.)));
+                line_index += 1;
+                continue;
+            }
+            if line_index + 1 < lines.len()
+                && line.contains('|')
+                && is_table_separator(lines[line_index + 1])
+            {
+                let mut rows = vec![table_cells(line)];
+                line_index += 2;
+                while line_index < lines.len()
+                    && lines[line_index].contains('|')
+                    && !lines[line_index].trim().is_empty()
+                {
+                    rows.push(table_cells(lines[line_index]));
+                    line_index += 1;
+                }
+                content = content.child(render_markdown_table(rows));
+                continue;
+            }
+            let (prefix, body) = markdown_prefix(line);
+            let heading_level = body
+                .chars()
+                .take_while(|character| *character == '#')
+                .count();
+            let body = if (1..=6).contains(&heading_level)
+                && body.as_bytes().get(heading_level) == Some(&b' ')
+            {
+                &body[heading_level + 1..]
+            } else {
+                body
+            };
+            let mut row = self.render_inline_line(
+                message_index,
+                line_index,
+                body,
+                message,
+                heading_level,
+                cx,
+            );
+            if let Some(prefix) = prefix {
+                row = div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(div().w(px(18.)).text_color(orange_light()).child(prefix))
+                    .child(row);
+            }
+            if line.trim_start().starts_with('>') {
+                row = div()
+                    .pl_3()
+                    .border_l_2()
+                    .border_color(orange())
+                    .text_color(muted())
+                    .child(row);
             }
             content = content.child(row);
+            line_index += 1;
+        }
+        if in_code {
+            content = content.child(code_block(&code_lines.join("\n"), &code_language));
         }
         if answer.is_empty() {
             content = content.child(div().text_color(faint()).child(" "));
         }
         content
+    }
+
+    fn render_inline_line(
+        &mut self,
+        message_index: usize,
+        line_index: usize,
+        line: &str,
+        message: &ChatMessage,
+        heading_level: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut row =
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .text_color(if heading_level > 0 {
+                    orange_light()
+                } else {
+                    text()
+                });
+        if heading_level > 0 {
+            row = row
+                .text_size(px(match heading_level {
+                    1 => 17.,
+                    2 => 15.,
+                    _ => 14.,
+                }))
+                .font_weight(gpui::FontWeight::BOLD);
+        }
+        for (fragment_index, fragment) in parse_inline(line).into_iter().enumerate() {
+            let id = format!("answer-{message_index}-{line_index}-{fragment_index}");
+            row = match fragment {
+                InlineFragment::Text(value) => row.child(div().child(value)),
+                InlineFragment::Strong(value) => {
+                    row.child(div().font_weight(gpui::FontWeight::BOLD).child(value))
+                }
+                InlineFragment::Emphasis(value) => row.child(div().italic().child(value)),
+                InlineFragment::Code(value) => row.child(
+                    div()
+                        .px_1()
+                        .bg(panel_3())
+                        .rounded_sm()
+                        .font_family(".ZedMono")
+                        .text_size(px(11.))
+                        .child(value),
+                ),
+                InlineFragment::Link { label, url } => {
+                    let open_url = url.clone();
+                    row.child(
+                        div()
+                            .id(SharedString::from(id))
+                            .cursor_pointer()
+                            .underline()
+                            .text_color(link())
+                            .child(label)
+                            .on_click(move |_, _, cx| cx.open_url(&open_url)),
+                    )
+                }
+                InlineFragment::Citation(marker) => {
+                    let sources = message.sources.clone();
+                    let citation = marker.clone();
+                    row.child(
+                        div()
+                            .id(SharedString::from(id))
+                            .flex_none()
+                            .px_1()
+                            .py(px(1.))
+                            .bg(panel_3())
+                            .border_1()
+                            .border_color(orange())
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_size(px(10.))
+                            .text_color(orange_light())
+                            .child(marker)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_source_citation(citation.clone(), sources.clone(), cx)
+                            })),
+                    )
+                }
+            };
+        }
+        row
     }
 
     fn open_source_citation(
@@ -4041,6 +4217,9 @@ fn detail_line(label: &str, value: &str, color: gpui::Rgba) -> gpui::Div {
         )
         .child(
             div()
+                .flex_1()
+                .overflow_hidden()
+                .truncate()
                 .text_size(px(12.))
                 .text_color(color)
                 .child(value.to_string()),
@@ -4188,6 +4367,191 @@ fn apply_rag_drafts(
     if let Some(value) = integer(InputTarget::RagMinSourceCount) {
         settings.no_answer_min_source_count = value;
     }
+}
+
+fn render_markdown_table(rows: Vec<Vec<String>>) -> gpui::Div {
+    let mut table = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .bg(panel_2())
+        .border_1()
+        .border_color(line())
+        .rounded_sm();
+    for (row_index, row) in rows.into_iter().enumerate() {
+        let mut table_row = div()
+            .w_full()
+            .flex()
+            .items_start()
+            .border_b_1()
+            .border_color(line())
+            .px_1()
+            .py(px(2.));
+        for cell in row {
+            table_row = table_row.child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.))
+                    .font_weight(if row_index == 0 {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(if row_index == 0 {
+                        orange_light()
+                    } else {
+                        text()
+                    })
+                    .child(cell),
+            );
+        }
+        table = table.child(table_row);
+    }
+    table
+}
+
+fn code_block(value: &str, language: &str) -> gpui::Div {
+    let mut block = div()
+        .w_full()
+        .p_2()
+        .bg(panel_3())
+        .border_1()
+        .border_color(line())
+        .rounded_sm()
+        .font_family(".ZedMono")
+        .text_size(px(11.))
+        .text_color(text());
+    if !language.is_empty() {
+        block = block.child(
+            div()
+                .font_family(".ZedSans")
+                .text_size(px(10.))
+                .text_color(muted())
+                .child(language.to_string()),
+        );
+    }
+    block.child(value.to_string())
+}
+
+fn clamp_text(value: &str, max_chars: usize) -> String {
+    let mut text = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        text.push('…');
+    }
+    text
+}
+
+fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|value| match value {
+            Value::String(value) if !value.is_empty() => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn diagnostic_value(title: &str, value: &Value) -> gpui::Div {
+    let mut panel = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .bg(panel_3())
+        .border_1()
+        .border_color(line())
+        .rounded_sm()
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(orange_light())
+                .child(title.to_string()),
+        );
+
+    if let Value::Object(fields) = value {
+        let mut displayed = 0;
+        for (key, field) in fields {
+            if let Some(summary) = diagnostic_summary(field) {
+                panel = panel.child(detail_line(&humanize_key(key), &summary, muted()));
+                displayed += 1;
+            }
+            if displayed >= 12 {
+                break;
+            }
+        }
+        if displayed == 0 {
+            panel = panel.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted())
+                    .child("Structured details are available below."),
+            );
+        }
+    } else if let Some(summary) = diagnostic_summary(value) {
+        panel = panel.child(detail_line("Value", &summary, muted()));
+    }
+
+    panel.child(disclosure_value("Raw details", value))
+}
+
+fn diagnostic_summary(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) if value.is_empty() => None,
+        Value::String(value) => Some(clamp_text(value, 320)),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Array(values) => Some(format!("{} items", values.len())),
+        Value::Object(fields) => Some(format!("{} fields", fields.len())),
+    }
+}
+
+fn humanize_key(key: &str) -> String {
+    key.replace(['_', '-'], " ")
+        .split_whitespace()
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn render_chunk_preview(index: usize, chunk: &Value) -> gpui::Div {
+    let kind = value_string(chunk, &["block_type", "source_kind", "type"])
+        .unwrap_or_else(|| "paragraph".into());
+    let tokens = value_string(chunk, &["token_count", "tokens"])
+        .map(|value| format!(" · {value} tokens"))
+        .unwrap_or_default();
+    let section = value_string(chunk, &["section_heading", "section", "heading"]);
+    let chunk_text = value_string(chunk, &["text", "content", "chunk", "raw_text"])
+        .unwrap_or_else(|| clamp_text(&pretty_value(chunk), 560));
+    let mut card = div()
+        .p_2()
+        .bg(panel_2())
+        .border_1()
+        .border_color(line())
+        .rounded_sm()
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(orange_light())
+                .child(format!("Chunk {} · {}{}", index + 1, kind, tokens)),
+        );
+    if let Some(section) = section {
+        card = card.child(detail_line("Section", &section, muted()));
+    }
+    card.child(
+        div()
+            .text_size(px(11.))
+            .text_color(text())
+            .child(chunk_text),
+    )
+    .child(disclosure_value("Raw chunk details", chunk))
 }
 
 fn pretty_value(value: &Value) -> String {
@@ -4343,22 +4707,6 @@ fn response_phase_label(phase: &str) -> &'static str {
     }
 }
 
-fn visible_answer(raw: &str) -> String {
-    let mut visible = String::with_capacity(raw.len());
-    let mut cursor = 0;
-    while let Some(relative_start) = raw[cursor..].find("<think>") {
-        let start = cursor + relative_start;
-        visible.push_str(&raw[cursor..start]);
-        let content_start = start + "<think>".len();
-        let Some(relative_end) = raw[content_start..].find("</think>") else {
-            return visible;
-        };
-        cursor = content_start + relative_end + "</think>".len();
-    }
-    visible.push_str(&raw[cursor..]);
-    visible
-}
-
 fn phase_label(phase: &str) -> &'static str {
     if phase == "Connecting…" {
         "Connecting…"
@@ -4368,9 +4716,9 @@ fn phase_label(phase: &str) -> &'static str {
 }
 
 impl Render for NativeApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = if self.boot == BootState::Ready {
-            self.render_shell(cx)
+            self.render_shell(window, cx)
         } else {
             self.render_boot(cx)
         };
@@ -4388,7 +4736,10 @@ impl Render for NativeApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rag_drafts, visible_answer, InputTarget};
+    use super::{
+        apply_rag_drafts, is_table_separator, markdown_prefix, parse_inline,
+        selected_request_is_current, visible_answer, InlineFragment, InputTarget,
+    };
     use crate::api::RagSettings;
     use std::collections::HashMap;
 
@@ -4429,5 +4780,44 @@ mod tests {
         );
         assert_eq!(visible_answer("<think>still private"), "");
         assert_eq!(visible_answer("a<think>x</think>b<think>y</think>c"), "abc");
+    }
+
+    #[test]
+    fn markdown_inline_keeps_citations_and_common_formatting_typed() {
+        let fragments =
+            parse_inline("**bold** *emphasis* `code` [docs](https://example.com) [[src:S1]]");
+        assert!(fragments
+            .iter()
+            .any(|fragment| matches!(fragment, InlineFragment::Strong(value) if value == "bold")));
+        assert!(fragments.iter().any(
+            |fragment| matches!(fragment, InlineFragment::Emphasis(value) if value == "emphasis")
+        ));
+        assert!(fragments
+            .iter()
+            .any(|fragment| matches!(fragment, InlineFragment::Code(value) if value == "code")));
+        assert!(fragments.iter().any(|fragment| matches!(
+            fragment,
+            InlineFragment::Link { label, url }
+                if label == "docs" && url == "https://example.com"
+        )));
+        assert!(fragments.iter().any(
+            |fragment| matches!(fragment, InlineFragment::Citation(marker) if marker == "S1")
+        ));
+    }
+
+    #[test]
+    fn markdown_block_prefixes_cover_quotes_lists_and_tables() {
+        assert_eq!(markdown_prefix("> quoted").0.as_deref(), Some("›"));
+        assert_eq!(markdown_prefix("- item").0.as_deref(), Some("•"));
+        assert_eq!(markdown_prefix("12. item").0.as_deref(), Some("12. "));
+        assert!(is_table_separator("| --- | :---: |"));
+    }
+
+    #[test]
+    fn stale_selection_requests_cannot_replace_newer_results() {
+        assert!(selected_request_is_current(4, 4, "new", Some("new")));
+        assert!(!selected_request_is_current(3, 4, "old", Some("old")));
+        assert!(!selected_request_is_current(4, 4, "old", Some("new")));
+        assert!(!selected_request_is_current(4, 4, "missing", None));
     }
 }

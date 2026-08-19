@@ -3,42 +3,19 @@ mod backend;
 mod ui;
 
 use backend::BackendService;
-use gpui::{
-    px, size, App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions,
-};
+use gpui::{px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions};
+use gpui_elements::editable_text::actions::{default_bindings, DEFAULT_INPUT_CONTEXT};
+use gpui_platform::application;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use ui::{
-    Backspace, Copy, Cut, Delete, Down, End, Home, Left, NativeApp, Newline, Paste, Right,
-    SelectAll, SelectDown, SelectLeft, SelectRight, SelectUp, Submit, Up,
-};
+use ui::{NativeApp, Submit};
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    application().run(|cx: &mut App| {
+        cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT)));
         cx.bind_keys([
-            KeyBinding::new("backspace", Backspace, None),
-            KeyBinding::new("delete", Delete, None),
-            KeyBinding::new("left", Left, None),
-            KeyBinding::new("right", Right, None),
-            KeyBinding::new("up", Up, None),
-            KeyBinding::new("down", Down, None),
-            KeyBinding::new("shift-left", SelectLeft, None),
-            KeyBinding::new("shift-right", SelectRight, None),
-            KeyBinding::new("shift-up", SelectUp, None),
-            KeyBinding::new("shift-down", SelectDown, None),
-            KeyBinding::new("cmd-a", SelectAll, None),
-            KeyBinding::new("ctrl-a", SelectAll, None),
-            KeyBinding::new("home", Home, None),
-            KeyBinding::new("end", End, None),
             KeyBinding::new("cmd-enter", Submit, None),
             KeyBinding::new("ctrl-enter", Submit, None),
-            KeyBinding::new("enter", Newline, None),
-            KeyBinding::new("cmd-v", Paste, None),
-            KeyBinding::new("ctrl-v", Paste, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("ctrl-c", Copy, None),
-            KeyBinding::new("cmd-x", Cut, None),
-            KeyBinding::new("ctrl-x", Cut, None),
         ]);
         let api = api::ApiClient::configured();
         let backend = Arc::new(BackendService::new());

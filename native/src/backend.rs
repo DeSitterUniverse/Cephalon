@@ -147,7 +147,11 @@ fn backend_is_cephalon() -> bool {
     else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    // `/health` probes retrieval/model readiness as well as the API identity. On a
+    // cold local install that work can take a few seconds, so a sub-second read
+    // timeout incorrectly classified a healthy Cephalon process as an unrelated
+    // service occupying the configured port.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
     let host = backend_addr();
     let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {

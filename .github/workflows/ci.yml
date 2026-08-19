@@ -29,7 +29,7 @@ jobs:
         run: python -m pytest python/test_backend_stabilization.py python/test_rag_observability.py -q
       - name: Check formatting
         run: cargo fmt --check
-      - name: Check native GPUI shell
+      - name: Check native GPUI-CE shell
         run: cargo check
       - name: Run native Rust tests
         run: cargo test

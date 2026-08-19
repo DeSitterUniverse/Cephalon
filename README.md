@@ -178,11 +178,18 @@ See [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for the complete environmen
 
 ## Development and packaging
 
+The desktop shell is a native Rust application built with the pinned GPUI
+Community Edition (GPUI-CE) runtime and its `gpui_elements` input primitives.
+It keeps Cephalon's existing Python HTTP/SSE backend as a separate local
+service; the frontend does not embed retrieval or model logic. See
+[native-frontend.md](docs/native-frontend.md) for the dependency and
+packaging boundary.
+
 | Task                                    | Windows command                                    |
 | --------------------------------------- | -------------------------------------------------- |
 | Run the native desktop application      | `cargo run`                                         |
 | Run only the Python backend             | `py -3.14 python\main.py`                          |
-| Check the native GPUI application       | `cargo check`                                       |
+| Check the native GPUI-CE application    | `cargo check`                                       |
 | Build the native release                | `cargo build --release`                             |
 | Build the packaged desktop directory    | `py -3.14 scripts\build_release.py`                |
 
