@@ -694,7 +694,11 @@ impl NativeApp {
                     let _ = this.update(&mut *cx, |this, cx| {
                         match event {
                             EventStreamEvent::Connected | EventStreamEvent::Heartbeat => {
-                                this.event_status = EventStatus::Connected;
+                                this.event_status = if this.data.models.active_model.is_some() {
+                                    EventStatus::Connected
+                                } else {
+                                    EventStatus::Connecting
+                                };
                             }
                             EventStreamEvent::Error(message) => {
                                 this.event_status = EventStatus::Reconnecting;
@@ -705,7 +709,11 @@ impl NativeApp {
                                 let _ = message;
                             }
                             event => {
-                                this.event_status = EventStatus::Connected;
+                                this.event_status = if this.data.models.active_model.is_some() {
+                                    EventStatus::Connected
+                                } else {
+                                    EventStatus::Connecting
+                                };
                                 match event.refresh_target() {
                                     Some(EventStreamRefresh::Documents) => {
                                         this.refresh_documents(cx)
@@ -914,6 +922,11 @@ impl NativeApp {
                     if generation == this.server_refresh_generation {
                         if let Ok((models, server)) = result {
                             this.data.models = models;
+                            this.event_status = if this.data.models.active_model.is_some() {
+                                EventStatus::Connected
+                            } else {
+                                EventStatus::Connecting
+                            };
                             if let Some(server) = server {
                                 this.data.server = Some(server.clone());
                                 if this.active_input != InputTarget::ServerUrl {
@@ -986,6 +999,11 @@ impl NativeApp {
         let first_conversation = snapshot.conversations.first().map(|item| item.id.clone());
         self.data.health = Some(snapshot.health);
         self.data.models = snapshot.models;
+        self.event_status = if self.data.models.active_model.is_some() {
+            EventStatus::Connected
+        } else {
+            EventStatus::Connecting
+        };
         self.data.documents = snapshot.documents;
         self.data.conversations = snapshot.conversations;
         self.data.settings = snapshot.settings;
@@ -1744,6 +1762,12 @@ impl NativeApp {
                 let result = smol::unblock(move || api.load_model()).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(response) => {
+                        this.data.models.active_model = response.active_model.clone();
+                        this.event_status = if this.data.models.active_model.is_some() {
+                            EventStatus::Connected
+                        } else {
+                            EventStatus::Connecting
+                        };
                         let model = response
                             .active_model
                             .unwrap_or_else(|| "llama.cpp server".into());
@@ -2219,6 +2243,16 @@ fn ui_button(
     listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     cephalon_button(id, label, active, false, None, listener)
+}
+
+fn ui_button_disabled(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    active: bool,
+    disabled: bool,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    cephalon_button(id, label, active, disabled, None, listener)
 }
 
 fn ui_button_with_focus(

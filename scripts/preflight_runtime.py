@@ -15,7 +15,7 @@ RUNTIME_IMPORTS = [
     "pptx",
     "openpyxl",
     "pypdf",
-    "transformers",
+    "tokenizers",
     "huggingface_hub",
     "numpy",
 ]

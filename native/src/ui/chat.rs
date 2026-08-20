@@ -976,10 +976,12 @@ impl NativeApp {
                                     cx.listener(|this, _, _, cx| this.stop_query(cx)),
                                 )
                             } else {
-                                super::ui_button(
+                                super::ui_button_disabled(
                                     "send-query",
                                     "Send",
                                     true,
+                                    self.data.models.active_model.is_none()
+                                        || self.data.settings.is_none(),
                                     cx.listener(|this, _, _, cx| this.send_message(cx)),
                                 )
                             }),

@@ -29,6 +29,7 @@ def build():
         "cephalon_core.services.jina_reranker_worker",
     ]
     excluded_modules = [
+        "transformers",
         "torch",
         "tensorflow",
         "jax",
