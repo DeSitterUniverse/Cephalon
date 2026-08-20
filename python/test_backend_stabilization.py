@@ -1406,30 +1406,47 @@ def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatc
     assert meta["trace"]["reranked_candidates"][0]["listwise_rank"] == 1
 
 
-def test_reranker_verification_compares_files_with_official_manifest(monkeypatch, tmp_path):
+def test_reranker_verification_requires_and_compares_gguf_assets(monkeypatch, tmp_path):
     model_dir = tmp_path / "reranker"
     model_dir.mkdir()
-    for filename, content in (("config.json", b"config"), ("tokenizer.json", b"tokenizer")):
-        (model_dir / filename).write_bytes(content)
     state = build_memory_state()
     state.settings.reranker_model_dir = str(model_dir)
-    manifest = {
-        "repo_id": "jinaai/jina-reranker-v3.5",
-        "revision": "immutable-test-revision",
-        "files": {
-            filename: {"sha256": jina_runtime._sha256(model_dir / filename), "git_blob_sha1": jina_runtime._git_blob_sha1(model_dir / filename)}
-            for filename in ("config.json", "tokenizer.json")
-        },
+    files = {
+        jina_runtime.RERANKER_GGUF_FILE: b"gguf",
+        jina_runtime.RERANKER_PROJECTOR_FILE: b"projector",
+        jina_runtime.RERANKER_TOKENIZER_FILE: b"tokenizer",
     }
-    monkeypatch.setattr(jina_runtime, "_official_manifest", lambda _repo: manifest)
+    for filename, content in files.items():
+        (model_dir / filename).write_bytes(content)
+    monkeypatch.setattr(
+        jina_runtime,
+        "RERANKER_FILE_SHA256",
+        {filename: jina_runtime._sha256(model_dir / filename) for filename in files},
+    )
 
     assert jina_runtime.verify_model(state, "reranker")["verified"] is True
-    (model_dir / "config.json").write_bytes(b"tampered")
+    assert jina_runtime.verify_model(state, "reranker")["verified_backend"] == "gguf_vulkan"
+    (model_dir / jina_runtime.RERANKER_GGUF_FILE).write_bytes(b"tampered")
     invalid = jina_runtime.verify_model(state, "reranker")
 
     assert invalid["verified"] is False
-    assert "mismatch for config.json" in invalid["error"]
-    assert invalid["revision"] == "immutable-test-revision"
+    assert f"mismatch for {jina_runtime.RERANKER_GGUF_FILE}" in invalid["error"]
+
+
+def test_reranker_backend_never_selects_a_cpu_fallback(monkeypatch):
+    settings = SimpleNamespace(
+        reranker_backend="transformers",
+        reranker_llama_embedding_bin="missing-llama-embedding.exe",
+    )
+    monkeypatch.setattr(
+        jina_runtime,
+        "_reranker_binary_capabilities",
+        lambda _path: {"compatible": False, "error": "helper unavailable"},
+    )
+
+    backend, _capabilities = jina_runtime._select_reranker_backend(settings, True)
+
+    assert backend is None
 
 
 def test_pdf_asset_transaction_deduplicates_repeated_content_addressed_asset(tmp_path):

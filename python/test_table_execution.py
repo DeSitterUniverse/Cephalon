@@ -23,6 +23,7 @@ from cephalon_core.services.table_retrieval import (
     TableExecutionError,
     _sources_for_execution,
     document_unit_sources,
+    execute_exact_year_route,
     execute_plan,
     execute_table_route,
     requested_unit_values,
@@ -109,6 +110,68 @@ def test_direct_lookup_is_bounded_repeatable_and_source_compatible():
     ledger = build_evidence_ledger("query", prompt, [], first_sources)
     assert ledger["evidence"][0]["table_id"] == table_id
     assert ledger["evidence"][0]["cell_refs"] == first_sources[0].provenance["cell_refs"]
+
+
+@pytest.mark.parametrize(
+    ("name", "rows", "intent", "expected"),
+    [
+        (
+            "noaa_global_temperature_timeseries.csv",
+            [["Year", "Departure from Average"], ["1850", "-0.05"], ["2024", "1.26"]],
+            "temperature",
+            ["1850 | -0.05", "2024 | 1.26"],
+        ),
+        (
+            "owid_global_co2.csv",
+            [
+                ["Entity", "Code", "Year", "Total (fossil fuels and land-use change)", "Land-use change", "Fossil fuels"],
+                ["World", "OWID_WRL", "1850", "2910870000", "2714022400", "196847600"],
+                ["World", "OWID_WRL", "2024", "43184087000", "4585508400", "38598580000"],
+            ],
+            "co2",
+            ["1850 | 2910870000", "2024 | 43184087000"],
+        ),
+    ],
+)
+def test_exact_year_route_returns_requested_typed_rows_without_nearby_records(
+    name, rows, intent, expected
+):
+    state, _ = table_state(rows=rows, name=name)
+    prompt = (
+        "According to the scientific records, compare the global CO2 totals and "
+        "temperature departures in 1850 and 2024."
+        if intent == "co2"
+        else "According to the scientific temperature record, compare the global temperature departures in 1850 and 2024."
+    )
+    contexts, sources, trace = execute_exact_year_route(state, prompt)
+
+    assert trace["status"] == "executed"
+    assert trace["selected_intents"] == [intent]
+    assert len(sources) == 1
+    assert all(value in sources[0].evidence_text for value in expected)
+    assert sources[0].source_kind == "cell"
+    assert sources[0].cells
+    assert contexts[0].startswith("[Source: S1 | ")
+
+
+def test_exact_year_route_fails_closed_for_non_global_co2_rows():
+    state, _ = table_state(
+        rows=[
+            ["Entity", "Code", "Year", "Total (fossil fuels and land-use change)"],
+            ["Canada", "CAN", "1850", "100"],
+            ["Canada", "CAN", "2024", "200"],
+        ],
+        name="owid_global_co2.csv",
+    )
+
+    _, sources, trace = execute_exact_year_route(
+        state,
+        "What were global CO2 emissions in 1850 and 2024?",
+    )
+
+    assert sources == []
+    assert trace["status"] == "fallback"
+    assert trace["fallback_reason"] == "exact_rows_not_found_or_ambiguous"
 
 
 def test_filter_sort_count_and_aggregate_operations():
@@ -243,6 +306,9 @@ def test_feature_flag_and_unrecognized_questions_fall_back_to_text_route():
     state, _ = table_state()
     state.settings.table_execution = False
     assert execute_table_route(state, "What is the highest mass?")[2]["fallback_reason"] == "feature_disabled"
+    assert execute_exact_year_route(
+        state, "What were global CO2 emissions in 1850 and 2024?"
+    )[2]["fallback_reason"] == "feature_disabled"
     state.settings.table_execution = True
     assert execute_table_route(state, "Summarize the introduction.")[2]["fallback_reason"] == "not_a_table_question"
 

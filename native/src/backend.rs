@@ -304,14 +304,22 @@ fn resolve_python_command() -> Option<PythonCommand> {
 }
 
 fn spawn_dev_backend() -> Option<Child> {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = dev_repo_root();
     let python = resolve_python_command()?;
+    let script = repo_root.join("python").join("main.py");
+    if !script.exists() {
+        eprintln!(
+            "Source backend entrypoint not found at {}.",
+            script.display()
+        );
+        return None;
+    }
     let mut command = Command::new(&python.program);
     for arg in &python.prefix_args {
         command.arg(arg);
     }
     command
-        .arg(repo_root.join("python").join("main.py"))
+        .arg(script)
         .current_dir(&repo_root)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -325,6 +333,14 @@ fn spawn_dev_backend() -> Option<Child> {
         },
         Some,
     )
+}
+
+fn dev_repo_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or(manifest_dir)
 }
 
 fn spawn_release_backend() -> Option<Child> {
@@ -429,7 +445,14 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_health_is_compatible, backend_identity_is_compatible};
+    use super::{backend_health_is_compatible, backend_identity_is_compatible, dev_repo_root};
+
+    #[test]
+    fn development_backend_uses_workspace_python_entrypoint() {
+        let root = dev_repo_root();
+        assert!(root.join("python").join("main.py").is_file());
+        assert!(!root.join("native").join("python").join("main.py").exists());
+    }
 
     #[test]
     fn accepts_cheap_compatible_cephalon_identity_response() {

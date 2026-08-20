@@ -40,8 +40,10 @@ cmake --build C:\AI\llama.cpp-jina-reranker\build --config Release --target llam
 $env:CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN="C:\AI\llama.cpp-jina-reranker\build\bin\Release\llama-embedding.exe"
 ```
 
-Set `CEPHALON_RERANKER_BACKEND=transformers` for the legacy CPU rollback.
-Switching reranker runtimes does not require reindexing.
+The backend intentionally has no CPU reranker fallback. If the pinned helper
+cannot be verified, startup reports a retrieval warning instead of silently
+changing ranking semantics. Switching the Vulkan helper does not require
+reindexing.
 
 ## GPU Nano embedding server (optional external ownership)
 

@@ -8,7 +8,10 @@ use gpui_elements::editable_text::actions::{default_bindings, DEFAULT_INPUT_CONT
 use gpui_platform::application;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use ui::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, NativeApp, Submit};
+use ui::{
+    CutSelectionOnly, FocusNext, FocusNextInput, FocusPrevious, FocusPreviousInput, NativeApp,
+    Submit,
+};
 
 fn main() {
     application().run(|cx: &mut App| {
@@ -16,6 +19,8 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-enter", Submit, None),
             KeyBinding::new("ctrl-enter", Submit, None),
+            KeyBinding::new("tab", FocusNext, None),
+            KeyBinding::new("shift-tab", FocusPrevious, None),
             // GPUI-CE's editor defaults are retained for all normal editing
             // actions, while form semantics override only Tab and Cut.
             KeyBinding::new("tab", FocusNextInput, Some(DEFAULT_INPUT_CONTEXT)),

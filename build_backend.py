@@ -17,7 +17,6 @@ def build():
     
     hidden_imports = [
         "lancedb",
-        "transformers",
         "tokenizers",
         "numpy",
         "huggingface_hub",
@@ -28,7 +27,6 @@ def build():
         "pdfplumber",
         "pdfminer",
         "cephalon_core.services.jina_reranker_worker",
-        "cephalon_core.services.jina_reranker_transformers_worker",
     ]
     excluded_modules = [
         "torch",

@@ -106,13 +106,8 @@ impl NativeApp {
                         format!("delete-model-{kind}"),
                         "Delete",
                         false,
-                        cx.listener(move |this, _, _, cx| {
-                            this.confirmation = Some(Confirmation {
-                                title: "Delete cached model?".into(),
-                                message: format!("Remove the cached {kind_delete} model?"),
-                                action: ConfirmationAction::DeleteModel(kind_delete.clone()),
-                            });
-                            cx.notify();
+                        cx.listener(move |this, _, window, cx| {
+                            this.ask_delete_model(kind_delete.clone(), window, cx)
                         }),
                     )),
             )
@@ -166,9 +161,9 @@ impl NativeApp {
         let mut toggle_list = div().flex().flex_col().gap_1();
         for (name, label, enabled) in toggles {
             let name_owned = name.to_string();
-            toggle_list = toggle_list.child(ui_button(
+            toggle_list = toggle_list.child(ui_toggle(
                 format!("toggle-{name}"),
-                format!("{} {}", if enabled { "✓" } else { "○" }, label),
+                label,
                 enabled,
                 cx.listener(move |this, _, _, cx| this.toggle_rag_setting(name_owned.clone(), cx)),
             ));

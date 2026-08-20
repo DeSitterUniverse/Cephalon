@@ -31,6 +31,7 @@ MAX_REQUESTED_UNIT_CANDIDATES = 24
 MAX_DOCUMENT_SCAN_CHUNKS = 5_000
 MAX_DOCUMENT_VALUE_SOURCES = 24
 MAX_DOCUMENT_SOURCE_CHARACTERS = 1_200
+MAX_EXACT_YEAR_LOOKUP_YEARS = 8
 NUMERIC_TYPES = {"integer", "decimal", "percentage"}
 
 
@@ -183,6 +184,387 @@ def document_unit_sources(app_state, prompt: str) -> tuple[list[SourceChunk], di
         source_count=len(sources),
         candidate_count=candidate_count,
     )
+
+
+def execute_exact_year_route(
+    app_state, prompt: str
+) -> tuple[list[str], list[SourceChunk], dict[str, Any]]:
+    """Return exact year rows for an explicitly scientific, multi-record query.
+
+    Hybrid retrieval is intentionally approximate.  That is useful for prose,
+    but it is unsafe when a question asks for two exact years in a long CSV:
+    the nearest chunk can belong to another country or another year.  This
+    route only handles the two scientific record shapes currently in the
+    corpus, reads the typed table cells, and fails closed when a row or unit
+    of selection is ambiguous.
+    """
+    started = time.perf_counter()
+    years = _requested_years(prompt)
+    intents = _scientific_year_intents(prompt)
+    bounds = {
+        "max_years": MAX_EXACT_YEAR_LOOKUP_YEARS,
+        "max_tables": 16,
+        "max_rows_per_table": MAX_EXACT_YEAR_LOOKUP_YEARS,
+        "timeout_ms": EXECUTION_TIMEOUT_MS,
+    }
+    if not getattr(app_state.settings, "table_execution", True):
+        return [], [], _exact_year_trace("disabled", "feature_disabled", started, bounds)
+    if len(years) < 2:
+        return [], [], _exact_year_trace("skipped", "fewer_than_two_years", started, bounds, years=years)
+    if not intents:
+        return [], [], _exact_year_trace("skipped", "not_a_supported_scientific_record", started, bounds, years=years)
+
+    tables = storage.fetchall(
+        app_state.sqlite,
+        """
+        SELECT tables.*, documents.id AS doc_id, documents.display_name, documents.path
+        FROM tables JOIN documents ON documents.id = tables.doc_id
+        WHERE documents.status = 'ready' AND tables.source_type = 'csv'
+        ORDER BY documents.path, tables.table_index, tables.id
+        LIMIT ?
+        """,
+        (bounds["max_tables"] + 1,),
+    )
+    if len(tables) > bounds["max_tables"]:
+        return [], [], _exact_year_trace("fallback", "table_limit", started, bounds, years=years)
+
+    sources: list[SourceChunk] = []
+    selected_tables: list[str] = []
+    selected_intents: list[str] = []
+    for table in tables:
+        if len(sources) >= len(intents) or time.perf_counter() > started + EXECUTION_TIMEOUT_MS / 1000:
+            break
+        columns = storage.fetchall(
+            app_state.sqlite,
+            """
+            SELECT column_index, raw_header, normalized_header, inferred_type, inferred_unit
+            FROM table_columns WHERE table_id = ? ORDER BY column_index
+            """,
+            (table["id"],),
+        )
+        intent = _best_scientific_intent(table, columns, intents)
+        if intent is None:
+            continue
+        rows = _exact_year_rows(app_state.sqlite, table["id"], columns, years, intent)
+        if rows is None:
+            continue
+        source = _exact_year_source(
+            app_state.sqlite, table, columns, rows, years, intent, len(sources) + 1
+        )
+        sources.append(source)
+        selected_tables.append(table["id"])
+        selected_intents.append(intent)
+
+    if not sources:
+        return [], [], _exact_year_trace(
+            "fallback", "exact_rows_not_found_or_ambiguous", started, bounds,
+            years=years, intents=intents,
+        )
+    contexts = [
+        f"[Source: {source.source_id} | {source.doc_name} | Exact typed-table evidence]\n"
+        f"{source.evidence_text}"
+        for source in sources
+    ]
+    return contexts, sources, _exact_year_trace(
+        "executed", None, started, bounds,
+        years=years,
+        intents=intents,
+        selected_table_ids=selected_tables,
+        selected_intents=selected_intents,
+        source_count=len(sources),
+    )
+
+
+def _requested_years(prompt: str) -> list[int]:
+    years: list[int] = []
+    for match in re.finditer(r"\b(?:18|19|20)\d{2}\b", prompt):
+        year = int(match.group(0))
+        if year not in years:
+            years.append(year)
+        if len(years) >= MAX_EXACT_YEAR_LOOKUP_YEARS:
+            break
+    return years
+
+
+def _scientific_year_intents(prompt: str) -> list[str]:
+    lowered = prompt.casefold()
+    intents = []
+    asks_for_global_series = bool(re.search(r"\b(?:world|global|worldwide)\b", lowered))
+    if asks_for_global_series and any(
+        term in lowered for term in ("co2", "carbon dioxide", "carbon emissions", "co₂")
+    ):
+        intents.append("co2")
+    if any(term in lowered for term in ("temperature", "temperature departure", "departures", "warming")):
+        intents.append("temperature")
+    return intents
+
+
+def _best_scientific_intent(table, columns, intents: list[str]) -> str | None:
+    identity = " ".join(
+        str(table[key] or "").casefold() for key in ("display_name", "path", "caption")
+    )
+    headers = " ".join(
+        f"{column['raw_header']} {column['normalized_header']}".casefold()
+        for column in columns
+    )
+    scores = {}
+    for intent in intents:
+        score = 0
+        if intent == "co2":
+            score += 4 if "co2" in identity or "co2" in headers else 0
+            score += 3 if "total_fossil_fuels_and_land_use_change" in headers else 0
+            score += 2 if "emission" in identity or "emission" in headers else 0
+        elif intent == "temperature":
+            score += 4 if "noaa" in identity else 0
+            score += 3 if "temperature" in identity or "temperature" in headers else 0
+            score += 2 if "departure" in identity or "departure" in headers else 0
+        if score:
+            scores[intent] = score
+    if not scores:
+        return None
+    return max(scores, key=lambda item: (scores[item], -intents.index(item)))
+
+
+def _exact_year_rows(conn, table_id: str, columns, years: list[int], intent: str):
+    year_column = _year_column(conn, table_id, columns, years)
+    if year_column is None:
+        return None
+    year_values = tuple(str(year) for year in years)
+    placeholders = ",".join("?" for _ in year_values)
+    if intent == "co2":
+        entity_column = _column_index(columns, {"entity"})
+        code_column = _column_index(columns, {"code"})
+        if entity_column is None or code_column is None:
+            return None
+        candidate_rows = storage.fetchall(
+            conn,
+            f"""
+            SELECT years.row_index FROM table_cells AS years
+            WHERE years.table_id = ? AND years.column_index = ?
+              AND years.value_type = 'integer'
+              AND years.normalized_value IN ({placeholders})
+              AND (
+                EXISTS (
+                    SELECT 1 FROM table_cells AS entity
+                    WHERE entity.table_id = years.table_id
+                      AND entity.row_index = years.row_index
+                      AND entity.column_index = ? AND entity.raw_value = 'World'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM table_cells AS code
+                    WHERE code.table_id = years.table_id
+                      AND code.row_index = years.row_index
+                      AND code.column_index = ? AND code.raw_value = 'OWID_WRL'
+                )
+              )
+            ORDER BY years.row_index LIMIT ?
+            """,
+            (table_id, year_column, *year_values, entity_column, code_column, len(years)),
+        )
+    else:
+        candidate_rows = storage.fetchall(
+            conn,
+            f"""
+            SELECT row_index FROM table_cells
+            WHERE table_id = ? AND column_index = ? AND value_type = 'integer'
+              AND normalized_value IN ({placeholders})
+            ORDER BY row_index LIMIT ?
+            """,
+            (table_id, year_column, *year_values, MAX_EXACT_YEAR_LOOKUP_YEARS),
+        )
+    row_indexes = [row["row_index"] for row in candidate_rows]
+    if len(row_indexes) != len(years) or len(set(row_indexes)) != len(years):
+        return None
+    cell_placeholders = ",".join("?" for _ in row_indexes)
+    cells = storage.fetchall(
+        conn,
+        f"""
+        SELECT * FROM table_cells WHERE table_id = ? AND row_index IN ({cell_placeholders})
+        ORDER BY row_index, column_index
+        """,
+        (table_id, *row_indexes),
+    )
+    by_row: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for cell in cells:
+        by_row[cell["row_index"]].append(dict(cell))
+    value_column = _value_column(columns, by_row, year_column, intent)
+    if value_column is None:
+        return None
+    selected = []
+    for year in years:
+        row = next(
+            (items for items in by_row.values()
+             if any(cell["column_index"] == year_column and cell["raw_value"] == str(year) for cell in items)),
+            None,
+        )
+        if row is None:
+            return None
+        value = next((cell for cell in row if cell["column_index"] == value_column), None)
+        if value is None or value["value_type"] not in NUMERIC_TYPES or value["normalized_value"] is None:
+            return None
+        selected.append({"year": year, "cells": row, "value_column": value_column})
+    return {
+        "year_column": year_column,
+        "value_column": value_column,
+        "rows": selected,
+    }
+
+
+def _year_column(conn, table_id: str, columns, years: list[int]) -> int | None:
+    declared = [
+        column["column_index"] for column in columns
+        if str(column["normalized_header"] or "").casefold() == "year"
+        or str(column["raw_header"] or "").strip().casefold() == "year"
+    ]
+    candidates = declared or [column["column_index"] for column in columns]
+    scored = []
+    for column_index in candidates:
+        values = storage.fetchall(
+            conn,
+            """
+            SELECT COUNT(DISTINCT row_index) AS count FROM table_cells
+            WHERE table_id = ? AND column_index = ? AND value_type = 'integer'
+              AND normalized_value IN ({})
+            """.format(",".join("?" for _ in years)),
+            (table_id, column_index, *(str(year) for year in years)),
+        )[0]["count"]
+        scored.append((int(values), column_index))
+    if not scored:
+        return None
+    score, column_index = max(scored, key=lambda item: (item[0], -item[1]))
+    return column_index if score >= len(years) else None
+
+
+def _value_column(columns, rows_by_index, year_column: int, intent: str) -> int | None:
+    if intent == "co2":
+        preferred = [
+            column["column_index"] for column in columns
+            if "total_fossil_fuels_and_land_use_change" in str(column["normalized_header"] or "").casefold()
+            or str(column["raw_header"] or "").casefold().startswith("total ")
+        ]
+        if preferred:
+            return preferred[0]
+    numeric_counts = []
+    for column in columns:
+        index = column["column_index"]
+        if index == year_column or index in {0, 1} and intent == "co2":
+            continue
+        count = sum(
+            1 for row in rows_by_index.values()
+            for cell in row
+            if cell["column_index"] == index
+            and cell["value_type"] in NUMERIC_TYPES
+            and cell["normalized_value"] is not None
+        )
+        numeric_counts.append((count, -index, index))
+    if not numeric_counts:
+        return None
+    count, _, index = max(numeric_counts)
+    return index if count == len(rows_by_index) else None
+
+
+def _column_index(columns, names: set[str]) -> int | None:
+    for column in columns:
+        if str(column["normalized_header"] or "").casefold() in names:
+            return column["column_index"]
+    return None
+
+
+def _exact_year_source(conn, table, columns, result, years: list[int], intent: str, rank: int) -> SourceChunk:
+    refs = sorted({cell["cell_ref"] for row in result["rows"] for cell in row["cells"]})
+    header_by_index = {column["column_index"]: column for column in columns}
+    value_header = _display_header(conn, table["id"], header_by_index[result["value_column"]])
+    year_header = _display_header(conn, table["id"], header_by_index[result["year_column"]])
+    lines = [
+        "Deterministic exact-year lookup over typed CSV rows; no interpolation or nearest-chunk selection was used.",
+        f"Columns: {year_header} | {value_header}",
+    ]
+    if intent == "co2":
+        lines.append("Selection: Entity = World (Code = OWID_WRL). The CSV does not declare a unit for this total column; values below are unchanged from the file.")
+    else:
+        lines.append("The NOAA CSV declares units as Degrees Celsius and a 1901-2000 base period.")
+    for row in result["rows"]:
+        by_index = {cell["column_index"]: cell for cell in row["cells"]}
+        lines.append(
+            f"{row['year']} | {by_index[result['value_column']]['raw_value']} | "
+            + " | ".join(cell["raw_value"] for cell in row["cells"])
+        )
+    evidence = "\n".join(lines)
+    digest = hashlib.sha256(
+        json.dumps({"table_id": table["id"], "years": years, "refs": refs}, sort_keys=True).encode()
+    ).hexdigest()[:16]
+    cited_cells = _cell_citation_payloads(conn, table["id"], refs)
+    header_refs = sorted({cell["header_ref"] for cell in cited_cells if cell.get("header_ref")})
+    return SourceChunk(
+        rank=rank,
+        source_id=f"S{rank}",
+        doc_id=table["doc_id"],
+        doc_name=table["display_name"] or str(table["path"]).rsplit("\\", 1)[-1],
+        chunk_id=f"exact-year-{digest}",
+        source_kind="cell",
+        score=1.0,
+        final_score=1.0,
+        snippet="\n".join(lines[:4]),
+        evidence_text=evidence,
+        block_type="table",
+        page_number=table["page_number"],
+        page_end=table["page_end"],
+        table_id=table["id"],
+        table_title=table["caption"],
+        sheet_name=table["sheet_name"],
+        cell_refs=refs,
+        header_refs=header_refs,
+        cells=cited_cells,
+        table_operation="lookup",
+        table_result=[
+            {"year": row["year"], "value": next(cell["raw_value"] for cell in row["cells"] if cell["column_index"] == result["value_column"])}
+            for row in result["rows"]
+        ],
+        provenance={
+            "table_id": table["id"],
+            "cell_refs": refs,
+            "operation": "exact_year_lookup",
+            "years": years,
+            "intent": intent,
+        },
+        context_selection={"decision": "deterministic exact-year lookup", "objective": 1.0},
+    )
+
+
+def _display_header(conn, table_id: str, column) -> str:
+    declared = column["raw_header"] or column["normalized_header"]
+    if declared and not str(declared).lstrip().startswith("#"):
+        return str(declared)
+    candidates = storage.fetchall(
+        conn,
+        """
+        SELECT raw_value FROM table_cells
+        WHERE table_id = ? AND column_index = ? AND row_index < 16
+          AND value_type = 'text' AND raw_value <> ''
+        ORDER BY row_index
+        """,
+        (table_id, column["column_index"]),
+    )
+    values = [str(candidate["raw_value"]) for candidate in candidates]
+    for value in values:
+        if value.casefold() == "year" or "departure from average" in value.casefold():
+            return value
+    for value in values:
+        if re.search(r"\b(?:year|departure|average)\b", value, re.IGNORECASE):
+            return value
+    return str(declared or f"column_{column['column_index'] + 1}")
+
+
+def _exact_year_trace(status, reason, started, bounds, **extra):
+    return {
+        "route": "typed_table_exact_year",
+        "status": status,
+        "fallback_reason": reason,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+        "model_calls": 0,
+        "bounds": bounds,
+        **extra,
+    }
 
 
 def _json_object(value: str | None) -> dict[str, Any]:

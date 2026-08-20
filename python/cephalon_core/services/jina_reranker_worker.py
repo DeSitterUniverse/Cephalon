@@ -19,8 +19,8 @@ Why a dedicated worker is necessary:
   back to a different scoring equation.
 
 The prompt, block fusion, and projector follow Jina's v3.5 GGUF reference and
-the llama.cpp Qwen3 SWA work in PR 26286. Cephalon keeps the previous isolated
-Transformers worker as a compatibility fallback.
+the llama.cpp Qwen3 SWA work in PR 26286. This is the only supported reranker
+path; malformed or unavailable Vulkan inference fails closed.
 """
 
 from __future__ import annotations

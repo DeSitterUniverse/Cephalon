@@ -79,8 +79,9 @@ Start-Process -FilePath $python314 -ArgumentList 'python\main.py' `
 ```
 
 Wait for `/health` to report `engines_ready=true`, `selected_backend=gguf_vulkan`,
-and reranker device `Vulkan0` before timing any request. A CPU fallback is a
-valid availability path but is not comparable to the fixed Vulkan benchmark.
+and reranker device `Vulkan0` before timing any request. The backend fails
+closed if the pinned Vulkan helper is unavailable; it does not switch to a CPU
+reranker.
 
 The generation boundary is also bounded by the configured context window:
 history, retrieved evidence, and repair directives are reduced before a chat

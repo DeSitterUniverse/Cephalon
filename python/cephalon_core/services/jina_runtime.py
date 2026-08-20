@@ -34,7 +34,6 @@ from ..config import (
     RERANKER_REPO,
     RERANKER_REVISION,
     RERANKER_TOKENIZER_FILE,
-    RERANKER_TRANSFORMERS_REPO,
 )
 
 MANIFEST_FILENAME = ".cephalon-hf-manifest.json"
@@ -120,10 +119,6 @@ def _reranker_path(settings) -> Path:
     return Path(settings.reranker_model_dir)
 
 
-def _legacy_reranker_path(settings) -> Path:
-    return Path(settings.legacy_reranker_model_dir)
-
-
 def _reranker_required_files() -> tuple[str, ...]:
     return (RERANKER_GGUF_FILE, RERANKER_PROJECTOR_FILE, RERANKER_TOKENIZER_FILE)
 
@@ -186,23 +181,12 @@ def _reranker_binary_capabilities(executable: str) -> dict:
     }
 
 
-def _select_reranker_backend(settings, gguf_installed: bool, legacy_installed: bool) -> tuple[str | None, dict]:
-    """Resolve the configured backend while preserving a safe CPU rollback."""
+def _select_reranker_backend(settings, gguf_installed: bool) -> tuple[str | None, dict]:
+    """Resolve the fixed Vulkan GGUF backend and never select CPU inference."""
 
-    preference = settings.reranker_backend
-    if preference not in {"auto", "gguf", "transformers"}:
-        preference = "auto"
     capabilities = _reranker_binary_capabilities(settings.reranker_llama_embedding_bin)
     gguf_ready = gguf_installed and bool(capabilities["compatible"])
-    if preference == "gguf":
-        return ("gguf_vulkan" if gguf_ready else None), capabilities
-    if preference == "transformers":
-        return ("transformers_cpu" if legacy_installed else None), capabilities
-    if gguf_ready:
-        return "gguf_vulkan", capabilities
-    if legacy_installed:
-        return "transformers_cpu", capabilities
-    return None, capabilities
+    return ("gguf_vulkan" if gguf_ready else None), capabilities
 
 
 def _llama_server_executable(settings) -> str | None:
@@ -211,6 +195,22 @@ def _llama_server_executable(settings) -> str | None:
         return str(configured)
     discovered = shutil.which("llama-server") or shutil.which("llama-server.exe")
     return discovered
+
+
+def _same_model_path(actual: str, expected: Path) -> bool:
+    return os.path.normcase(os.path.normpath(actual)) == os.path.normcase(os.path.normpath(str(expected)))
+
+
+def _embedder_server_ready(settings) -> bool:
+    """Accept only the expected llama.cpp GGUF server on the embedder port."""
+
+    try:
+        _json_get(settings.embedder_server_url, "/health")
+        props = _json_get(settings.embedder_server_url, "/props")
+    except (URLError, OSError, ValueError):
+        return False
+    model_path = props.get("model_path") or props.get("model_alias")
+    return isinstance(model_path, str) and _same_model_path(model_path, _embedder_path(settings))
 
 
 def _base_model_status(settings, kind: str) -> dict:
@@ -230,12 +230,9 @@ def _base_model_status(settings, kind: str) -> dict:
             "sha256": _sha256(path) if installed else None,
         }
     path = _reranker_path(settings)
-    legacy_path = _legacy_reranker_path(settings)
     required = _reranker_required_files()
     gguf_installed = path.is_dir() and all((path / item).is_file() for item in required)
-    legacy_required = ("config.json", "tokenizer.json", "model.safetensors")
-    legacy_installed = legacy_path.is_dir() and all((legacy_path / item).is_file() for item in legacy_required)
-    backend, capabilities = _select_reranker_backend(settings, gguf_installed, legacy_installed)
+    backend, capabilities = _select_reranker_backend(settings, gguf_installed)
     return {
         "kind": kind,
         "name": "Jina Reranker v3.5",
@@ -244,15 +241,13 @@ def _base_model_status(settings, kind: str) -> dict:
         "revision": RERANKER_REVISION,
         "path": str(path),
         "model_file": str(path / RERANKER_GGUF_FILE),
-        "installed": gguf_installed or legacy_installed,
+        "installed": gguf_installed,
         "gguf_installed": gguf_installed,
-        "legacy_installed": legacy_installed,
-        "legacy_path": str(legacy_path),
         "selected_backend": backend,
         "llama_embedding": capabilities,
         "dimension": None,
-        "precision": RERANKER_GGUF_PRECISION if backend == "gguf_vulkan" else "BF16" if backend == "transformers_cpu" else None,
-        "trust_remote_code": backend == "transformers_cpu",
+        "precision": RERANKER_GGUF_PRECISION if backend == "gguf_vulkan" else None,
+        "trust_remote_code": False,
         "required": list(required),
     }
 
@@ -290,6 +285,9 @@ def embedder_status(app_state, probe: bool = True) -> dict:
         "last_health_check": runtime.get("last_health_check"),
         "last_error": runtime.get("last_error"),
         "owned_process": bool(getattr(app_state, "embedder_process_owned", False)),
+        "backend": "llama.cpp",
+        "device": app_state.settings.embedder_device,
+        "gpu_layers": app_state.settings.embedder_gpu_layers,
     }
     if probe and status == "running":
         try:
@@ -324,7 +322,7 @@ def reranker_status(app_state) -> dict:
         "queue_size": runtime.get("queue_size", 0),
         "last_health_check": runtime.get("last_health_check"),
         "last_failure": runtime.get("last_failure"),
-        "trust_remote_code": runtime.get("backend") == "transformers_cpu",
+        "trust_remote_code": False,
     }
 
 
@@ -381,15 +379,16 @@ def start(app_state) -> None:
 
 
 def _start_embedder(app_state) -> None:
+    if not app_state.settings.embedder_device.lower().startswith("vulkan"):
+        raise RuntimeError("Jina Nano Retrieval requires a Vulkan llama.cpp device; CPU fallback is disabled.")
+    if app_state.settings.embedder_gpu_layers <= 0:
+        raise RuntimeError("Jina Nano Retrieval requires GPU layers; CPU fallback is disabled.")
     executable = _llama_server_executable(app_state.settings)
     if not executable:
         raise RuntimeError("llama-server.exe is unavailable; configure CEPHALON_LLAMA_SERVER_BIN for the dedicated embedder.")
-    try:
-        _json_get(app_state.settings.embedder_server_url, "/health")
+    if _embedder_server_ready(app_state.settings):
         app_state.embedder_runtime_status = {"status": "running", "last_health_check": _now(), "last_error": None}
         return
-    except (URLError, OSError, ValueError):
-        pass
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     command = [
         executable, "-m", str(_embedder_path(app_state.settings)),
@@ -412,52 +411,37 @@ def _start_embedder(app_state) -> None:
 def _start_reranker(app_state) -> None:
     status = _base_model_status(app_state.settings, "reranker")
     backend = status.get("selected_backend")
-    if backend == "gguf_vulkan":
-        verification = verify_model(app_state, "reranker")
-        if not verification.get("verified"):
-            if status.get("legacy_installed") and app_state.settings.reranker_backend == "auto":
-                backend = "transformers_cpu"
-            else:
-                raise RuntimeError(str(verification.get("error") or "Jina GGUF integrity verification failed."))
-    if backend == "gguf_vulkan":
-        worker_arguments = [
-            str(_reranker_path(app_state.settings)),
-            app_state.settings.reranker_llama_embedding_bin,
-            app_state.settings.reranker_device,
-            str(app_state.settings.reranker_gpu_layers),
-            str(app_state.settings.reranker_max_context_tokens),
-        ]
-        command = (
-            [sys.executable, "--cephalon-jina-gguf-worker", *worker_arguments]
-            if getattr(sys, "frozen", False)
-            else [
-                sys.executable,
-                "-m",
-                "cephalon_core.services.jina_reranker_worker",
-                *worker_arguments,
-            ]
-        )
-        device = app_state.settings.reranker_device
-        precision = RERANKER_GGUF_PRECISION
-    elif backend == "transformers_cpu":
-        worker_arguments = [str(_legacy_reranker_path(app_state.settings))]
-        command = (
-            [sys.executable, "--cephalon-jina-transformers-worker", *worker_arguments]
-            if getattr(sys, "frozen", False)
-            else [
-                sys.executable,
-                "-m",
-                "cephalon_core.services.jina_reranker_transformers_worker",
-                *worker_arguments,
-            ]
-        )
-        device = "CPU"
-        precision = "BF16"
-    else:
+    if backend != "gguf_vulkan":
         capabilities = status.get("llama_embedding", {})
         missing = ", ".join(capabilities.get("missing_features", []))
         reason = capabilities.get("error") or (f"missing llama.cpp features: {missing}" if missing else "model assets are missing")
-        raise RuntimeError(f"No usable Jina Reranker v3.5 backend: {reason}.")
+        raise RuntimeError(f"No usable Vulkan llama.cpp Jina Reranker v3.5 backend: {reason}.")
+    if not app_state.settings.reranker_device.lower().startswith("vulkan"):
+        raise RuntimeError("Jina Reranker v3.5 requires a Vulkan llama.cpp device; CPU fallback is disabled.")
+    if app_state.settings.reranker_gpu_layers <= 0:
+        raise RuntimeError("Jina Reranker v3.5 requires GPU layers; CPU fallback is disabled.")
+    verification = verify_model(app_state, "reranker")
+    if not verification.get("verified"):
+        raise RuntimeError(str(verification.get("error") or "Jina GGUF integrity verification failed."))
+    worker_arguments = [
+        str(_reranker_path(app_state.settings)),
+        app_state.settings.reranker_llama_embedding_bin,
+        app_state.settings.reranker_device,
+        str(app_state.settings.reranker_gpu_layers),
+        str(app_state.settings.reranker_max_context_tokens),
+    ]
+    command = (
+        [sys.executable, "--cephalon-jina-gguf-worker", *worker_arguments]
+        if getattr(sys, "frozen", False)
+        else [
+            sys.executable,
+            "-m",
+            "cephalon_core.services.jina_reranker_worker",
+            *worker_arguments,
+        ]
+    )
+    device = app_state.settings.reranker_device
+    precision = RERANKER_GGUF_PRECISION
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(
         command, cwd=str(Path(__file__).resolve().parents[2]), text=True,
@@ -577,57 +561,8 @@ def verify_model(app_state, kind: str) -> dict:
     directory = _reranker_path(app_state.settings)
     payload["files"] = {}
     if not payload["gguf_installed"]:
-        # Preserve verification for pre-GGUF installations and embedders that
-        # supplied only `reranker_model_dir` before the split cache paths were
-        # introduced. This is a genuine rollback contract: Settings must not
-        # claim that an intact CPU fallback is corrupt merely because the new
-        # preferred cache is absent.
-        configured_legacy = _legacy_reranker_path(app_state.settings)
-        inline_legacy = directory
-        legacy_directory = (
-            inline_legacy
-            if (inline_legacy / "config.json").is_file()
-            else configured_legacy
-        )
-        if not all((legacy_directory / item).is_file() for item in ("config.json", "tokenizer.json")):
-            payload["verified"] = False
-            payload["error"] = "Q8_0 GGUF assets and Transformers fallback files are missing."
-            return payload
-        manifest = _read_manifest(legacy_directory)
-        if manifest is None:
-            try:
-                manifest = _official_manifest(RERANKER_TRANSFORMERS_REPO)
-                _write_manifest(legacy_directory, manifest)
-            except Exception as exc:
-                payload["verified"] = False
-                payload["error"] = f"Official Transformers reranker manifest is unavailable: {exc}"
-                return payload
-        mismatches: list[str] = []
-        for relative_path, expected in manifest["files"].items():
-            item = legacy_directory / relative_path
-            if not item.is_file():
-                mismatches.append(f"missing {relative_path}")
-                continue
-            actual_sha256 = _sha256(item)
-            actual_blob = _git_blob_sha1(item)
-            payload["files"][relative_path] = {
-                "sha256": actual_sha256,
-                "git_blob_sha1": actual_blob,
-            }
-            if expected.get("sha256") and actual_sha256 != expected["sha256"]:
-                mismatches.append(f"sha256 mismatch for {relative_path}")
-            elif (
-                not expected.get("sha256")
-                and expected.get("git_blob_sha1")
-                and actual_blob != expected["git_blob_sha1"]
-            ):
-                mismatches.append(f"git blob mismatch for {relative_path}")
-        payload["path"] = str(legacy_directory)
-        payload["revision"] = manifest.get("revision")
-        payload["verified_backend"] = "transformers_cpu"
-        payload["verified"] = not mismatches
-        if mismatches:
-            payload["error"] = "; ".join(mismatches)
+        payload["verified"] = False
+        payload["error"] = "Jina v3.5 Q8_0 GGUF assets are missing; the CPU reranker fallback is disabled."
         return payload
     mismatches: list[str] = []
     for relative_path, expected_sha256 in RERANKER_FILE_SHA256.items():
@@ -643,6 +578,7 @@ def verify_model(app_state, kind: str) -> dict:
         if actual_sha256 != expected_sha256:
             mismatches.append(f"sha256 mismatch for {relative_path}")
     payload["revision"] = RERANKER_REVISION
+    payload["verified_backend"] = "gguf_vulkan"
     payload["verified"] = not mismatches
     if mismatches:
         payload["error"] = "; ".join(mismatches)

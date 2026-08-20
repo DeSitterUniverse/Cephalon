@@ -20,7 +20,6 @@ EMBEDDER_GGUF_REPO = "jinaai/jina-embeddings-v5-text-nano-retrieval-GGUF"
 EMBEDDER_GGUF_FILE = "v5-nano-retrieval-Q8_0.gguf"
 EMBEDDER_GGUF_SHA256 = "86b6e6279e9b9e71389f02a082764a2ac2b15a50e37482c26f98d69092f12442"
 RERANKER_REPO = "jinaai/jina-reranker-v3.5-GGUF"
-RERANKER_TRANSFORMERS_REPO = "jinaai/jina-reranker-v3.5"
 RERANKER_REVISION = "884f7c67aa3ac24edb89064da8c7bfd03f4a90f5"
 RERANKER_LLAMA_CPP_REVISION = "80c940e5a80555167c4ec37652deca6528810f91"
 RERANKER_GGUF_FILE = "jina-reranker-v3.5-Q8_0.gguf"
@@ -28,7 +27,8 @@ RERANKER_GGUF_PRECISION = "Q8_0"
 RERANKER_PROJECTOR_FILE = "projector.safetensors"
 RERANKER_TOKENIZER_FILE = "tokenizer.json"
 # Q8_0 preserves the fixed scientific retrieval metrics while reducing model
-# storage and request wall time. BF16 remains the controlled rollback artifact.
+# storage and request wall time. The runtime accepts only this Vulkan GGUF
+# artifact; a CPU reranker is not a valid production path.
 RERANKER_FILE_SHA256 = {
     RERANKER_GGUF_FILE: "bedbedd688d18665448241f1aad78afb23a4476b89ae0867243e1c79aa4357b8",
     RERANKER_PROJECTOR_FILE: "b14c3d97315ca33490e630218c821640f183180fd971c5c3242f5b81aadcedf9",
@@ -73,12 +73,9 @@ class Settings:
         self.model_dir = os.path.abspath(os.path.expanduser(os.getenv("CEPHALON_MODEL_DIR", os.path.join(self.data_dir, "models"))))
         self.embedder_model_dir = os.path.join(self.model_dir, "jina-v5-nano-retrieval-q8_0")
         self.reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5-gguf-q8_0")
-        # Existing installations remain usable until the GGUF assets and a
-        # feature-compatible llama-embedding binary are available.
-        self.legacy_reranker_model_dir = os.path.join(self.model_dir, "jina-reranker-v3.5")
         self.embedder_server_url = os.getenv("CEPHALON_EMBEDDER_SERVER_URL", "http://127.0.0.1:8090").rstrip("/")
         self.embedder_server_port = int(os.getenv("CEPHALON_EMBEDDER_SERVER_PORT", "8090"))
-        self.llama_server_bin = os.getenv("CEPHALON_LLAMA_SERVER_BIN", r"C:\\AI\\llama.cpp\\build\\bin\\Release\\llama-server.exe")
+        self.llama_server_bin = os.getenv("CEPHALON_LLAMA_SERVER_BIN", r"C:\AI\llama.cpp\build\bin\Release\llama-server.exe")
         # This workstation exposes the RX 6700 XT as Vulkan0. Keep the
         # settings overridable for a different local llama.cpp device name.
         self.embedder_device = os.getenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan0").strip() or "Vulkan0"
@@ -88,6 +85,19 @@ class Settings:
         # physical batch of 512 tokens rejects valid combined requests.
         self.embedder_physical_batch_size = max(512, int(os.getenv("CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE", "4096")))
         default_embedding_bin = os.path.join(os.path.dirname(self.llama_server_bin), "llama-embedding.exe")
+        llama_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(self.llama_server_bin))))
+        )
+        pinned_embedding_bin = os.path.join(
+            llama_root,
+            "llama.cpp-jina-reranker",
+            "build",
+            "bin",
+            "Release",
+            "llama-embedding.exe",
+        )
+        if os.path.isfile(pinned_embedding_bin):
+            default_embedding_bin = pinned_embedding_bin
         self.reranker_llama_embedding_bin = os.getenv(
             "CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN",
             default_embedding_bin,
@@ -101,9 +111,9 @@ class Settings:
             131072,
             max(4096, int(os.getenv("CEPHALON_RERANKER_MAX_CONTEXT_TOKENS", "65536"))),
         )
-        self.reranker_backend = os.getenv("CEPHALON_RERANKER_BACKEND", "auto").strip().lower() or "auto"
-        if self.reranker_backend not in {"auto", "gguf", "transformers"}:
-            self.reranker_backend = "auto"
+        # The fixed stack is intentionally fail-closed: no environment value
+        # may select a Transformers/CPU reranker.
+        self.reranker_backend = "gguf"
         self.typed_tables = os.getenv("CEPHALON_TYPED_TABLES", "1") != "0"
         self.table_execution = os.getenv("CEPHALON_TABLE_EXECUTION", "1") != "0"
         self.obsidian_vault_dir = os.path.abspath(os.path.expanduser(

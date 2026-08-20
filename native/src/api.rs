@@ -66,7 +66,10 @@ impl ApiClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client: Client::builder()
                 .connect_timeout(Duration::from_millis(800))
-                .timeout(Duration::from_secs(90))
+                // Local retrieval and CPU reranking can take longer than a
+                // normal request, while the backend's model call is bounded
+                // at five minutes.
+                .timeout(Duration::from_secs(300))
                 .build()
                 .expect("reqwest client configuration is valid"),
         }

@@ -44,8 +44,13 @@ impl NativeApp {
                 format!("delete-chat-{}", delete_id),
                 "×",
                 false,
-                cx.listener(move |this, _, _, cx| {
-                    this.ask_delete_conversation(delete_id.clone(), delete_title.clone(), cx)
+                cx.listener(move |this, _, window, cx| {
+                    this.ask_delete_conversation(
+                        delete_id.clone(),
+                        delete_title.clone(),
+                        window,
+                        cx,
+                    )
                 }),
             ));
             list = list.child(row);
@@ -76,12 +81,7 @@ impl NativeApp {
                         cx.listener(|this, _, _, cx| this.load_older_messages(cx)),
                     )
                 } else {
-                    ui_button(
-                        "load-older-messages-disabled",
-                        "All messages loaded",
-                        false,
-                        cx.listener(|_, _, _, _| {}),
-                    )
+                    ui_disabled_button("load-older-messages-disabled", "All messages loaded")
                 },
             )
             .child(input_field(

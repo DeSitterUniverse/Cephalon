@@ -191,8 +191,8 @@ impl NativeApp {
                     .child(ui_button("delete-document", "Delete", false, {
                         let id = document_id.clone();
                         let name = document.name.clone();
-                        cx.listener(move |this, _, _, cx| {
-                            this.ask_delete_document(id.clone(), name.clone(), cx)
+                        cx.listener(move |this, _, window, cx| {
+                            this.ask_delete_document(id.clone(), name.clone(), window, cx)
                         })
                     })),
             )

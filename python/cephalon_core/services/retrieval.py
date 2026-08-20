@@ -30,6 +30,7 @@ from .coverage_selection import select_coverage_aware_results
 from .table_retrieval import (
     MAX_REQUESTED_UNIT_CANDIDATES,
     document_unit_sources,
+    execute_exact_year_route,
     execute_table_route,
     requested_unit_values,
 )
@@ -1114,10 +1115,22 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     memory_only, memory_preferred = _memory_request_mode(prompt)
     trace["subqueries"] = subqueries
     table_context, table_sources, table_trace = execute_table_route(app_state, prompt)
+    exact_year_context, exact_year_sources, exact_year_trace = execute_exact_year_route(app_state, prompt)
+    if exact_year_sources:
+        # Exact typed rows are a stronger answer path than approximate chunks:
+        # preserve the complete requested records and skip hybrid selection so
+        # a nearby country/year cannot crowd them out of model context.
+        table_context, table_sources, table_trace = (
+            exact_year_context,
+            exact_year_sources,
+            {**exact_year_trace, "planner_trace": table_trace},
+        )
     trace["table_execution"] = table_trace
     document_value_sources, document_value_trace = document_unit_sources(app_state, prompt)
     trace["table_execution"]["text_fallback"] = document_value_trace
     numeric_context, numeric_sources = ([], []) if table_sources else _structured_numeric_analysis_for_query(app_state, prompt)
+    if exact_year_sources:
+        numeric_context, numeric_sources = exact_year_context, exact_year_sources
     if numeric_context:
         context_chunks.extend(numeric_context)
         all_sources.extend(numeric_sources)
@@ -1132,7 +1145,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
             )
             for source in numeric_sources
         ])
-        search_modes.append("numeric_scan")
+        search_modes.append("exact_year_lookup" if exact_year_sources else "numeric_scan")
         trace["reranked_candidates"] = [source.model_dump() for source in numeric_sources]
     else:
         merged_candidates: dict[str, dict] = {}

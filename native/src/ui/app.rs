@@ -58,9 +58,9 @@ impl NativeApp {
     }
 
     pub(super) fn render_overlays(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut overlay = div().flex().flex_col().gap_1();
+        let mut notices = div().flex().flex_col().gap_1();
         for notice in &self.notices {
-            overlay = overlay.child(
+            notices = notices.child(
                 div()
                     .id(SharedString::from(format!("notice-{}", notice.id)))
                     .p_2()
@@ -72,9 +72,37 @@ impl NativeApp {
                     .child(notice.message.clone()),
             );
         }
+        let mut overlay = div().w_full().p_3().child(notices);
         if let Some(confirmation) = self.confirmation.clone() {
-            overlay = overlay.child(
+            overlay = overlay.child(self.render_confirmation_dialog(confirmation, cx));
+        }
+        overlay
+    }
+
+    fn render_confirmation_dialog(
+        &mut self,
+        confirmation: Confirmation,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("confirmation-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::hsla(0., 0., 0., 0.62))
+            .block_mouse_except_scroll()
+            .child(
                 div()
+                    .id("confirmation-dialog")
+                    .track_focus(&self.confirmation_focus)
+                    .tab_stop(false)
+                    .role(gpui::Role::Dialog)
+                    .aria_label(confirmation.title.clone())
+                    .w(px(420.))
                     .p_3()
                     .flex()
                     .flex_col()
@@ -93,22 +121,24 @@ impl NativeApp {
                         div()
                             .flex()
                             .gap_1()
-                            .child(ui_button(
+                            .child(ui_button_with_focus(
                                 "confirm-action",
                                 "Confirm",
                                 true,
-                                cx.listener(|this, _, _, cx| this.confirm_action(cx)),
+                                &self.confirmation_confirm_focus,
+                                cx.listener(|this, _, window, cx| this.confirm_action(window, cx)),
                             ))
-                            .child(ui_button(
+                            .child(ui_button_with_focus(
                                 "cancel-action",
                                 "Cancel",
                                 false,
-                                cx.listener(|this, _, _, cx| this.close_confirmation(cx)),
+                                &self.confirmation_cancel_focus,
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_confirmation(window, cx)
+                                }),
                             )),
                     ),
-            );
-        }
-        div().w_full().p_3().child(overlay)
+            )
     }
 
     pub(super) fn render_boot(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -120,7 +150,14 @@ impl NativeApp {
                 cx.listener(|this, _, _, cx| this.retry_backend(cx)),
             )
         } else {
-            ui_button("boot-spacer", "", false, |_, _, _| {})
+            div()
+                .id("boot-loading-status")
+                .flex_none()
+                .px_2()
+                .py_1()
+                .text_size(px(12.))
+                .text_color(faint())
+                .child("Waiting for local backend…")
         };
         let mut card = div()
             .w(px(540.))
@@ -137,12 +174,6 @@ impl NativeApp {
                     .text_size(px(24.))
                     .text_color(text())
                     .child("Cephalon"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(muted())
-                    .child("Native GPUI workbench"),
             )
             .child(
                 div()
@@ -167,6 +198,7 @@ impl NativeApp {
         card = card.child(retry);
         div()
             .size_full()
+            .relative()
             .flex()
             .items_center()
             .justify_center()

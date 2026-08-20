@@ -8,8 +8,9 @@ use crate::backend::BackendService;
 use async_channel::{Receiver, Sender};
 use gpui::prelude::*;
 use gpui::{
-    div, px, App, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyDownEvent,
-    ParentElement, PathPromptOptions, ScrollHandle, SharedString, Subscription, Window,
+    actions, div, px, App, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Focusable,
+    KeyDownEvent, ParentElement, PathPromptOptions, ScrollHandle, SharedString, Subscription,
+    Window,
 };
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,11 @@ use markdown::visible_answer;
 pub use text_input::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, Submit};
 use text_input::{TextChanged, TextInput, TextSubmitted};
 use theme::*;
+
+actions!([FocusNext, FocusPrevious]);
+
+const MAX_NOTICES: usize = 4;
+const NOTICE_AUTO_DISMISS: Duration = Duration::from_secs(6);
 
 fn selected_request_is_current(
     request_generation: u64,
@@ -302,11 +308,34 @@ struct Notice {
     color: gpui::Rgba,
 }
 
+fn remove_notice_by_id(notices: &mut Vec<Notice>, id: u64) -> bool {
+    let Some(index) = notices.iter().position(|notice| notice.id == id) else {
+        return false;
+    };
+    notices.remove(index);
+    true
+}
+
+fn next_response_effort(current: &str) -> &'static str {
+    match current {
+        "quick" => "balanced",
+        "balanced" => "thorough",
+        _ => "quick",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Confirmation {
     title: String,
     message: String,
     action: ConfirmationAction,
+    return_focus: Option<FocusHandle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmationFocus {
+    Confirm,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +367,9 @@ pub struct NativeApp {
     backend: Arc<BackendService>,
     stop: Arc<AtomicBool>,
     focus: FocusHandle,
+    confirmation_focus: FocusHandle,
+    confirmation_confirm_focus: FocusHandle,
+    confirmation_cancel_focus: FocusHandle,
     boot: BootState,
     boot_status: String,
     boot_error: Option<String>,
@@ -415,12 +447,18 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
+        let confirmation_focus = cx.focus_handle();
+        let confirmation_confirm_focus = cx.focus_handle().tab_stop(true);
+        let confirmation_cancel_focus = cx.focus_handle().tab_stop(true);
         let inputs = InputEntities::new(cx);
         let mut app = Self {
             api,
             backend,
             stop,
             focus,
+            confirmation_focus,
+            confirmation_confirm_focus,
+            confirmation_cancel_focus,
             boot: BootState::Starting,
             boot_status: "Starting local service…".into(),
             boot_error: None,
@@ -562,17 +600,12 @@ impl NativeApp {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(div().text_size(px(11.)).text_color(muted()).child(label))
-            .child(input_field(
-                id,
-                self.inputs.get(target),
-                cx.listener(move |this, _, window, cx| this.focus_input(target, window, cx)),
-            ))
+        form_field(
+            id,
+            label,
+            self.inputs.get(target),
+            cx.listener(move |this, _, window, cx| this.focus_input(target, window, cx)),
+        )
     }
 
     fn sync_rag_inputs(&mut self, settings: &RagSettings, cx: &mut Context<Self>) {
@@ -665,7 +698,11 @@ impl NativeApp {
                             }
                             EventStreamEvent::Error(message) => {
                                 this.event_status = EventStatus::Reconnecting;
-                                this.boot_error = Some(message);
+                                // The event stream starts alongside backend boot and is expected
+                                // to race the service becoming reachable. Keep this transport
+                                // retry separate from the boot error so the loading screen stays
+                                // neutral until the readiness probe has actually failed.
+                                let _ = message;
                             }
                             event => {
                                 this.event_status = EventStatus::Connected;
@@ -1082,14 +1119,26 @@ impl NativeApp {
 
     fn notify(&mut self, message: impl Into<String>, color: gpui::Rgba, cx: &mut Context<Self>) {
         self.notice_counter += 1;
+        let id = self.notice_counter;
         self.notices.push(Notice {
-            id: self.notice_counter,
+            id,
             message: message.into(),
             color,
         });
-        if self.notices.len() > 4 {
+        if self.notices.len() > MAX_NOTICES {
             self.notices.remove(0);
         }
+        cx.spawn(
+            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+                smol::Timer::after(NOTICE_AUTO_DISMISS).await;
+                let _ = this.update(&mut *cx, |this, cx| {
+                    if remove_notice_by_id(&mut this.notices, id) {
+                        cx.notify();
+                    }
+                });
+            },
+        )
+        .detach();
         cx.notify();
     }
 
@@ -1100,11 +1149,56 @@ impl NativeApp {
         window.focus(&focus_handle, cx);
     }
 
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirmation.is_some() {
+            self.focus_confirmation(false, window, cx);
+        } else {
+            window.focus_next(cx);
+        }
+    }
+
+    fn focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirmation.is_some() {
+            self.focus_confirmation(true, window, cx);
+        } else {
+            window.focus_prev(cx);
+        }
+    }
+
+    fn focus_confirmation(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let current = window.focused(cx).and_then(|focused| {
+            if focused == self.confirmation_confirm_focus {
+                Some(ConfirmationFocus::Confirm)
+            } else if focused == self.confirmation_cancel_focus {
+                Some(ConfirmationFocus::Cancel)
+            } else {
+                None
+            }
+        });
+        let target = next_confirmation_focus(current, backwards);
+        let handle = match target {
+            ConfirmationFocus::Confirm => self.confirmation_confirm_focus.clone(),
+            ConfirmationFocus::Cancel => self.confirmation_cancel_focus.clone(),
+        };
+        window.focus(&handle, cx);
+    }
+
+    fn restore_confirmation_focus(
+        &self,
+        confirmation: &Confirmation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(focus) = &confirmation.return_focus {
+            window.focus(focus, cx);
+        }
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.to_ascii_lowercase();
         if key == "escape" {
-            if self.confirmation.is_some() {
-                self.confirmation = None;
+            if let Some(confirmation) = self.confirmation.take() {
+                self.restore_confirmation_focus(&confirmation, window, cx);
             } else {
                 self.right_open = false;
             }
@@ -1487,28 +1581,72 @@ impl NativeApp {
         .detach();
     }
 
-    fn ask_delete_document(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+    fn ask_delete_document(
+        &mut self,
+        id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_confirmation(
+            "Delete document?".into(),
+            format!("Delete {name} from the library and remove its indexed content?"),
+            ConfirmationAction::DeleteDocument(id),
+            window,
+            cx,
+        );
+    }
+
+    fn ask_delete_conversation(
+        &mut self,
+        id: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_confirmation(
+            "Delete chat?".into(),
+            format!("Delete {title} and its saved messages?"),
+            ConfirmationAction::DeleteConversation(id),
+            window,
+            cx,
+        );
+    }
+
+    fn ask_delete_model(&mut self, kind: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_confirmation(
+            "Delete cached model?".into(),
+            format!("Remove the cached {kind} model?"),
+            ConfirmationAction::DeleteModel(kind),
+            window,
+            cx,
+        );
+    }
+
+    fn open_confirmation(
+        &mut self,
+        title: String,
+        message: String,
+        action: ConfirmationAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let return_focus = window.focused(cx);
         self.confirmation = Some(Confirmation {
-            title: "Delete document?".into(),
-            message: format!("Delete {name} from the library and remove its indexed content?"),
-            action: ConfirmationAction::DeleteDocument(id),
+            title,
+            message,
+            action,
+            return_focus,
         });
+        window.focus(&self.confirmation_cancel_focus, cx);
         cx.notify();
     }
 
-    fn ask_delete_conversation(&mut self, id: String, title: String, cx: &mut Context<Self>) {
-        self.confirmation = Some(Confirmation {
-            title: "Delete chat?".into(),
-            message: format!("Delete {title} and its saved messages?"),
-            action: ConfirmationAction::DeleteConversation(id),
-        });
-        cx.notify();
-    }
-
-    fn confirm_action(&mut self, cx: &mut Context<Self>) {
+    fn confirm_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(confirmation) = self.confirmation.take() else {
             return;
         };
+        self.restore_confirmation_focus(&confirmation, window, cx);
         let api = self.api.clone();
         match confirmation.action {
             ConfirmationAction::DeleteDocument(id) => {
@@ -1567,8 +1705,10 @@ impl NativeApp {
         }
     }
 
-    fn close_confirmation(&mut self, cx: &mut Context<Self>) {
-        self.confirmation = None;
+    fn close_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(confirmation) = self.confirmation.take() {
+            self.restore_confirmation_focus(&confirmation, window, cx);
+        }
         cx.notify();
     }
 
@@ -1751,12 +1891,7 @@ impl NativeApp {
     }
 
     fn cycle_response_effort(&mut self, cx: &mut Context<Self>) {
-        self.response_effort = match self.response_effort.as_str() {
-            "fast" => "balanced",
-            "balanced" => "deep",
-            _ => "fast",
-        }
-        .into();
+        self.response_effort = next_response_effort(&self.response_effort).into();
         cx.notify();
     }
 
@@ -2021,13 +2156,29 @@ impl NativeApp {
     }
 }
 
-fn ui_button(
+fn next_confirmation_focus(
+    current: Option<ConfirmationFocus>,
+    backwards: bool,
+) -> ConfirmationFocus {
+    match (current, backwards) {
+        (None, _) => ConfirmationFocus::Cancel,
+        (Some(ConfirmationFocus::Confirm), false) => ConfirmationFocus::Cancel,
+        (Some(ConfirmationFocus::Cancel), false) => ConfirmationFocus::Confirm,
+        (Some(ConfirmationFocus::Confirm), true) => ConfirmationFocus::Cancel,
+        (Some(ConfirmationFocus::Cancel), true) => ConfirmationFocus::Confirm,
+    }
+}
+
+fn cephalon_button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
     active: bool,
+    disabled: bool,
+    focus_handle: Option<&FocusHandle>,
     listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    let label = label.into();
+    let mut button = div()
         .id(id.into())
         .flex_none()
         .px_2()
@@ -2036,11 +2187,108 @@ fn ui_button(
         .border_1()
         .border_color(if active { orange() } else { line() })
         .rounded_sm()
-        .cursor_pointer()
         .text_size(px(12.))
-        .text_color(if active { orange_light() } else { text() })
-        .child(label.into())
-        .on_click(listener)
+        .text_color(if disabled {
+            muted()
+        } else if active {
+            orange_light()
+        } else {
+            text()
+        })
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .tab_stop(!disabled)
+        .focus_visible(|style| style.border_color(orange_light()).shadow_sm())
+        .child(label);
+    if let Some(focus_handle) = focus_handle {
+        button = button.track_focus(focus_handle);
+    } else if !disabled {
+        button = button.focusable();
+    }
+    if disabled {
+        button
+    } else {
+        button.cursor_pointer().on_click(listener)
+    }
+}
+
+fn ui_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    active: bool,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    cephalon_button(id, label, active, false, None, listener)
+}
+
+fn ui_button_with_focus(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    active: bool,
+    focus_handle: &FocusHandle,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    cephalon_button(id, label, active, false, Some(focus_handle), listener)
+}
+
+fn ui_disabled_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    cephalon_button(id, label, false, true, None, |_, _, _| {})
+}
+
+fn ui_toggle(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    ui_toggle_with_focus(id, label, enabled, None, listener)
+}
+
+fn ui_toggle_with_focus(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    focus_handle: Option<&FocusHandle>,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
+    let mut toggle = div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .role(gpui::Role::Switch)
+        .aria_label(label.clone())
+        .aria_toggled(enabled.into())
+        .focus_visible(|style| style.border_color(orange_light()).shadow_sm())
+        .child(
+            div()
+                .w(px(38.))
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(if enabled { orange() } else { line() })
+                .text_size(px(9.))
+                .text_color(if enabled { bg() } else { muted() })
+                .child(if enabled { "ON" } else { "OFF" }),
+        )
+        .child(div().text_size(px(12.)).text_color(text()).child(label));
+    if let Some(focus_handle) = focus_handle {
+        toggle = toggle.track_focus(focus_handle);
+    } else {
+        toggle = toggle.focusable();
+    }
+    toggle.tab_stop(true).on_click(listener)
 }
 
 fn input_field(
@@ -2049,6 +2297,26 @@ fn input_field(
     listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     div().id(id.into()).w_full().child(input).on_click(listener)
+}
+
+fn form_field(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    input: Entity<TextInput>,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(muted())
+                .child(label.into()),
+        )
+        .child(input_field(id, input, listener))
 }
 
 fn status_filter_button(
@@ -2524,9 +2792,11 @@ impl Render for NativeApp {
         };
         root = root
             .track_focus(&self.focus)
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
-            )
+            .on_action(cx.listener(Self::focus_next))
+            .on_action(cx.listener(Self::focus_previous))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_key(event, window, cx)
+            }))
             .on_drop::<ExternalPaths>(
                 cx.listener(|this, paths, _, cx| this.ingest_dropped(paths, cx)),
             );
@@ -2536,9 +2806,105 @@ impl Render for NativeApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rag_drafts, selected_request_is_current, visible_answer, InputTarget};
+    use super::{
+        apply_rag_drafts, next_response_effort, remove_notice_by_id, selected_request_is_current,
+        visible_answer, InputTarget, Notice,
+    };
     use crate::api::RagSettings;
+    use gpui::{
+        AnyWindowHandle, AppContext, Context, FocusHandle, InputEvent, IntoElement, KeyDownEvent,
+        KeyUpEvent, Keystroke, Render, TestAppContext, Window,
+    };
+    use std::cell::Cell;
     use std::collections::HashMap;
+    use std::rc::Rc;
+
+    struct ButtonHarness {
+        focus: FocusHandle,
+        clicks: Rc<Cell<u32>>,
+        disabled: bool,
+    }
+
+    impl Render for ButtonHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            super::cephalon_button(
+                "test-button",
+                "Test button",
+                false,
+                self.disabled,
+                Some(&self.focus),
+                move |_, _, _| clicks.set(clicks.get() + 1),
+            )
+        }
+    }
+
+    struct ToggleHarness {
+        focus: FocusHandle,
+        enabled: Rc<Cell<bool>>,
+    }
+
+    impl Render for ToggleHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let enabled = self.enabled.clone();
+            super::ui_toggle_with_focus(
+                "test-toggle",
+                "Test setting",
+                enabled.get(),
+                Some(&self.focus),
+                move |_, _, _| enabled.set(!enabled.get()),
+            )
+        }
+    }
+
+    fn focus_and_draw(cx: &mut TestAppContext, window: AnyWindowHandle, focus: &FocusHandle) {
+        cx.update_window(window, |_, window, cx| window.focus(focus, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+    }
+
+    fn dispatch_key(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+    }
+
+    fn button_test_window(
+        cx: &mut TestAppContext,
+        disabled: bool,
+    ) -> (AnyWindowHandle, FocusHandle, Rc<Cell<u32>>) {
+        let focus = cx.update(|cx| cx.focus_handle());
+        let clicks = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let focus = focus.clone();
+            let clicks = clicks.clone();
+            move |_, _| ButtonHarness {
+                focus,
+                clicks,
+                disabled,
+            }
+        });
+        (window.into(), focus, clicks)
+    }
 
     #[test]
     fn settings_drafts_change_selected_fields_without_resetting_the_rest() {
@@ -2585,5 +2951,94 @@ mod tests {
         assert!(!selected_request_is_current(3, 4, "old", Some("old")));
         assert!(!selected_request_is_current(4, 4, "old", Some("new")));
         assert!(!selected_request_is_current(4, 4, "missing", None));
+    }
+
+    #[test]
+    fn notice_dismissal_removes_only_the_expired_notice() {
+        let mut notices = vec![
+            Notice {
+                id: 1,
+                message: "first".into(),
+                color: gpui::rgb(0xffffff),
+            },
+            Notice {
+                id: 2,
+                message: "second".into(),
+                color: gpui::rgb(0xffffff),
+            },
+        ];
+        assert!(!remove_notice_by_id(&mut notices, 3));
+        assert!(remove_notice_by_id(&mut notices, 1));
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].id, 2);
+    }
+
+    #[test]
+    fn response_effort_cycles_through_backend_values() {
+        assert_eq!(next_response_effort("quick"), "balanced");
+        assert_eq!(next_response_effort("balanced"), "thorough");
+        assert_eq!(next_response_effort("thorough"), "quick");
+        assert_eq!(next_response_effort("legacy"), "quick");
+    }
+
+    #[gpui::test]
+    fn button_activates_with_enter_and_space(cx: &mut TestAppContext) {
+        let (window, focus, clicks) = button_test_window(cx, false);
+        focus_and_draw(cx, window, &focus);
+        dispatch_key(cx, window, "enter");
+        dispatch_key(cx, window, "space");
+        assert_eq!(clicks.get(), 2);
+    }
+
+    #[gpui::test]
+    fn disabled_button_does_not_activate(cx: &mut TestAppContext) {
+        let (window, focus, clicks) = button_test_window(cx, true);
+        focus_and_draw(cx, window, &focus);
+        dispatch_key(cx, window, "enter");
+        dispatch_key(cx, window, "space");
+        assert_eq!(clicks.get(), 0);
+    }
+
+    #[gpui::test]
+    fn toggle_changes_state_with_space(cx: &mut TestAppContext) {
+        let focus = cx.update(|cx| cx.focus_handle());
+        let enabled = Rc::new(Cell::new(false));
+        let window = cx.add_window({
+            let focus = focus.clone();
+            let enabled = enabled.clone();
+            move |_, _| ToggleHarness { focus, enabled }
+        });
+        let window: AnyWindowHandle = window.into();
+        focus_and_draw(cx, window, &focus);
+        dispatch_key(cx, window, "space");
+        assert!(enabled.get());
+    }
+
+    #[test]
+    fn destructive_confirmation_focus_starts_safe_and_wraps_both_directions() {
+        assert_eq!(
+            super::next_confirmation_focus(None, false),
+            super::ConfirmationFocus::Cancel
+        );
+        assert_eq!(
+            super::next_confirmation_focus(None, true),
+            super::ConfirmationFocus::Cancel
+        );
+        assert_eq!(
+            super::next_confirmation_focus(Some(super::ConfirmationFocus::Cancel), false),
+            super::ConfirmationFocus::Confirm
+        );
+        assert_eq!(
+            super::next_confirmation_focus(Some(super::ConfirmationFocus::Confirm), false),
+            super::ConfirmationFocus::Cancel
+        );
+        assert_eq!(
+            super::next_confirmation_focus(Some(super::ConfirmationFocus::Cancel), true),
+            super::ConfirmationFocus::Confirm
+        );
+        assert_eq!(
+            super::next_confirmation_focus(Some(super::ConfirmationFocus::Confirm), true),
+            super::ConfirmationFocus::Cancel
+        );
     }
 }
