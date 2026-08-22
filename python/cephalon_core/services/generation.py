@@ -114,24 +114,38 @@ def _server_completion(
         return urlopen(request, timeout=300)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"llama.cpp server returned HTTP {exc.code}: {detail}") from exc
+        message = f"llama.cpp server returned HTTP {exc.code}: {detail}"
+        models.mark_model_error(app_state, message, disconnect=exc.code in {502, 503, 504})
+        raise RuntimeError(message) from exc
     except URLError as exc:
-        raise RuntimeError(f"Could not reach llama.cpp server at {server.server_url}: {exc.reason}") from exc
+        message = f"Could not reach llama.cpp server at {server.server_url}: {exc.reason}"
+        models.mark_model_error(app_state, message, disconnect=True)
+        raise RuntimeError(message) from exc
     except OSError as exc:
-        raise RuntimeError(f"Could not reach llama.cpp server at {server.server_url}: {exc}") from exc
+        message = f"Could not reach llama.cpp server at {server.server_url}: {exc}"
+        models.mark_model_error(app_state, message, disconnect=True)
+        raise RuntimeError(message) from exc
 
 
 def _response_content(response: dict[str, Any]) -> str:
     choices = response.get("choices") or []
     if not choices:
-        return ""
+        raise RuntimeError("llama.cpp returned no completion choices.")
     choice = choices[0]
-    return strip_hidden_reasoning(str((choice.get("message") or {}).get("content") or choice.get("text") or ""))
+    raw_content = (choice.get("message") or {}).get("content") or choice.get("text") or ""
+    if not isinstance(raw_content, str):
+        raise RuntimeError("llama.cpp returned a non-text completion.")
+    content = strip_hidden_reasoning(raw_content)
+    if not content:
+        raise RuntimeError("llama.cpp returned no visible answer.")
+    return content
 
 
 def _stream_server_completion(app_state, messages: list[dict[str, str]], settings: RagSettings) -> Iterator[str]:
     with _server_completion(app_state, messages, settings, stream=True) as response:
         visible_filter = VisibleAnswerFilter()
+        saw_done = False
+        saw_visible = False
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -141,6 +155,7 @@ def _stream_server_completion(app_state, messages: list[dict[str, str]], setting
                 # Flush a visible suffix that was held only because it could
                 # have been the beginning of ``<think>``. Returning here
                 # would silently drop the final few answer characters.
+                saw_done = True
                 break
             try:
                 event = json.loads(payload)
@@ -153,12 +168,23 @@ def _stream_server_completion(app_state, messages: list[dict[str, str]], setting
                     if content:
                         visible = visible_filter.feed(str(content))
                         if visible:
+                            saw_visible = True
                             yield visible
             except json.JSONDecodeError:
                 continue
         tail = visible_filter.finish()
         if tail:
+            saw_visible = True
             yield tail
+        if not saw_done:
+            message = "llama.cpp streaming output ended before the completion terminator."
+            models.mark_model_error(app_state, message)
+            raise RuntimeError(message)
+        if not saw_visible:
+            message = "llama.cpp returned no visible answer."
+            models.mark_model_error(app_state, message)
+            raise RuntimeError(message)
+        models.clear_model_error(app_state)
 
 
 def build_system_instruction(

@@ -237,11 +237,7 @@ impl NativeApp {
             })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "No model connected".into());
-        let model_color = if self.data.models.active_model.is_some() {
-            green()
-        } else {
-            yellow()
-        };
+        let model_color = self.model_status.color();
         let mut body = div().relative().flex().flex_1().min_h_0().min_w_0();
         if show_library_docked {
             body = body.child(self.render_library(library_width, cx));
@@ -326,7 +322,7 @@ impl NativeApp {
                         div()
                             .text_size(px(11.))
                             .text_color(self.event_status.color())
-                            .child(format!("● {}", self.event_status.label()))
+                            .child(format!("● {}", self.model_status.label()))
                     })
                     .child(ui_button(
                         "toggle-library",

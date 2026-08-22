@@ -828,7 +828,7 @@ impl NativeApp {
                         .mt_2()
                         .text_size(px(11.))
                         .text_color(red())
-                        .child(format!("Backend save warning: {error_detail}")),
+                        .child(format!("Error: {error_detail}")),
                 );
             }
             if !message.sources.is_empty() {

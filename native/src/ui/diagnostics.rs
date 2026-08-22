@@ -95,6 +95,15 @@ impl NativeApp {
                         .child(format!("Model load: {error}")),
                 );
             }
+            if let Some(error) = &health.last_model_error {
+                panel = panel.child(
+                    div()
+                        .p_2()
+                        .bg(panel_3())
+                        .text_color(red())
+                        .child(format!("Model request: {error}")),
+                );
+            }
             if let Some(error) = &health.retrieval_error {
                 panel = panel.child(
                     div()
@@ -125,12 +134,17 @@ impl NativeApp {
                         },
                     ))
                     .child(detail_line(
+                        "Connection",
+                        llama.connection_status.as_deref().unwrap_or("unknown"),
+                        status_color(llama.connection_status.as_deref().unwrap_or("unknown")),
+                    ))
+                    .child(detail_line(
                         "Server URL",
                         llama.server_url.as_deref().unwrap_or("not configured"),
                         muted(),
                     ))
                     .child(detail_line(
-                        "Model",
+                        "Configured model",
                         llama.model_name.as_deref().unwrap_or("not selected"),
                         muted(),
                     ));

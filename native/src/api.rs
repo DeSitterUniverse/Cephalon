@@ -352,6 +352,7 @@ impl ApiClient {
 
         let mut event_name = String::from("message");
         let mut data_lines = Vec::new();
+        let mut terminal_event = false;
         for line in BufReader::new(response).lines() {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -360,6 +361,7 @@ impl ApiClient {
             if line.is_empty() {
                 if let Some(event) = decode_query_event(&event_name, &data_lines.join("\n")) {
                     let is_terminal = matches!(event, QueryEvent::Done | QueryEvent::Error(_));
+                    terminal_event |= is_terminal;
                     on_event(event);
                     if is_terminal {
                         break;
@@ -376,8 +378,15 @@ impl ApiClient {
         }
         if !data_lines.is_empty() {
             if let Some(event) = decode_query_event(&event_name, &data_lines.join("\n")) {
+                terminal_event |= matches!(event, QueryEvent::Done | QueryEvent::Error(_));
                 on_event(event);
             }
+        }
+        if !stop.load(Ordering::Relaxed) && !terminal_event {
+            return Err(ApiError {
+                status: None,
+                message: "Cephalon query stream ended before a terminal event.".into(),
+            });
         }
         Ok(())
     }
@@ -814,6 +823,8 @@ pub struct HealthResponse {
     #[serde(default)]
     pub last_model_load_error: Option<String>,
     #[serde(default)]
+    pub last_model_error: Option<String>,
+    #[serde(default)]
     pub llama_backend: Option<LlamaBackendStatus>,
     #[serde(default)]
     pub retrieval_error: Option<String>,
@@ -827,6 +838,8 @@ pub struct LlamaBackendStatus {
     pub server_url: Option<String>,
     #[serde(default)]
     pub server_available: Option<bool>,
+    #[serde(default)]
+    pub connection_status: Option<String>,
     #[serde(default)]
     pub server_error: Option<String>,
     #[serde(default)]

@@ -1,8 +1,8 @@
 use crate::api::{
     merge_conversation_messages, ApiClient, ApiError, Conversation, Document, EventStreamEvent,
     EventStreamRefresh, FixedRetrievalStatus, HealthResponse, IndexHealth, IngestResponse,
-    LlamaServerSettings, Message, ModelsResponse, QueryEvent, QueryRequest, RagSettings,
-    ReindexProgress, RetrievalTraceSummary, SourceChunk,
+    LlamaBackendStatus, LlamaServerSettings, Message, ModelsResponse, QueryEvent, QueryRequest,
+    RagSettings, ReindexProgress, RetrievalTraceSummary, SourceChunk,
 };
 use crate::backend::BackendService;
 use async_channel::{Receiver, Sender};
@@ -251,19 +251,35 @@ enum EventStatus {
 }
 
 impl EventStatus {
+    fn color(self) -> gpui::Rgba {
+        match self {
+            Self::Connected => green(),
+            Self::Connecting | Self::Reconnecting => yellow(),
+            Self::Offline => red(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelStatus {
+    Offline,
+    Connecting,
+    Connected,
+}
+
+impl ModelStatus {
     fn label(self) -> &'static str {
         match self {
+            Self::Offline => "offline",
             Self::Connecting => "connecting",
             Self::Connected => "connected",
-            Self::Reconnecting => "reconnecting",
-            Self::Offline => "offline",
         }
     }
 
     fn color(self) -> gpui::Rgba {
         match self {
             Self::Connected => green(),
-            Self::Connecting | Self::Reconnecting => yellow(),
+            Self::Connecting => yellow(),
             Self::Offline => red(),
         }
     }
@@ -379,6 +395,7 @@ pub struct NativeApp {
     right_open: bool,
     theme_graphite: bool,
     event_status: EventStatus,
+    model_status: ModelStatus,
     search: String,
     status_filter: String,
     selected_document: Option<String>,
@@ -468,6 +485,7 @@ impl NativeApp {
             right_open: true,
             theme_graphite: false,
             event_status: EventStatus::Connecting,
+            model_status: ModelStatus::Connecting,
             search: String::new(),
             status_filter: "all".into(),
             selected_document: None,
@@ -699,6 +717,7 @@ impl NativeApp {
                                 } else {
                                     EventStatus::Connecting
                                 };
+                                this.refresh_server_and_models(cx);
                             }
                             EventStreamEvent::Error(message) => {
                                 this.event_status = EventStatus::Reconnecting;
@@ -739,6 +758,8 @@ impl NativeApp {
                 }
                 let _ = this.update(&mut *cx, |this, cx| {
                     this.event_status = EventStatus::Offline;
+                    this.data.models.active_model = None;
+                    this.model_status = ModelStatus::Offline;
                     cx.notify();
                 });
             },
@@ -836,6 +857,13 @@ impl NativeApp {
                     if generation == this.health_refresh_generation {
                         if let Ok(health) = result {
                             this.data.health = Some(health);
+                            this.model_status = model_status_from_data(
+                                &this.data.models,
+                                this.data.health.as_ref(),
+                            );
+                        } else {
+                            this.data.models.active_model = None;
+                            this.model_status = ModelStatus::Offline;
                         }
                     }
                     cx.notify();
@@ -922,6 +950,10 @@ impl NativeApp {
                     if generation == this.server_refresh_generation {
                         if let Ok((models, server)) = result {
                             this.data.models = models;
+                            this.model_status = model_status_from_data(
+                                &this.data.models,
+                                this.data.health.as_ref(),
+                            );
                             this.event_status = if this.data.models.active_model.is_some() {
                                 EventStatus::Connected
                             } else {
@@ -954,6 +986,9 @@ impl NativeApp {
                                     );
                                 }
                             }
+                        } else {
+                            this.data.models.active_model = None;
+                            this.model_status = ModelStatus::Offline;
                         }
                     }
                     cx.notify();
@@ -999,6 +1034,7 @@ impl NativeApp {
         let first_conversation = snapshot.conversations.first().map(|item| item.id.clone());
         self.data.health = Some(snapshot.health);
         self.data.models = snapshot.models;
+        self.model_status = model_status_from_data(&self.data.models, self.data.health.as_ref());
         self.event_status = if self.data.models.active_model.is_some() {
             EventStatus::Connected
         } else {
@@ -1328,6 +1364,21 @@ impl NativeApp {
 
     fn send_message(&mut self, cx: &mut Context<Self>) {
         let prompt = self.composer.trim().to_string();
+        if self.model_status != ModelStatus::Connected {
+            self.notify(
+                format!(
+                    "The model is {}. Connect to the configured external llama.cpp server first.",
+                    self.model_status.label()
+                ),
+                if self.model_status == ModelStatus::Offline {
+                    red()
+                } else {
+                    yellow()
+                },
+                cx,
+            );
+            return;
+        }
         let Some(model) = self.data.models.active_model.clone() else {
             self.notify(
                 "Connect to the configured external llama.cpp server first.",
@@ -1454,6 +1505,7 @@ impl NativeApp {
         let Some(last) = self.messages.last_mut() else {
             return;
         };
+        let mut model_unavailable = false;
         match event {
             QueryEvent::Phase(phase) => self.response_phase = phase_label(&phase).into(),
             QueryEvent::Token(text) => {
@@ -1477,6 +1529,7 @@ impl NativeApp {
                 }
             }
             QueryEvent::Error(message) => {
+                model_unavailable = model_transport_error(&message);
                 if last.content.is_empty() {
                     last.raw_content = message.clone();
                     last.content = message;
@@ -1486,7 +1539,19 @@ impl NativeApp {
                 last.error = true;
                 last.streaming = false;
             }
-            QueryEvent::Done => last.streaming = false,
+            QueryEvent::Done => {
+                last.streaming = false;
+                if last.content.trim().is_empty() {
+                    last.error = true;
+                    last.error_detail =
+                        Some("The backend completed without a visible answer.".into());
+                }
+            }
+        }
+        if model_unavailable {
+            self.data.models.active_model = None;
+            self.model_status = ModelStatus::Offline;
+            self.refresh_server_and_models(cx);
         }
         cx.notify();
     }
@@ -1756,13 +1821,20 @@ impl NativeApp {
 
     fn connect_model(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
+        self.data.models.active_model = None;
+        self.model_status = ModelStatus::Connecting;
         self.notify("Connecting to external llama.cpp server…", yellow(), cx);
+        cx.notify();
         cx.spawn(
             async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || api.load_model()).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(response) => {
                         this.data.models.active_model = response.active_model.clone();
+                        this.model_status = model_status_from_parts(
+                            response.active_model.as_deref(),
+                            response.llama_backend.as_ref(),
+                        );
                         this.event_status = if this.data.models.active_model.is_some() {
                             EventStatus::Connected
                         } else {
@@ -1788,7 +1860,13 @@ impl NativeApp {
                         this.refresh_server_and_models(cx);
                         this.refresh_health(cx);
                     }
-                    Err(error) => this.notify(error.to_string(), red(), cx),
+                    Err(error) => {
+                        this.data.models.active_model = None;
+                        this.model_status = ModelStatus::Offline;
+                        this.notify(error.to_string(), red(), cx);
+                        this.refresh_server_and_models(cx);
+                        this.refresh_health(cx);
+                    }
                 });
             },
         )
@@ -2809,6 +2887,52 @@ fn response_phase_label(phase: &str) -> &'static str {
     }
 }
 
+fn model_status_from_parts(
+    active_model: Option<&str>,
+    backend: Option<&LlamaBackendStatus>,
+) -> ModelStatus {
+    match backend
+        .and_then(|status| status.connection_status.as_deref())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("offline") => return ModelStatus::Offline,
+        Some("connecting") => return ModelStatus::Connecting,
+        Some("connected") => return ModelStatus::Connected,
+        _ => {}
+    }
+    if backend.is_some_and(|status| status.server_available == Some(false)) {
+        return ModelStatus::Offline;
+    }
+    if active_model.is_some_and(|model| !model.trim().is_empty()) {
+        return ModelStatus::Connected;
+    }
+    if backend.is_some_and(|status| status.server_available == Some(true)) {
+        return ModelStatus::Connecting;
+    }
+    ModelStatus::Offline
+}
+
+fn model_status_from_data(models: &ModelsResponse, health: Option<&HealthResponse>) -> ModelStatus {
+    let active_model = models
+        .active_model
+        .as_deref()
+        .or_else(|| health.and_then(|value| value.active_model.as_deref()));
+    let backend = models
+        .llama_backend
+        .as_ref()
+        .or_else(|| health.and_then(|value| value.llama_backend.as_ref()));
+    model_status_from_parts(active_model, backend)
+}
+
+fn model_transport_error(message: &str) -> bool {
+    let clean = message.to_ascii_lowercase();
+    clean.contains("could not reach llama.cpp server")
+        || clean.contains("llama.cpp server returned http 502")
+        || clean.contains("llama.cpp server returned http 503")
+        || clean.contains("llama.cpp server returned http 504")
+}
+
 fn phase_label(phase: &str) -> &'static str {
     if phase == "Connecting…" {
         "Connecting…"
@@ -2841,10 +2965,11 @@ impl Render for NativeApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_rag_drafts, next_response_effort, remove_notice_by_id, selected_request_is_current,
-        visible_answer, InputTarget, Notice,
+        apply_rag_drafts, model_status_from_parts, model_transport_error, next_response_effort,
+        remove_notice_by_id, selected_request_is_current, visible_answer, InputTarget, ModelStatus,
+        Notice,
     };
-    use crate::api::RagSettings;
+    use crate::api::{LlamaBackendStatus, RagSettings};
     use gpui::{
         AnyWindowHandle, AppContext, Context, FocusHandle, InputEvent, IntoElement, KeyDownEvent,
         KeyUpEvent, Keystroke, Render, TestAppContext, Window,
@@ -3013,6 +3138,48 @@ mod tests {
         assert_eq!(next_response_effort("balanced"), "thorough");
         assert_eq!(next_response_effort("thorough"), "quick");
         assert_eq!(next_response_effort("legacy"), "quick");
+    }
+
+    #[test]
+    fn model_indicator_maps_offline_connecting_and_connected() {
+        let offline = LlamaBackendStatus {
+            server_available: Some(false),
+            ..LlamaBackendStatus::default()
+        };
+        assert_eq!(
+            model_status_from_parts(None, Some(&offline)),
+            ModelStatus::Offline
+        );
+
+        let connecting = LlamaBackendStatus {
+            server_available: Some(true),
+            connection_status: Some("connecting".into()),
+            ..LlamaBackendStatus::default()
+        };
+        assert_eq!(
+            model_status_from_parts(None, Some(&connecting)),
+            ModelStatus::Connecting
+        );
+
+        let connected = LlamaBackendStatus {
+            server_available: Some(true),
+            connection_status: Some("connected".into()),
+            ..LlamaBackendStatus::default()
+        };
+        assert_eq!(
+            model_status_from_parts(Some("Ling-3.0-tiny-Q6_K"), Some(&connected)),
+            ModelStatus::Connected
+        );
+    }
+
+    #[test]
+    fn model_transport_errors_are_distinguished_from_output_errors() {
+        assert!(model_transport_error(
+            "HTTP 503: Could not reach llama.cpp server at http://127.0.0.1:8080"
+        ));
+        assert!(!model_transport_error(
+            "llama.cpp returned no visible answer."
+        ));
     }
 
     #[gpui::test]

@@ -156,6 +156,7 @@ def health(request: Request):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
+        "last_model_error": getattr(app_state, "last_model_error", None),
         "retrieval_error": retrieval_error,
         "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
@@ -242,6 +243,7 @@ def get_models(request: Request):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
+        "last_model_error": getattr(app_state, "last_model_error", None),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
     }
 
@@ -278,6 +280,7 @@ def load_model(request: Request, req: LoadModelRequest):
         "active_context_tokens": getattr(app_state, "active_context_tokens", None),
         "active_model_context_tokens": getattr(app_state, "active_model_context_tokens", None),
         "last_model_load_error": getattr(app_state, "last_model_load_error", None),
+        "last_model_error": getattr(app_state, "last_model_error", None),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
     }
 
@@ -296,6 +299,7 @@ async def put_llama_server_settings(request: Request, server_settings: LlamaServ
     app_state.active_context_tokens = None
     app_state.active_model_context_tokens = None
     app_state.last_model_load_error = None
+    app_state.last_model_error = None
     await app_state.event_bus.publish("llama_server", saved.model_dump())
     return saved
 

@@ -160,13 +160,7 @@ class Settings:
     def _parse_cors_origins(raw: str | None) -> list[str]:
         if raw:
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
-        return [
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
-            "http://tauri.localhost",
-            "https://tauri.localhost",
-            "tauri://localhost",
-        ]
+        return []
 
 
 settings = Settings()

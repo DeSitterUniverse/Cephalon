@@ -95,7 +95,7 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan2")
     monkeypatch.setenv("CEPHALON_EMBEDDER_GPU_LAYERS", "123")
     monkeypatch.setenv("CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE", "2048")
-    monkeypatch.setenv("CEPHALON_CORS_ORIGINS", "http://localhost:1420,http://tauri.localhost")
+    monkeypatch.setenv("CEPHALON_CORS_ORIGINS", "http://localhost:9999,https://example.test")
 
     settings = Settings()
 
@@ -106,7 +106,11 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.embedder_device == "Vulkan2"
     assert settings.embedder_gpu_layers == 123
     assert settings.embedder_physical_batch_size == 2048
-    assert settings.cors_origins == ["http://localhost:1420", "http://tauri.localhost"]
+    assert settings.cors_origins == ["http://localhost:9999", "https://example.test"]
+
+
+def test_cors_defaults_to_no_browser_origins():
+    assert Settings._parse_cors_origins(None) == []
 
 
 def test_create_app_defers_runtime_directory_writes_until_lifespan(monkeypatch, tmp_path):
@@ -398,6 +402,100 @@ def test_load_llm_connects_to_configured_external_server(monkeypatch):
 
     assert state.active_model_name == "My external model"
     assert state.active_context_tokens == 32768
+
+
+def test_model_backend_reports_offline_connecting_and_connected(monkeypatch):
+    offline_state = SimpleNamespace(settings=Settings(), active_model_name=None)
+    monkeypatch.setattr(
+        models,
+        "_server_request",
+        lambda _state, _path: (_ for _ in ()).throw(RuntimeError("server offline")),
+    )
+    offline = models.llama_backend_info(offline_state, probe=True)
+    assert offline["server_available"] is False
+    assert offline["connection_status"] == "offline"
+
+    monkeypatch.setattr(models, "_server_request", lambda _state, _path: {"status": "ok"})
+    connecting_state = SimpleNamespace(settings=Settings(), active_model_name=None)
+    connecting = models.llama_backend_info(connecting_state, probe=True)
+    assert connecting["server_available"] is True
+    assert connecting["connection_status"] == "connecting"
+
+    connected_state = SimpleNamespace(settings=Settings(), active_model_name="Ling-3.0-tiny-Q6_K")
+    connected = models.llama_backend_info(connected_state, probe=True)
+    assert connected["connection_status"] == "connected"
+
+
+def test_server_failure_clears_stale_model_state(monkeypatch):
+    state = SimpleNamespace(
+        settings=Settings(),
+        active_model_name="stale-model",
+        active_context_tokens=8192,
+        active_model_context_tokens=8192,
+    )
+    monkeypatch.setattr(
+        models,
+        "_server_request",
+        lambda _state, _path: (_ for _ in ()).throw(RuntimeError("server offline")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        models.ensure_server_connected(state)
+
+    assert exc.value.status_code == 503
+    assert state.active_model_name is None
+    assert state.active_context_tokens is None
+    assert state.active_model_context_tokens is None
+    assert state.last_model_load_error == "server offline"
+    assert state.last_model_error == "server offline"
+
+
+def test_streaming_generation_rejects_empty_and_truncated_output(monkeypatch):
+    class FakeResponse:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter(self.lines)
+
+    state = SimpleNamespace(architecture_context="")
+    settings = RagSettings(max_tokens=64)
+
+    monkeypatch.setattr(
+        generation,
+        "_server_completion",
+        lambda *_args, **_kwargs: FakeResponse([
+            b'data: {"choices":[]}\n',
+            b"data: [DONE]\n",
+        ]),
+    )
+    with pytest.raises(RuntimeError, match="no visible answer"):
+        list(generation._stream_server_completion(state, [], settings))
+    assert "no visible answer" in state.last_model_error
+
+    monkeypatch.setattr(
+        generation,
+        "_server_completion",
+        lambda *_args, **_kwargs: FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+        ]),
+    )
+    with pytest.raises(RuntimeError, match="completion terminator"):
+        list(generation._stream_server_completion(state, [], settings))
+
+
+def test_non_streaming_generation_rejects_missing_visible_content():
+    with pytest.raises(RuntimeError, match="no completion choices"):
+        generation._response_content({"choices": []})
+
+    with pytest.raises(RuntimeError, match="no visible answer"):
+        generation._response_content({"choices": [{"message": {"content": "<think>private</think>"}}]})
 
 
 def test_conversation_persistence_roundtrip():

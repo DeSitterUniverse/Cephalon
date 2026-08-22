@@ -19,9 +19,6 @@ node_modules/
 
 # Rust Build Artifacts
 /target/
-/src-tauri/backend/
-/src-tauri/gen/
-/src-tauri/target/
 
 # Python & PyInstaller Build Artifacts
 venv/
