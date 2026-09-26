@@ -316,6 +316,32 @@ impl From<&crate::api::StoredMessage> for ChatMessage {
     }
 }
 
+fn find_selected_answer<'a>(
+    messages: &'a [ChatMessage],
+    id: Option<&str>,
+) -> Option<&'a ChatMessage> {
+    match id {
+        Some(id) => messages
+            .iter()
+            .find(|message| message.id.as_deref() == Some(id)),
+        None => messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant"),
+    }
+}
+
+fn drain_query_tokens(rx: &Receiver<QueryEvent>, text: &mut String) -> Option<QueryEvent> {
+    while let Ok(event) = rx.try_recv() {
+        if let QueryEvent::Token(next) = event {
+            text.push_str(&next);
+        } else {
+            return Some(event);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 struct Notice {
     id: u64,
@@ -398,15 +424,15 @@ pub struct NativeApp {
     status_filter: String,
     selected_document: Option<String>,
     selected_conversation: Option<String>,
-    selected_sources: Vec<SourceChunk>,
+    selected_answer_id: Option<String>,
     expanded_sources: std::collections::HashSet<String>,
-    selected_support: Option<Value>,
     retrieval_scope: String,
     response_effort: String,
     response_phase: String,
     messages: Vec<ChatMessage>,
     is_typing: bool,
     query_stop: Option<Arc<AtomicBool>>,
+    query_request_id: Option<String>,
     chat_scroll: ScrollHandle,
     chat_following: bool,
     regenerate_without_user: bool,
@@ -447,6 +473,10 @@ struct Snapshot {
 }
 
 impl NativeApp {
+    fn selected_answer(&self) -> Option<&ChatMessage> {
+        find_selected_answer(&self.messages, self.selected_answer_id.as_deref())
+    }
+
     pub fn new(
         api: ApiClient,
         backend: Arc<BackendService>,
@@ -488,15 +518,15 @@ impl NativeApp {
             status_filter: "all".into(),
             selected_document: None,
             selected_conversation: None,
-            selected_sources: Vec::new(),
+            selected_answer_id: None,
             expanded_sources: std::collections::HashSet::new(),
-            selected_support: None,
             retrieval_scope: "medium".into(),
             response_effort: "balanced".into(),
             response_phase: String::new(),
             messages: Vec::new(),
             is_typing: false,
             query_stop: None,
+            query_request_id: None,
             chat_scroll: ScrollHandle::new(),
             chat_following: true,
             regenerate_without_user: false,
@@ -1024,6 +1054,7 @@ impl NativeApp {
     fn load_selected_conversation(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected_conversation.clone() else {
             self.messages.clear();
+            self.selected_answer_id = None;
             return;
         };
         self.conversation_request_generation = self.conversation_request_generation.wrapping_add(1);
@@ -1207,6 +1238,7 @@ impl NativeApp {
             .unwrap_or_default();
         self.set_input_text(InputTarget::Rename, title, cx);
         self.selected_conversation = Some(id);
+        self.selected_answer_id = None;
         self.panel = Panel::History;
         self.right_open = true;
         self.load_selected_conversation(cx);
@@ -1277,6 +1309,7 @@ impl NativeApp {
                     Ok(conversation) => {
                         this.selected_conversation = Some(conversation.id.clone());
                         this.messages.clear();
+                        this.selected_answer_id = None;
                         this.data.conversation = Some(conversation);
                         this.notify("New chat created.", green(), cx);
                         this.refresh_conversations(cx);
@@ -1319,8 +1352,7 @@ impl NativeApp {
         if self.is_typing || prompt.is_empty() || self.data.settings.is_none() {
             return;
         }
-        self.selected_sources.clear();
-        self.selected_support = None;
+        self.selected_answer_id = None;
         self.query_generation = self.query_generation.wrapping_add(1);
         let request_generation = self.query_generation;
         let regenerate = self.regenerate_without_user;
@@ -1368,10 +1400,13 @@ impl NativeApp {
         self.response_phase = "Connecting…".into();
         let stop = Arc::new(AtomicBool::new(false));
         self.query_stop = Some(stop.clone());
-        let (tx, rx): (Sender<QueryEvent>, Receiver<QueryEvent>) = async_channel::unbounded();
+        let request_id = format!("native-{}-{request_generation}", std::process::id());
+        self.query_request_id = Some(request_id.clone());
+        let (tx, rx): (Sender<QueryEvent>, Receiver<QueryEvent>) = async_channel::bounded(256);
         let api = self.api.clone();
         let request = QueryRequest {
             prompt,
+            request_id: Some(request_id),
             model,
             history,
             settings: self.data.settings.clone(),
@@ -1382,10 +1417,10 @@ impl NativeApp {
         smol::spawn(async move {
             smol::unblock(move || {
                 let result = api.query_stream(request, &stop, |event| {
-                    let _ = tx.try_send(event);
+                    let _ = tx.send_blocking(event);
                 });
                 if let Err(error) = result {
-                    let _ = tx.try_send(QueryEvent::Error(error.to_string()));
+                    let _ = tx.send_blocking(QueryEvent::Error(error.to_string()));
                 }
             })
             .await;
@@ -1394,7 +1429,24 @@ impl NativeApp {
         cx.spawn(
             async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                 let mut failed = false;
-                while let Ok(event) = rx.recv().await {
+                let mut pending = None;
+                let mut first_token = true;
+                loop {
+                    let mut event = if let Some(event) = pending.take() {
+                        event
+                    } else if let Ok(event) = rx.recv().await {
+                        event
+                    } else {
+                        break;
+                    };
+                    if let QueryEvent::Token(text) = &mut event {
+                        if first_token {
+                            first_token = false;
+                        } else {
+                            smol::Timer::after(Duration::from_millis(16)).await;
+                        }
+                        pending = drain_query_tokens(&rx, text);
+                    }
                     let terminal = matches!(event, QueryEvent::Done | QueryEvent::Error(_));
                     failed = matches!(event, QueryEvent::Error(_));
                     let _ = this.update(&mut *cx, |this, cx| {
@@ -1410,6 +1462,7 @@ impl NativeApp {
                     if request_generation == this.query_generation {
                         this.is_typing = false;
                         this.query_stop = None;
+                        this.query_request_id = None;
                         this.response_phase.clear();
                         this.refresh_conversations(cx);
                         // Keep a transport/retrieval error visible in the current
@@ -1438,24 +1491,21 @@ impl NativeApp {
             QueryEvent::Phase(phase) => self.response_phase = phase_label(&phase).into(),
             QueryEvent::Token(text) => {
                 last.raw_content.push_str(&text);
-                last.content = visible_answer(&last.raw_content);
+                // The backend's streaming filter has already removed hidden reasoning.
+                last.content.push_str(&text);
                 if self.chat_following {
                     self.chat_scroll.scroll_to_bottom();
                 }
             }
             QueryEvent::Source(source) => {
                 let source = *source;
-                last.sources.push(source.clone());
-                self.selected_sources.push(source);
+                last.sources.push(source);
             }
             QueryEvent::Conversation(id) => {
                 self.selected_conversation = Some(id);
             }
             QueryEvent::AnswerMeta(meta) => {
                 last.support = meta.get("support").cloned();
-                if let Some(support) = &last.support {
-                    self.selected_support = Some(support.clone());
-                }
             }
             QueryEvent::Error(message) => {
                 model_unavailable = model_transport_error(&message);
@@ -1489,6 +1539,13 @@ impl NativeApp {
         self.query_generation = self.query_generation.wrapping_add(1);
         if let Some(stop) = &self.query_stop {
             stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(request_id) = self.query_request_id.take() {
+            let api = self.api.clone();
+            smol::spawn(async move {
+                let _ = smol::unblock(move || api.cancel_query(&request_id)).await;
+            })
+            .detach();
         }
         self.is_typing = false;
         if let Some(last) = self.messages.last_mut() {
@@ -1690,6 +1747,7 @@ impl NativeApp {
                                 if this.selected_conversation.as_deref() == Some(&selected_id) {
                                     this.selected_conversation = None;
                                     this.messages.clear();
+                                    this.selected_answer_id = None;
                                 }
                                 this.refresh_conversations(cx);
                             }
@@ -2896,11 +2954,11 @@ impl Render for NativeApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_rag_inputs, model_status_from_parts, model_transport_error, next_response_effort,
-        remove_notice_by_id, selected_request_is_current, visible_answer, InputTarget, ModelStatus,
-        Notice,
+        apply_rag_inputs, drain_query_tokens, find_selected_answer, model_status_from_parts,
+        model_transport_error, next_response_effort, remove_notice_by_id,
+        selected_request_is_current, visible_answer, ChatMessage, InputTarget, ModelStatus, Notice,
     };
-    use crate::api::{LlamaBackendStatus, RagSettings};
+    use crate::api::{LlamaBackendStatus, QueryEvent, RagSettings};
     use gpui::{
         AnyWindowHandle, AppContext, Context, FocusHandle, InputEvent, IntoElement, KeyDownEvent,
         KeyUpEvent, Keystroke, Render, TestAppContext, Window,
@@ -2908,6 +2966,54 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::rc::Rc;
+
+    #[test]
+    fn answer_selection_survives_prepending_older_messages() {
+        let answer = |id: &str| ChatMessage {
+            id: Some(id.into()),
+            role: "assistant".into(),
+            content: id.into(),
+            raw_content: id.into(),
+            sources: Vec::new(),
+            support: None,
+            streaming: false,
+            error: false,
+            error_detail: None,
+        };
+        let mut messages = vec![answer("newer"), answer("latest")];
+        assert_eq!(
+            find_selected_answer(&messages, Some("newer"))
+                .unwrap()
+                .content,
+            "newer"
+        );
+        messages.insert(0, answer("older"));
+        assert_eq!(
+            find_selected_answer(&messages, Some("newer"))
+                .unwrap()
+                .content,
+            "newer"
+        );
+        assert_eq!(
+            find_selected_answer(&messages, None).unwrap().content,
+            "latest"
+        );
+        assert!(find_selected_answer(&messages, Some("missing")).is_none());
+    }
+
+    #[test]
+    fn token_batch_keeps_the_next_non_token_event_in_order() {
+        let (tx, rx) = async_channel::bounded(3);
+        tx.try_send(QueryEvent::Token("b".into())).unwrap();
+        tx.try_send(QueryEvent::Token("c".into())).unwrap();
+        tx.try_send(QueryEvent::Phase("done".into())).unwrap();
+        let mut text = "a".to_string();
+        assert!(matches!(
+            drain_query_tokens(&rx, &mut text),
+            Some(QueryEvent::Phase(_))
+        ));
+        assert_eq!(text, "abc");
+    }
 
     struct ButtonHarness {
         focus: FocusHandle,

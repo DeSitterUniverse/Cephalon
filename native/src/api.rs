@@ -391,6 +391,11 @@ impl ApiClient {
         Ok(())
     }
 
+    pub fn cancel_query(&self, request_id: &str) -> Result<(), ApiError> {
+        self.request_value(Method::POST, &format!("/query/cancel/{request_id}"), None)?;
+        Ok(())
+    }
+
     pub fn event_loop(&self, stop: &AtomicBool, mut on_event: impl FnMut(EventStreamEvent)) {
         while !stop.load(Ordering::Relaxed) {
             match self.event_stream_once(stop, &mut on_event) {
@@ -606,6 +611,7 @@ impl EventStreamEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryRequest {
     pub prompt: String,
+    pub request_id: Option<String>,
     pub model: String,
     pub history: Vec<Message>,
     pub settings: Option<RagSettings>,

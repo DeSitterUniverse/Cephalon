@@ -12,6 +12,7 @@ from .runtime import ModelRuntime
 from .routes import router
 from .services.jobs import JobManager
 from .services import ingestion, jina_runtime, retrieval
+from .services.memory_jobs import MemoryJobManager
 
 
 def load_architecture_context() -> str:
@@ -46,6 +47,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.active_model_context_tokens = None
         app.state.last_model_load_error = None
         app.state.last_model_error = None
+        app.state.active_queries = {}
         app.state.sqlite = storage.connect_sqlite(active_settings)
         app.state.llama_server_settings = storage.get_llama_server_settings(app.state.sqlite, active_settings)
         app.state.lance = storage.connect_lance(active_settings)
@@ -62,9 +64,12 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.event_bus = EventBus(app.state.sqlite)
         app.state.job_manager = JobManager(app.state, app.state.event_bus)
         await app.state.job_manager.start()
+        app.state.memory_jobs = MemoryJobManager(app.state)
+        await app.state.memory_jobs.start()
         try:
             yield
         finally:
+            await app.state.memory_jobs.stop()
             await app.state.job_manager.stop()
             jina_runtime.stop(app.state)
             app.state.sqlite.close()

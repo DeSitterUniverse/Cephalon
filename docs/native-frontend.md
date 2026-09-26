@@ -34,6 +34,15 @@ icon, `async-channel` and `smol` carry backend events, `reqwest` and Serde
 handle the typed HTTP/SSE API, `pulldown-cmark` renders answers, `libc` manages
 the Unix backend process group, and `winresource` embeds the Windows icon.
 
+The query stream uses a bounded channel and combines nearby token events before
+redrawing chat. Source and support panels resolve their selected answer from
+the message list by ID, so they do not keep separate copies of answer data.
+The Stop action also sends a query cancellation request to the Python service,
+which can interrupt a model stream waiting for its next token. Completed
+answers, their sources, and their support records commit together; optional
+conversation-memory embedding runs from a durable queue after the answer is
+delivered.
+
 Native development and CI require Rust 1.95 or newer. The existing Rust 2021
 edition and workspace resolver 2 remain in place; changing them would add
 unrelated API and process-manager Clippy churn to this migration.

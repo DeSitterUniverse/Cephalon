@@ -110,6 +110,7 @@ class IngestRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     prompt: str
+    request_id: str | None = None
     model: str = ""
     conversation_id: str | None = None
     retrieval_scope: Literal["auto", "off", "low", "medium", "high"] = "medium"

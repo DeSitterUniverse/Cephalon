@@ -22,6 +22,14 @@ router.include_router(documents_router)
 router.include_router(conversations_router)
 
 
+@router.post("/query/cancel/{request_id}")
+async def cancel_query(request: Request, request_id: str):
+    cancellation = getattr(state(request), "active_queries", {}).get(request_id)
+    if cancellation is not None:
+        cancellation.abort()
+    return {"cancelled": cancellation is not None}
+
+
 def state(request: Request):
     return request.app.state
 
@@ -549,6 +557,13 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     if retrieval_route["retrieve"] and getattr(app_state, "reindex_required", False):
         raise HTTPException(status_code=409, detail="The previous 1024-dimensional index is stale. Reindex documents before querying retrieval.")
     _ensure_query_model_loaded(app_state, req.model)
+    cancellation = generation.CompletionCancellation()
+    if not hasattr(app_state, "active_queries"):
+        app_state.active_queries = {}
+    if req.request_id:
+        if req.request_id in app_state.active_queries:
+            raise HTTPException(status_code=409, detail="Query request ID is already active.")
+        app_state.active_queries[req.request_id] = cancellation
 
     async def response_stream():
         answer_parts: list[str] = []
@@ -567,6 +582,8 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                     enable_gap_round=req.response_effort == "thorough" and rag_settings.gap_retrieval,
                 )
                 query_meta["retrieval_route"] = retrieval_route
+                if cancellation.is_cancelled():
+                    return
             else:
                 context, sources = "", []
                 query_meta = _empty_retrieval_meta(
@@ -609,14 +626,17 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                     rag_settings,
                     query_meta,
                     response_effort=req.response_effort,
+                    cancellation=cancellation,
                 )
-                async for event_type, value in _cancel_on_disconnect(request, generation_events):
+                async for event_type, value in _cancel_on_disconnect(request, generation_events, cancellation):
                     if event_type == "phase":
                         yield _sse("phase", {"phase": value})
                     else:
                         answer_parts.append(value)
                         yield _sse("token", {"text": value})
             if await request.is_disconnected():
+                return
+            if cancellation.is_cancelled():
                 return
             # The stream filter prevents normal leakage, while this second
             # boundary protects persistence and diagnostics from templates
@@ -669,10 +689,10 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                 "support": support_payload,
                 "generation_latency_ms": generation_ms,
             })
-            assistant_message = storage.append_message(
+            used_source_ids = set(support_payload["accounting"]["valid_source_ids"])
+            assistant_message = storage.save_completed_answer(
                 app_state.sqlite,
                 conversation_id,
-                "assistant",
                 answer_text,
                 model=req.model,
                 settings={
@@ -681,42 +701,34 @@ async def chat_and_remember(request: Request, req: QueryRequest):
                     "response_effort": req.response_effort,
                 },
                 meta=query_meta,
-            )
-            used_source_ids = set(support_payload["accounting"]["valid_source_ids"])
-            storage.save_message_sources(
-                app_state.sqlite,
-                assistant_message["id"],
-                [
+                sources=[
                     source.model_dump()
                     for source in sources
                     if source.source_id in used_source_ids
                 ],
+                record={
+                    "query_id": query_meta.get("query_id"),
+                    "answer_text": answer_text,
+                    "confidence": query_meta.get("confidence"),
+                    "support_status": support_payload["status"],
+                    "meta": {key: value for key, value in query_meta.items() if key != "trace"},
+                    "citations": support_payload["citations"],
+                },
+                memory_prompt=req.prompt if rag_settings.conversation_memory and answer_text.strip() else None,
             )
             if rag_settings.conversation_memory and answer_text.strip():
-                await retrieval.save_permanent_memory(
-                    app_state,
-                    conversation_id,
-                    assistant_message["id"],
-                    req.prompt,
-                    answer_text,
-                )
-            storage.save_answer_record(app_state.sqlite, {
-                "id": assistant_message["id"],
-                "query_id": query_meta.get("query_id"),
-                "conversation_id": conversation_id,
-                "message_id": assistant_message["id"],
-                "answer_text": answer_text,
-                "confidence": query_meta.get("confidence"),
-                "support_status": support_payload["status"],
-                "meta": {key: value for key, value in query_meta.items() if key != "trace"},
-                "citations": support_payload["citations"],
-            })
+                memory_jobs = getattr(app_state, "memory_jobs", None)
+                if memory_jobs is not None:
+                    memory_jobs.wake()
             yield _sse("message", {"conversation_id": conversation_id, "assistant_message_id": assistant_message["id"]})
             yield _sse("done", {"ok": True})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             yield _sse("error", {"message": str(exc)})
+        finally:
+            if req.request_id and app_state.active_queries.get(req.request_id) is cancellation:
+                del app_state.active_queries[req.request_id]
 
     return StreamingResponse(response_stream(), media_type="text/event-stream")
 
@@ -732,17 +744,48 @@ def _sse(event_type: str, payload: dict) -> str:
 _END_OF_EVENTS = object()
 
 
-async def _cancel_on_disconnect(request: Request, events: Iterator[tuple[str, str]]):
+async def _cancel_on_disconnect(
+    request: Request,
+    events: Iterator[tuple[str, str]],
+    cancellation: generation.CompletionCancellation | None = None,
+):
+    pending: asyncio.Task | None = None
+    completed = False
     try:
-        while not await request.is_disconnected():
-            event = await asyncio.to_thread(_next_event, events)
+        while True:
+            if await request.is_disconnected():
+                return
+            if cancellation is not None and cancellation.is_cancelled():
+                return
+            pending = asyncio.create_task(asyncio.to_thread(_next_event, events))
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=0.1)
+                if done:
+                    event = pending.result()
+                    pending = None
+                    break
+                if (cancellation is not None and cancellation.is_cancelled()) or await request.is_disconnected():
+                    return
             if event is _END_OF_EVENTS:
+                completed = True
                 return
             yield event
     finally:
+        if cancellation is not None and not completed:
+            cancellation.abort()
         close = getattr(events, "close", None)
         if close is not None:
-            close()
+            if pending is None:
+                close()
+            else:
+                # A Python generator cannot be closed while next() is running
+                # in another thread. Close it once that read has unwound.
+                def close_after_read(task: asyncio.Task) -> None:
+                    if not task.cancelled():
+                        task.exception()
+                    close()
+
+                pending.add_done_callback(close_after_read)
 
 
 def _next_event(events: Iterator[tuple[str, str]]):

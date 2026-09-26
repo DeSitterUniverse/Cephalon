@@ -2,6 +2,8 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 import json
 import re
+import socket
+import threading
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -141,50 +143,111 @@ def _response_content(response: dict[str, Any]) -> str:
     return content
 
 
-def _stream_server_completion(app_state, messages: list[dict[str, str]], settings: RagSettings) -> Iterator[str]:
-    with _server_completion(app_state, messages, settings, stream=True) as response:
-        visible_filter = VisibleAnswerFilter()
-        saw_done = False
-        saw_visible = False
-        for raw_line in response:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if payload == "[DONE]":
-                # Flush a visible suffix that was held only because it could
-                # have been the beginning of ``<think>``. Returning here
-                # would silently drop the final few answer characters.
-                saw_done = True
-                break
+class CompletionCancellation:
+    """Interrupt an active urllib model stream when its client disconnects."""
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._response = None
+
+    def bind(self, response) -> None:
+        with self._lock:
+            self._response = response
+            cancelled = self._cancelled.is_set()
+        if cancelled:
+            self.abort()
+
+    def unbind(self, response) -> None:
+        with self._lock:
+            if self._response is response:
+                self._response = None
+
+    def abort(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            response = self._response
+            self._response = None
+        # HTTPResponse.close() can wait for a blocked buffered read. Shutting
+        # down its socket wakes that read; the generator then closes it itself.
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        if sock is not None:
             try:
-                event = json.loads(payload)
-                choices = event.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    # Reasoning is internal telemetry, not answer content. Do
-                    # not emit it, store it, or let it enter claim verification.
-                    content = delta.get("content") or choices[0].get("text") or ""
-                    if content:
-                        visible = visible_filter.feed(str(content))
-                        if visible:
-                            saw_visible = True
-                            yield visible
-            except json.JSONDecodeError:
-                continue
-        tail = visible_filter.finish()
-        if tail:
-            saw_visible = True
-            yield tail
-        if not saw_done:
-            message = "llama.cpp streaming output ended before the completion terminator."
-            models.mark_model_error(app_state, message)
-            raise RuntimeError(message)
-        if not saw_visible:
-            message = "llama.cpp returned no visible answer."
-            models.mark_model_error(app_state, message)
-            raise RuntimeError(message)
-        models.clear_model_error(app_state)
+                # HTTPResponse's original socket object may be marked closed
+                # after makefile(), while the buffered reader still owns its fd.
+                wake_socket = socket.socket(fileno=raw.fileno())
+                sock.detach()
+                try:
+                    wake_socket.shutdown(socket.SHUT_RDWR)
+                finally:
+                    wake_socket.close()
+            except (OSError, ValueError):
+                pass
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+
+def _stream_server_completion(
+    app_state, messages: list[dict[str, str]], settings: RagSettings,
+    cancellation: CompletionCancellation | None = None,
+) -> Iterator[str]:
+    with _server_completion(app_state, messages, settings, stream=True) as response:
+        if cancellation is not None:
+            cancellation.bind(response)
+        try:
+            yield from _read_completion_stream(app_state, response, cancellation)
+        finally:
+            if cancellation is not None:
+                cancellation.unbind(response)
+
+
+def _read_completion_stream(app_state, response, cancellation: CompletionCancellation | None) -> Iterator[str]:
+    visible_filter = VisibleAnswerFilter()
+    saw_done = False
+    saw_visible = False
+    for raw_line in response:
+        if cancellation is not None and cancellation.is_cancelled():
+            return
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            # Flush a visible suffix that was held only because it could
+            # have been the beginning of ``<think>``. Returning here
+            # would silently drop the final few answer characters.
+            saw_done = True
+            break
+        try:
+            event = json.loads(payload)
+            choices = event.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                # Reasoning is internal telemetry, not answer content. Do
+                # not emit it, store it, or let it enter claim verification.
+                content = delta.get("content") or choices[0].get("text") or ""
+                if content:
+                    visible = visible_filter.feed(str(content))
+                    if visible:
+                        saw_visible = True
+                        yield visible
+        except json.JSONDecodeError:
+            continue
+    tail = visible_filter.finish()
+    if tail:
+        saw_visible = True
+        yield tail
+    if not saw_done:
+        message = "llama.cpp streaming output ended before the completion terminator."
+        models.mark_model_error(app_state, message)
+        raise RuntimeError(message)
+    if not saw_visible:
+        message = "llama.cpp returned no visible answer."
+        models.mark_model_error(app_state, message)
+        raise RuntimeError(message)
+    models.clear_model_error(app_state)
 
 
 def build_system_instruction(
@@ -482,6 +545,7 @@ def stream_response_events(
     query_meta: dict[str, Any] | None = None,
     *,
     response_effort: ResponseEffort = "balanced",
+    cancellation: CompletionCancellation | None = None,
 ) -> Iterator[tuple[str, str]]:
     deterministic_answer = _deterministic_unit_answer(prompt, query_meta)
     if deterministic_answer is not None:
@@ -543,7 +607,7 @@ def stream_response_events(
     guard = runtime.exclusive() if runtime is not None else nullcontext()
     with guard:
         completion_calls += 1
-        for content in _stream_server_completion(app_state, _chat_messages(system_instruction, bounded_history, prompt), generation_settings):
+        for content in _stream_server_completion(app_state, _chat_messages(system_instruction, bounded_history, prompt), generation_settings, cancellation):
             yield "token", content
     if query_meta is not None:
         query_meta["completion_call_count"] = completion_calls

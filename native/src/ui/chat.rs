@@ -12,7 +12,7 @@ use super::theme::{
     bg, faint, green, line, link as theme_link, muted, orange, orange_light, panel_2, panel_3, red,
     text, yellow,
 };
-use super::{ChatMessage, NativeApp, Panel, SourceChunk};
+use super::{ChatMessage, NativeApp, Panel};
 
 fn is_inline_markdown_node(node: &MarkdownNode) -> bool {
     match node {
@@ -680,7 +680,7 @@ impl NativeApp {
                 .child(value)
                 .into_any_element(),
             InlineFragment::Citation(marker) => {
-                let sources = message.sources.clone();
+                let answer_id = (!message.streaming).then(|| message.id.clone()).flatten();
                 let citation = marker.clone();
                 div()
                     .id(SharedString::from(id.to_string()))
@@ -696,7 +696,7 @@ impl NativeApp {
                     .text_color(orange_light())
                     .child(format!("[{marker}]"))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_source_citation(citation.clone(), sources.clone(), cx)
+                        this.open_source_citation(citation.clone(), answer_id.clone(), cx)
                     }))
                     .into_any_element()
             }
@@ -706,17 +706,32 @@ impl NativeApp {
     fn open_source_citation(
         &mut self,
         citation: String,
-        sources: Vec<SourceChunk>,
+        answer_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let marker = citation.strip_prefix("src:").unwrap_or(&citation);
-        if let Some(source) = sources.iter().find(|source| {
-            source.source_id.as_deref() == Some(marker)
-                || source.chunk_id == marker
-                || format!("S{}", source.rank) == marker
-        }) {
+        let answer = match answer_id.as_deref() {
+            Some(id) => self
+                .messages
+                .iter()
+                .find(|message| message.id.as_deref() == Some(id)),
+            None => self
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant"),
+        };
+        if let Some(source) = answer
+            .into_iter()
+            .flat_map(|answer| &answer.sources)
+            .find(|source| {
+                source.source_id.as_deref() == Some(marker)
+                    || source.chunk_id == marker
+                    || format!("S{}", source.rank) == marker
+            })
+        {
             self.expanded_sources.insert(super::source_key(source));
-            self.selected_sources = sources;
+            self.selected_answer_id = answer_id;
             self.choose_panel(Panel::Sources, cx);
         } else {
             self.notify(
@@ -833,25 +848,25 @@ impl NativeApp {
                 );
             }
             if !message.sources.is_empty() {
-                let sources = message.sources.clone();
+                let answer_id = (!message.streaming).then(|| message.id.clone()).flatten();
                 card = card.child(super::ui_button(
                     format!("message-sources-{index}"),
-                    format!("{} sources", sources.len()),
+                    format!("{} sources", message.sources.len()),
                     false,
                     cx.listener(move |this, _, _, cx| {
-                        this.selected_sources = sources.clone();
+                        this.selected_answer_id = answer_id.clone();
                         this.choose_panel(Panel::Sources, cx);
                     }),
                 ));
             }
-            if let Some(support) = &message.support {
-                let support = support.clone();
+            if message.support.is_some() {
+                let answer_id = (!message.streaming).then(|| message.id.clone()).flatten();
                 card = card.child(super::ui_button(
                     format!("message-support-{index}"),
                     "Answer support",
                     false,
                     cx.listener(move |this, _, _, cx| {
-                        this.selected_support = Some(support.clone());
+                        this.selected_answer_id = answer_id.clone();
                         this.choose_panel(Panel::Support, cx);
                     }),
                 ));

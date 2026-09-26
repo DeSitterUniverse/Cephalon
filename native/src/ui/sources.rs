@@ -4,14 +4,15 @@ use super::*;
 
 impl NativeApp {
     pub(super) fn render_sources(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        if self.selected_sources.is_empty() {
+        let sources = self.selected_answer().map(|answer| &answer.sources);
+        if sources.is_none_or(|sources| sources.is_empty()) {
             return div()
                 .p_3()
                 .text_color(muted())
                 .child("Sources will appear here after an answer uses the library.");
         }
         let mut list = div().flex().flex_col().gap_2();
-        for (index, source) in self.selected_sources.iter().enumerate() {
+        for (index, source) in sources.into_iter().flatten().enumerate() {
             let doc_id = source.doc_id.clone();
             let key = source_key(source);
             let expanded = self.expanded_sources.contains(&key);

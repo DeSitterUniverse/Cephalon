@@ -220,9 +220,9 @@ def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
 
 async def save_permanent_memory(app_state, conversation_id: str, message_id: str, user_prompt: str, answer_text: str) -> None:
     """Persist a compact, searchable local memory for a completed conversation turn."""
-    if not getattr(storage.get_rag_settings(app_state.sqlite), "conversation_memory", True):
+    memory_id = f"mem_{message_id}"
+    if storage.fetchone(app_state.sqlite, "SELECT 1 FROM conversation_memory WHERE id = ?", (memory_id,)):
         return
-    memory_id = f"mem_{uuid.uuid4()}"
     # Reasoning traces are neither user-facing answers nor useful semantic
     # memory. The shared sanitizer also handles an unclosed thought block.
     clean_answer = strip_hidden_reasoning(answer_text)
@@ -230,27 +230,31 @@ async def save_permanent_memory(app_state, conversation_id: str, message_id: str
         f"[Past Conversation Context]\nUser: {user_prompt.strip()[:1600]}\n"
         f"Assistant: {(clean_answer or answer_text.strip())[:3200]}"
     )
-    try:
-        vector = await get_embedding(app_state, memory_text)
-        lance_data = [{
-            "vector": vector,
-            "id": memory_id,
-            "doc_id": "core_memory",
-            "text": memory_text,
-            "chunk_index": -1,
-            "parent_id": None,
-            "source_kind": "memory",
-            **storage.active_embedding_metadata(app_state),
-            "chunk_length": len(memory_text),
-        }]
-        await asyncio.to_thread(ensure_vector_table, app_state, lance_data)
-        storage.execute(
-            app_state.sqlite,
-            "INSERT INTO conversation_memory (id, conversation_id, message_id, created_at) VALUES (?, ?, ?, ?)",
-            (memory_id, conversation_id, message_id, int(time.time())),
-        )
-    except Exception:
-        pass
+    vector = await get_embedding(app_state, memory_text)
+    lance_data = [{
+        "vector": vector,
+        "id": memory_id,
+        "doc_id": "core_memory",
+        "text": memory_text,
+        "chunk_index": -1,
+        "parent_id": None,
+        "source_kind": "memory",
+        **storage.active_embedding_metadata(app_state),
+        "chunk_length": len(memory_text),
+    }]
+    await asyncio.to_thread(_replace_memory_vector, app_state, memory_id, lance_data)
+    storage.execute(
+        app_state.sqlite,
+        "INSERT OR IGNORE INTO conversation_memory (id, conversation_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+        (memory_id, conversation_id, message_id, int(time.time())),
+    )
+
+
+def _replace_memory_vector(app_state, memory_id: str, rows: list[dict[str, Any]]) -> None:
+    table_name = vector_table_name(app_state)
+    if table_name in app_state.lance.table_names():
+        app_state.lance.open_table(table_name).delete(f"id = {_quote_lance_string(memory_id)}")
+    ensure_vector_table(app_state, rows)
 
 
 def delete_conversation_memory(app_state, conversation_id: str) -> None:

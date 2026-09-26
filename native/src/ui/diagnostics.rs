@@ -19,7 +19,9 @@ impl NativeApp {
                     trace.created_at
                 ),
                 self.data.selected_trace.is_some()
-                    && self.selected_sources.is_empty()
+                    && self
+                        .selected_answer()
+                        .is_none_or(|answer| answer.sources.is_empty())
                     && self.panel == Panel::Trace,
                 cx.listener(move |this, _, _, cx| this.load_trace(id.clone(), cx)),
             ));
@@ -299,7 +301,10 @@ impl NativeApp {
     }
 
     pub(super) fn render_support(&mut self, _cx: &mut Context<Self>) -> gpui::Div {
-        match &self.selected_support {
+        match self
+            .selected_answer()
+            .and_then(|answer| answer.support.as_ref())
+        {
             Some(support) => div()
                 .flex()
                 .flex_col()

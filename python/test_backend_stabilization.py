@@ -3,7 +3,10 @@ from datetime import date
 import os
 import re
 import sqlite3
+import threading
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.request import urlopen
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -18,7 +21,8 @@ from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.routes import documents as document_routes
 from cephalon_core.app_factory import create_app
 from cephalon_core import routes
-from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, pdf_parser, retrieval, table_ingestion, table_models
+from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, observability, pdf_parser, retrieval, table_ingestion, table_models
+from cephalon_core.services.memory_jobs import MemoryJobManager
 from cephalon_core.services import models
 from cephalon_core.services import documents
 from cephalon_core.services.prompt_budget import budget_prompt
@@ -565,6 +569,62 @@ def test_non_retrieval_answer_persistence_does_not_reference_missing_query():
     assert row["query_id"] is None
 
 
+def test_completed_answer_commits_evidence_and_memory_job_together(monkeypatch):
+    state = build_memory_state()
+    conversation = storage.create_conversation(state.sqlite, "Atomic answer")
+    record = {"answer_text": "Answer", "support_status": "supported", "citations": []}
+    message = storage.save_completed_answer(
+        state.sqlite, conversation["id"], "Answer", model="test", settings={}, meta={},
+        sources=[{"source_id": "S1"}], record=record, memory_prompt="Question",
+    )
+    assert storage.get_conversation(state.sqlite, conversation["id"])["messages"][0]["sources"][0]["source_id"] == "S1"
+    assert storage.fetchone(state.sqlite, "SELECT 1 FROM answer_records WHERE message_id = ?", (message["id"],))
+    assert storage.fetchone(state.sqlite, "SELECT prompt FROM memory_jobs WHERE message_id = ?", (message["id"],))["prompt"] == "Question"
+
+    def fail_record(*_args, **_kwargs):
+        raise RuntimeError("record write failed")
+
+    monkeypatch.setattr(storage, "save_answer_record", fail_record)
+    with pytest.raises(RuntimeError, match="record write failed"):
+        storage.save_completed_answer(
+            state.sqlite, conversation["id"], "Second answer", model="test", settings={}, meta={},
+            sources=[{"source_id": "S2"}], record=record, memory_prompt="Second question",
+        )
+    assert [item["content"] for item in storage.get_conversation(state.sqlite, conversation["id"])["messages"]] == ["Answer"]
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM memory_jobs")["count"] == 1
+
+
+def test_memory_job_recovers_and_finishes_without_blocking_answer(monkeypatch):
+    state = build_memory_state()
+    conversation = storage.create_conversation(state.sqlite, "Deferred memory")
+    message = storage.save_completed_answer(
+        state.sqlite, conversation["id"], "Answer", model="test", settings={}, meta={},
+        sources=[], record={"answer_text": "Answer", "citations": []}, memory_prompt="Question",
+    )
+    finished = threading.Event()
+
+    async def fake_save(_state, _conversation_id, message_id, prompt, answer):
+        assert (message_id, prompt, answer) == (message["id"], "Question", "Answer")
+        finished.set()
+
+    monkeypatch.setattr(retrieval, "save_permanent_memory", fake_save)
+
+    async def run():
+        manager = MemoryJobManager(state)
+        await manager.start()
+        try:
+            assert await asyncio.to_thread(finished.wait, 1)
+            for _ in range(20):
+                if storage.fetchone(state.sqlite, "SELECT 1 FROM memory_jobs WHERE message_id = ?", (message["id"],)) is None:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await manager.stop()
+
+    asyncio.run(run())
+    assert storage.fetchone(state.sqlite, "SELECT 1 FROM memory_jobs WHERE message_id = ?", (message["id"],)) is None
+
+
 def test_document_payloads_batch_tags_and_limit_previews():
     state = build_memory_state()
     for index in range(3):
@@ -593,6 +653,38 @@ def test_document_payloads_batch_tags_and_limit_previews():
     assert len(detail["chunk_preview"]) == 20
     assert sum("FROM document_tags" in statement for statement in statements) == 2
     assert any("LIMIT 20" in statement for statement in statements)
+
+
+def test_index_health_aggregates_without_loading_chunk_text(tmp_path):
+    state = build_memory_state()
+    state.settings = SimpleNamespace(data_dir=str(tmp_path))
+    storage.execute(
+        state.sqlite,
+        """INSERT INTO documents
+           (id, path, display_name, content_hash, status, type, stale_embedding, retrieval_count)
+           VALUES ('health-doc', 'health.md', 'Health', 'hash', 'failed: parsing', 'file', 1, 3)""",
+    )
+    for index, length in enumerate((4, 6, 8)):
+        storage.execute(
+            state.sqlite,
+            """INSERT INTO chunks
+               (id, doc_id, chunk_index, text, chunk_length, text_hash, embedding_model_id, chunking_profile)
+               VALUES (?, 'health-doc', ?, ?, ?, ?, ?, ?)""",
+            (f"health-{index}", index, "x" * length, length, "same" if index < 2 else "other", "embed" if index < 2 else None, "profile"),
+        )
+    statements = []
+    state.sqlite.set_trace_callback(statements.append)
+    health = observability.index_health(state)
+    state.sqlite.set_trace_callback(None)
+
+    assert health["document_count"] == 1
+    assert health["chunk_count"] == 3
+    assert health["embedded_chunk_count"] == 2
+    assert health["duplicate_chunk_count"] == 1
+    assert health["median_chunk_length"] == 6
+    assert health["failed_ingestion_count"] == health["stale_document_count"] == 1
+    assert health["embedding_model_counts"] == {"embed": 2, "unknown": 1}
+    assert all("SELECT * FROM CHUNKS" not in statement.upper() for statement in statements)
 
 
 def test_conversation_sources_are_loaded_in_one_query():
@@ -1371,6 +1463,144 @@ def test_generation_event_stream_stops_after_client_disconnect():
 
     assert received == [("token", "first")]
     assert closed is True
+
+
+def test_completed_generation_stream_keeps_cancellation_clear():
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    cancellation = generation.CompletionCancellation()
+
+    async def collect():
+        return [event async for event in routes._cancel_on_disconnect(Request(), iter([("token", "answer")]), cancellation)]
+
+    assert asyncio.run(collect()) == [("token", "answer")]
+    assert cancellation.is_cancelled() is False
+
+
+def test_cancel_endpoint_marks_the_matching_query_only():
+    active = generation.CompletionCancellation()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(active_queries={"query-1": active})))
+    assert asyncio.run(routes.cancel_query(request, "other")) == {"cancelled": False}
+    assert active.is_cancelled() is False
+    assert asyncio.run(routes.cancel_query(request, "query-1")) == {"cancelled": True}
+    assert active.is_cancelled() is True
+
+
+def test_cancel_interrupts_a_stalled_urllib_response():
+    release = threading.Event()
+    reading = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            release.wait(3)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    cancellation = generation.CompletionCancellation()
+
+    def read():
+        with urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=3) as response:
+            cancellation.bind(response)
+            reading.set()
+            try:
+                response.readline()
+            except OSError:
+                pass
+            finally:
+                cancellation.unbind(response)
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        reader.start()
+        assert reading.wait(1)
+        cancellation.abort()
+        reader.join(1)
+        assert not reader.is_alive()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_query_stream_commits_answer_and_finishes_before_memory_embedding(monkeypatch):
+    state = build_memory_state()
+    state.startup_error = None
+    state.active_queries = {}
+    wake_calls = []
+    state.memory_jobs = SimpleNamespace(wake=lambda: wake_calls.append(True))
+    monkeypatch.setattr(routes, "_ensure_query_model_loaded", lambda *_args: None)
+    monkeypatch.setattr(
+        generation, "stream_response_events",
+        lambda *_args, **_kwargs: iter([("phase", "answering"), ("token", "Hello"), ("token", " world")]),
+    )
+    monkeypatch.setattr(metrics, "append_retrieval_event", lambda *_args, **_kwargs: None)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    async def is_disconnected():
+        return False
+
+    request.is_disconnected = is_disconnected
+
+    async def run():
+        response = await routes.chat_and_remember(
+            request,
+            QueryRequest(
+                prompt="Say hello", model="test", retrieval_scope="off", request_id="test-query",
+                settings=RagSettings(conversation_memory=True),
+            ),
+        )
+        return [chunk async for chunk in response.body_iterator]
+
+    packets = asyncio.run(run())
+    assert any("event: done" in packet for packet in packets)
+    assert wake_calls == [True]
+    assert state.active_queries == {}
+    assistant = storage.fetchone(state.sqlite, "SELECT id, content FROM messages WHERE role = 'assistant'")
+    assert assistant["content"] == "Hello world"
+    assert storage.fetchone(state.sqlite, "SELECT 1 FROM answer_records WHERE message_id = ?", (assistant["id"],))
+    assert storage.fetchone(state.sqlite, "SELECT 1 FROM memory_jobs WHERE message_id = ?", (assistant["id"],))
+
+
+def test_generation_disconnect_interrupts_a_stalled_next_event():
+    released = threading.Event()
+    closed = threading.Event()
+
+    class FakeRequest:
+        calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    class StalledEvents:
+        def __next__(self):
+            released.wait(2)
+            return "token", "late"
+
+        def close(self):
+            closed.set()
+
+    class Cancellation:
+        def is_cancelled(self):
+            return released.is_set()
+
+        def abort(self):
+            released.set()
+
+    async def collect():
+        return [event async for event in routes._cancel_on_disconnect(FakeRequest(), StalledEvents(), Cancellation())]
+
+    assert asyncio.run(asyncio.wait_for(collect(), timeout=1)) == []
+    assert released.is_set()
+    assert closed.wait(1)
 
 
 def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):

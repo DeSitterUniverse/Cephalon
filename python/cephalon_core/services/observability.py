@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import statistics
-from collections import Counter
 from typing import Any
 
 from .. import storage
@@ -110,16 +109,46 @@ def no_answer_diagnostics(sources: list[SourceChunk], thresholds: dict[str, Any]
 
 
 def index_health(app_state) -> dict[str, Any]:
-    docs = storage.fetchall(app_state.sqlite, "SELECT * FROM documents WHERE type = 'file'")
-    chunks = storage.fetchall(app_state.sqlite, "SELECT * FROM chunks")
-    failed_docs = [row for row in docs if str(row["status"]).startswith("failed")]
-    stale_docs = [row for row in docs if row["stale_embedding"]]
-    chunk_lengths = [row["chunk_length"] or row["char_count"] or len(row["text"] or "") for row in chunks]
-    text_hash_counts = Counter(row["text_hash"] for row in chunks if "text_hash" in row.keys() and row["text_hash"])
-    duplicate_chunks = sum(count - 1 for count in text_hash_counts.values() if count > 1)
-    never_retrieved = [row for row in docs if not row["last_retrieved_at"]]
-    model_counts = Counter(row["embedding_model_id"] or "unknown" for row in chunks)
-    profile_counts = Counter(row["chunking_profile"] or "unknown" for row in chunks if "chunking_profile" in row.keys())
+    documents = storage.fetchone(app_state.sqlite, """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN substr(status, 1, 6) = 'failed' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN stale_embedding THEN 1 ELSE 0 END) AS stale,
+               SUM(CASE WHEN parse_warnings IS NOT NULL AND parse_warnings != '' THEN 1 ELSE 0 END) AS parse_warnings,
+               SUM(CASE WHEN last_retrieved_at IS NULL OR last_retrieved_at = 0 THEN 1 ELSE 0 END) AS never_retrieved
+        FROM documents WHERE type = 'file'
+    """)
+    chunk_summary = storage.fetchone(app_state.sqlite, """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN embedding_model_id IS NOT NULL AND embedding_model_id != '' THEN 1 ELSE 0 END) AS embedded
+        FROM chunks
+    """)
+    chunk_lengths = [row[0] for row in storage.fetchall(app_state.sqlite, """
+        SELECT COALESCE(NULLIF(chunk_length, 0), NULLIF(char_count, 0), LENGTH(text), 0)
+        FROM chunks
+    """)]
+    duplicate_chunks = storage.fetchone(app_state.sqlite, """
+        SELECT COALESCE(SUM(copies - 1), 0) AS duplicate_count FROM (
+            SELECT COUNT(*) AS copies FROM chunks
+            WHERE text_hash IS NOT NULL AND text_hash != ''
+            GROUP BY text_hash HAVING COUNT(*) > 1
+        )
+    """)["duplicate_count"]
+    model_counts = {
+        row["name"]: row["count"] for row in storage.fetchall(app_state.sqlite, """
+            SELECT COALESCE(NULLIF(embedding_model_id, ''), 'unknown') AS name, COUNT(*) AS count
+            FROM chunks GROUP BY name
+        """)
+    }
+    profile_counts = {
+        row["name"]: row["count"] for row in storage.fetchall(app_state.sqlite, """
+            SELECT COALESCE(NULLIF(chunking_profile, ''), 'unknown') AS name, COUNT(*) AS count
+            FROM chunks GROUP BY name
+        """)
+    }
+    top_documents = storage.fetchall(app_state.sqlite, """
+        SELECT id, display_name, path, retrieval_count FROM documents
+        WHERE type = 'file' ORDER BY COALESCE(retrieval_count, 0) DESC, rowid LIMIT 10
+    """)
     index_path = os.path.join(app_state.settings.data_dir, "lancedb")
     index_size = 0
     if os.path.exists(index_path):
@@ -131,24 +160,24 @@ def index_health(app_state) -> dict[str, Any]:
                     pass
 
     return {
-        "document_count": len(docs),
-        "chunk_count": len(chunks),
-        "embedded_chunk_count": sum(1 for row in chunks if row["embedding_model_id"]),
-        "stale_document_count": len(stale_docs),
-        "failed_ingestion_count": len(failed_docs),
-        "parse_warning_count": sum(1 for row in docs if "parse_warnings" in row.keys() and row["parse_warnings"]),
+        "document_count": documents["total"],
+        "chunk_count": chunk_summary["total"],
+        "embedded_chunk_count": chunk_summary["embedded"] or 0,
+        "stale_document_count": documents["stale"] or 0,
+        "failed_ingestion_count": documents["failed"] or 0,
+        "parse_warning_count": documents["parse_warnings"] or 0,
         "duplicate_chunk_count": duplicate_chunks,
-        "duplicate_chunk_rate": round(duplicate_chunks / len(chunks), 6) if chunks else 0.0,
+        "duplicate_chunk_rate": round(duplicate_chunks / chunk_summary["total"], 6) if chunk_summary["total"] else 0.0,
         "average_chunk_length": round(sum(chunk_lengths) / len(chunk_lengths), 2) if chunk_lengths else 0,
         "median_chunk_length": statistics.median(chunk_lengths) if chunk_lengths else 0,
         "min_chunk_length": min(chunk_lengths) if chunk_lengths else 0,
         "max_chunk_length": max(chunk_lengths) if chunk_lengths else 0,
-        "documents_never_retrieved": len(never_retrieved),
+        "documents_never_retrieved": documents["never_retrieved"] or 0,
         "index_size_bytes": index_size,
         "embedding_model_counts": dict(model_counts),
         "chunking_profile_counts": dict(profile_counts),
         "top_retrieved_documents": [
             {"id": row["id"], "name": row["display_name"] or os.path.basename(row["path"]), "retrieval_count": row["retrieval_count"] or 0}
-            for row in sorted(docs, key=lambda item: item["retrieval_count"] or 0, reverse=True)[:10]
+            for row in top_documents
         ],
     }

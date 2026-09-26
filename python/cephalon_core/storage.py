@@ -588,6 +588,20 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         add_column_if_missing(conn, "retrieval_queries", "table_execution_json", "TEXT NOT NULL DEFAULT '{}'")
         mark_migration(conn, "019_table_execution_trace")
 
+    if not migration_applied(conn, "020_deferred_conversation_memory"):
+        executescript(conn, """
+            CREATE TABLE IF NOT EXISTS memory_jobs (
+                message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                prompt TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_jobs_due ON memory_jobs(next_attempt_at);
+        """)
+        mark_migration(conn, "020_deferred_conversation_memory")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -891,6 +905,7 @@ def append_message(
     model: str | None = None,
     settings: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     import uuid
 
@@ -912,8 +927,9 @@ def append_message(
             json.dumps(meta or {}, separators=(",", ":")),
             now,
         ),
+        commit=commit,
     )
-    execute(conn, "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+    execute(conn, "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id), commit=commit)
     return {
         "id": message_id,
         "conversation_id": conversation_id,
@@ -926,7 +942,7 @@ def append_message(
     }
 
 
-def save_message_sources(conn: sqlite3.Connection, message_id: str, sources: list[dict[str, Any]]) -> None:
+def save_message_sources(conn: sqlite3.Connection, message_id: str, sources: list[dict[str, Any]], *, commit: bool = True) -> None:
     with SQLITE_LOCK:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM message_sources WHERE message_id = ?", (message_id,))
@@ -935,7 +951,8 @@ def save_message_sources(conn: sqlite3.Connection, message_id: str, sources: lis
                 "INSERT INTO message_sources (message_id, source_rank, source_json) VALUES (?, ?, ?)",
                 (message_id, rank, json.dumps(source, ensure_ascii=False, separators=(",", ":"))),
             )
-        conn.commit()
+        if commit:
+            conn.commit()
 
 
 def get_conversation(
@@ -1169,7 +1186,7 @@ def get_retrieval_trace(conn: sqlite3.Connection, query_id: str) -> dict[str, An
     }
 
 
-def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any], *, commit: bool = True) -> None:
     answer_id = payload["id"]
     with SQLITE_LOCK:
         cursor = conn.cursor()
@@ -1220,7 +1237,45 @@ def save_answer_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> Non
                     json.dumps(citation, ensure_ascii=False, separators=(",", ":")),
                 ),
             )
-        conn.commit()
+        if commit:
+            conn.commit()
+
+
+def save_completed_answer(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    content: str,
+    *,
+    model: str,
+    settings: dict[str, Any],
+    meta: dict[str, Any],
+    sources: list[dict[str, Any]],
+    record: dict[str, Any],
+    memory_prompt: str | None = None,
+) -> dict[str, Any]:
+    """Commit an assistant message and all of its evidence as one unit."""
+    with SQLITE_LOCK:
+        try:
+            message = append_message(
+                conn, conversation_id, "assistant", content,
+                model=model, settings=settings, meta=meta, commit=False,
+            )
+            save_message_sources(conn, message["id"], sources, commit=False)
+            save_answer_record(
+                conn,
+                {**record, "id": message["id"], "message_id": message["id"], "conversation_id": conversation_id},
+                commit=False,
+            )
+            if memory_prompt is not None:
+                conn.execute(
+                    "INSERT INTO memory_jobs (message_id, conversation_id, prompt) VALUES (?, ?, ?)",
+                    (message["id"], conversation_id, memory_prompt),
+                )
+            conn.commit()
+            return message
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def save_eval_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
