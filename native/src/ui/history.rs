@@ -3,7 +3,7 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_history(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_history(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut list = div().flex().flex_col().gap_1();
         for conversation in &self.data.conversations {
             let id = conversation.id.clone();
@@ -38,19 +38,19 @@ impl NativeApp {
                         .text_color(text())
                         .child(title),
                 );
-            row = row.child(ui_button(
-                format!("delete-chat-{}", delete_id),
-                "×",
-                false,
-                cx.listener(move |this, _, window, cx| {
-                    this.ask_delete_conversation(
-                        delete_id.clone(),
-                        delete_title.clone(),
-                        window,
-                        cx,
-                    )
-                }),
-            ));
+            row = row.child(
+                Button::new(format!("delete-chat-{}", delete_id))
+                    .label("×")
+                    .secondary()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ask_delete_conversation(
+                            delete_id.clone(),
+                            delete_title.clone(),
+                            window,
+                            cx,
+                        )
+                    })),
+            );
             list = list.child(row);
         }
         div()
@@ -58,12 +58,12 @@ impl NativeApp {
             .flex_col()
             .gap_2()
             .flex_1()
-            .child(ui_button(
-                "history-new",
-                "+ New chat",
-                true,
-                cx.listener(|this, _, _, cx| this.new_conversation(cx)),
-            ))
+            .child(
+                Button::new("history-new")
+                    .label("+ New chat")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
+            )
             .child(list)
             .child(
                 if self
@@ -72,28 +72,22 @@ impl NativeApp {
                     .as_ref()
                     .is_some_and(|conversation| conversation.has_more)
                 {
-                    ui_button(
-                        "load-older-messages",
-                        "Load older messages",
-                        false,
-                        cx.listener(|this, _, _, cx| this.load_older_messages(cx)),
-                    )
+                    Button::new("load-older-messages")
+                        .label("Load older messages")
+                        .secondary()
+                        .on_click(cx.listener(|this, _, _, cx| this.load_older_messages(cx)))
                 } else {
-                    ui_disabled_button("load-older-messages-disabled", "All messages loaded")
+                    Button::new("load-older-messages-disabled")
+                        .label("All messages loaded")
+                        .disabled(true)
                 },
             )
-            .child(input_field(
-                "rename-chat",
-                self.inputs.rename.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::Rename, window, cx)
-                }),
-            ))
-            .child(ui_button(
-                "save-chat-name",
-                "Save chat name",
-                false,
-                cx.listener(|this, _, _, cx| this.rename_conversation(cx)),
-            ))
+            .child(Input::new(&self.inputs.get(InputTarget::Rename)).id("rename-chat"))
+            .child(
+                Button::new("save-chat-name")
+                    .label("Save chat name")
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| this.rename_conversation(cx))),
+            )
     }
 }

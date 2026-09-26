@@ -1,7 +1,12 @@
 //! Chat presentation: native CommonMark/GFM rendering, citations, and actions.
 
-use gpui::prelude::*;
-use gpui::{div, px, Context, FontWeight, SharedString};
+use gpui_kit::component::input::Textarea;
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Disableable,
+};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, Context, FontWeight, SharedString};
 use pulldown_cmark::{Alignment, CodeBlockKind, HeadingLevel, Tag};
 
 use super::markdown::{
@@ -39,7 +44,7 @@ fn is_inline_markdown_node(node: &MarkdownNode) -> bool {
     }
 }
 
-pub(crate) fn code_block(id: &str, value: &str, language: &str) -> gpui::Div {
+pub(crate) fn code_block(id: &str, value: &str, language: &str) -> gpui_kit::Div {
     let mut block = div()
         .w_full()
         .min_w_0()
@@ -77,7 +82,7 @@ impl NativeApp {
         message_index: usize,
         message: &ChatMessage,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let answer = if message.content.is_empty() && message.streaming {
             "…"
         } else {
@@ -113,7 +118,7 @@ impl NativeApp {
         nodes: &[MarkdownNode],
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let mut blocks = div()
             .flex()
             .flex_col()
@@ -140,7 +145,7 @@ impl NativeApp {
         node: &MarkdownNode,
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         match node {
             MarkdownNode::Container { tag, children } => match tag {
                 Tag::Paragraph => {
@@ -272,7 +277,7 @@ impl NativeApp {
         start: Option<u64>,
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let mut list = div().w_full().flex().flex_col().gap_1();
         let mut item_index = 0;
         for child in children {
@@ -343,7 +348,7 @@ impl NativeApp {
         alignments: &[Alignment],
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let mut table = div()
             .w_full()
             .flex()
@@ -398,7 +403,7 @@ impl NativeApp {
         header: bool,
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let row = if let Some(MarkdownNode::Container {
             tag: Tag::TableRow,
             children: row_children,
@@ -455,7 +460,7 @@ impl NativeApp {
         nodes: &[MarkdownNode],
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         self.render_inline_nodes_impl(message_index, message, nodes, id_prefix, true, cx)
     }
 
@@ -466,7 +471,7 @@ impl NativeApp {
         nodes: &[MarkdownNode],
         id_prefix: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         self.render_inline_nodes_impl(message_index, message, nodes, id_prefix, false, cx)
     }
 
@@ -478,7 +483,7 @@ impl NativeApp {
         id_prefix: &str,
         full_width: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let mut row = div()
             .min_w_0()
             .flex()
@@ -522,7 +527,7 @@ impl NativeApp {
         node: &MarkdownNode,
         id: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         match node {
             MarkdownNode::Text(value) => div()
                 .flex_initial()
@@ -671,7 +676,7 @@ impl NativeApp {
         fragment: InlineFragment,
         id: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         match fragment {
             InlineFragment::Text(value) => div()
                 .flex_initial()
@@ -760,12 +765,11 @@ impl NativeApp {
             return;
         };
         self.messages.truncate(message_index);
-        self.set_input_text(super::InputTarget::Composer, prompt, cx);
         self.regenerate_without_user = true;
-        self.send_message(cx);
+        self.send_prompt(prompt, cx);
     }
 
-    pub(super) fn render_chat(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_chat(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let title = self
             .data
             .conversations
@@ -849,27 +853,27 @@ impl NativeApp {
             }
             if !message.sources.is_empty() {
                 let answer_id = (!message.streaming).then(|| message.id.clone()).flatten();
-                card = card.child(super::ui_button(
-                    format!("message-sources-{index}"),
-                    format!("{} sources", message.sources.len()),
-                    false,
-                    cx.listener(move |this, _, _, cx| {
-                        this.selected_answer_id = answer_id.clone();
-                        this.choose_panel(Panel::Sources, cx);
-                    }),
-                ));
+                card = card.child(
+                    Button::new(format!("message-sources-{index}"))
+                        .label(format!("{} sources", message.sources.len()))
+                        .secondary()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selected_answer_id = answer_id.clone();
+                            this.choose_panel(Panel::Sources, cx);
+                        })),
+                );
             }
             if message.support.is_some() {
                 let answer_id = (!message.streaming).then(|| message.id.clone()).flatten();
-                card = card.child(super::ui_button(
-                    format!("message-support-{index}"),
-                    "Answer support",
-                    false,
-                    cx.listener(move |this, _, _, cx| {
-                        this.selected_answer_id = answer_id.clone();
-                        this.choose_panel(Panel::Support, cx);
-                    }),
-                ));
+                card = card.child(
+                    Button::new(format!("message-support-{index}"))
+                        .label("Answer support")
+                        .secondary()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selected_answer_id = answer_id.clone();
+                            this.choose_panel(Panel::Support, cx);
+                        })),
+                );
             }
             if !user && !message.streaming {
                 let copy_message = message.clone();
@@ -878,34 +882,32 @@ impl NativeApp {
                     div()
                         .flex()
                         .gap_1()
-                        .child(super::ui_button(
-                            format!("message-copy-{index}"),
-                            "Copy answer",
-                            false,
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    visible_answer(&copy_message.raw_content),
-                                ));
-                            }),
-                        ))
-                        .child(super::ui_button(
-                            format!("message-regenerate-{index}"),
-                            "Regenerate",
-                            false,
-                            cx.listener(move |this, _, _, cx| {
-                                this.regenerate_message(index, &regenerate_message, cx)
-                            }),
-                        )),
+                        .child(
+                            Button::new(format!("message-copy-{index}"))
+                                .label("Copy answer")
+                                .secondary()
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        visible_answer(&copy_message.raw_content),
+                                    ));
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("message-regenerate-{index}"))
+                                .label("Regenerate")
+                                .secondary()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.regenerate_message(index, &regenerate_message, cx)
+                                })),
+                        ),
                 );
             }
             messages = messages.child(card);
         }
-        let composer = super::input_field(
-            "composer",
-            self.inputs.composer.clone(),
-            cx.listener(|this, _, window, cx| {
-                this.focus_input(super::InputTarget::Composer, window, cx)
-            }),
+        let composer = div().id("composer").w_full().child(
+            Textarea::new(&self.inputs.composer)
+                .h(px(116.))
+                .aria_label("Message"),
         );
         div()
             .flex()
@@ -971,35 +973,41 @@ impl NativeApp {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(super::ui_button(
-                                "retrieval-scope",
-                                format!("Scope: {}", self.retrieval_scope),
-                                false,
-                                cx.listener(|this, _, _, cx| this.cycle_retrieval_scope(cx)),
-                            ))
-                            .child(super::ui_button(
-                                "response-effort",
-                                format!("Effort: {}", self.response_effort),
-                                false,
-                                cx.listener(|this, _, _, cx| this.cycle_response_effort(cx)),
-                            ))
+                            .child(
+                                Button::new("retrieval-scope")
+                                    .label(format!("Scope: {}", self.retrieval_scope))
+                                    .secondary()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cycle_retrieval_scope(cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                Button::new("response-effort")
+                                    .label(format!("Effort: {}", self.response_effort))
+                                    .secondary()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cycle_response_effort(cx)
+                                        }),
+                                    ),
+                            )
                             .child(div().flex_1())
                             .child(if self.is_typing {
-                                super::ui_button(
-                                    "stop-query",
-                                    "Stop",
-                                    false,
-                                    cx.listener(|this, _, _, cx| this.stop_query(cx)),
-                                )
+                                Button::new("stop-query")
+                                    .label("Stop")
+                                    .secondary()
+                                    .on_click(cx.listener(|this, _, _, cx| this.stop_query(cx)))
                             } else {
-                                super::ui_button_disabled(
-                                    "send-query",
-                                    "Send",
-                                    true,
-                                    self.data.models.active_model.is_none()
-                                        || self.data.settings.is_none(),
-                                    cx.listener(|this, _, _, cx| this.send_message(cx)),
-                                )
+                                Button::new("send-query")
+                                    .label("Send")
+                                    .primary()
+                                    .disabled(
+                                        self.data.models.active_model.is_none()
+                                            || self.data.settings.is_none(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| this.send_message(cx)))
                             }),
                     ),
             )

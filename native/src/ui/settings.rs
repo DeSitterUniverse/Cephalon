@@ -8,7 +8,7 @@ impl NativeApp {
         kind: &str,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let info = self.data.retrieval.as_ref().and_then(|status| {
             if kind == "embedder" {
                 status.embedder.clone()
@@ -76,42 +76,42 @@ impl NativeApp {
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        format!("download-{kind}"),
-                        "Download",
-                        false,
-                        cx.listener(move |this, _, _, cx| {
-                            this.download_fixed_model(kind_download.clone(), cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        format!("verify-{kind}"),
-                        "Verify",
-                        false,
-                        cx.listener(move |this, _, _, cx| {
-                            this.verify_fixed_model(kind_verify.clone(), cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        format!("open-{kind}"),
-                        "Open folder",
-                        false,
-                        cx.listener(move |this, _, _, cx| {
-                            this.open_fixed_model(kind_open.clone(), cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        format!("delete-model-{kind}"),
-                        "Delete",
-                        false,
-                        cx.listener(move |this, _, window, cx| {
-                            this.ask_delete_model(kind_delete.clone(), window, cx)
-                        }),
-                    )),
+                    .child(
+                        Button::new(format!("download-{kind}"))
+                            .label("Download")
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.download_fixed_model(kind_download.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("verify-{kind}"))
+                            .label("Verify")
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.verify_fixed_model(kind_verify.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("open-{kind}"))
+                            .label("Open folder")
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_fixed_model(kind_open.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("delete-model-{kind}"))
+                            .label("Delete")
+                            .secondary()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ask_delete_model(kind_delete.clone(), window, cx)
+                            })),
+                    ),
             )
     }
 
-    pub(super) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let settings = self.data.settings.clone().unwrap_or_default();
         let toggles = [
             (
@@ -159,12 +159,14 @@ impl NativeApp {
         let mut toggle_list = div().flex().flex_col().gap_1();
         for (name, label, enabled) in toggles {
             let name_owned = name.to_string();
-            toggle_list = toggle_list.child(ui_toggle(
-                format!("toggle-{name}"),
-                label,
-                enabled,
-                cx.listener(move |this, _, _, cx| this.toggle_rag_setting(name_owned.clone(), cx)),
-            ));
+            toggle_list = toggle_list.child(
+                Switch::new(format!("toggle-{name}"))
+                    .label(label)
+                    .checked(enabled)
+                    .on_change(cx.listener(move |this, _, _, cx| {
+                        this.toggle_rag_setting(name_owned.clone(), cx)
+                    })),
+            );
         }
         div()
             .flex()
@@ -188,56 +190,48 @@ impl NativeApp {
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        "theme-black",
-                        "Black",
-                        !self.theme_graphite,
-                        cx.listener(|this, _, _, cx| this.set_theme(false, cx)),
-                    ))
-                    .child(ui_button(
-                        "theme-graphite",
-                        "Graphite",
-                        self.theme_graphite,
-                        cx.listener(|this, _, _, cx| this.set_theme(true, cx)),
-                    )),
+                    .child(
+                        Button::new("theme-black")
+                            .label("Black")
+                            .with_variant(if !theme::graphite() {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.set_theme(false, cx))),
+                    )
+                    .child(
+                        Button::new("theme-graphite")
+                            .label("Graphite")
+                            .with_variant(if theme::graphite() {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.set_theme(true, cx))),
+                    ),
             )
-            .child(input_field(
-                "server-url",
-                self.inputs.server_url.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::ServerUrl, window, cx)
-                }),
-            ))
-            .child(input_field(
-                "model-name",
-                self.inputs.model_name.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::ModelName, window, cx)
-                }),
-            ))
-            .child(input_field(
-                "server-context",
-                self.inputs.context_tokens.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::ContextTokens, window, cx)
-                }),
-            ))
+            .child(Input::new(&self.inputs.get(InputTarget::ServerUrl)).id("server-url"))
+            .child(Input::new(&self.inputs.get(InputTarget::ModelName)).id("model-name"))
+            .child(div().id("server-context").child(NumberInput::new(
+                &self.inputs.get(InputTarget::ContextTokens),
+            )))
             .child(
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        "save-server",
-                        "Save endpoint",
-                        false,
-                        cx.listener(|this, _, _, cx| this.save_server_settings(cx)),
-                    ))
-                    .child(ui_button(
-                        "load-model",
-                        "Connect model",
-                        true,
-                        cx.listener(|this, _, _, cx| this.connect_model(cx)),
-                    )),
+                    .child(
+                        Button::new("save-server")
+                            .label("Save endpoint")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.save_server_settings(cx))),
+                    )
+                    .child(
+                        Button::new("load-model")
+                            .label("Connect model")
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.connect_model(cx))),
+                    ),
             )
             .child(if self.data.models.models.is_empty() {
                 div()
@@ -369,28 +363,28 @@ impl NativeApp {
                 "No-answer min sources",
                 cx,
             ))
-            .child(ui_button(
-                "save-retrieval-settings",
-                "Save retrieval settings",
-                true,
-                cx.listener(|this, _, _, cx| this.save_rag_settings(cx)),
-            ))
+            .child(
+                Button::new("save-retrieval-settings")
+                    .label("Save retrieval settings")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.save_rag_settings(cx))),
+            )
             .child(
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        "reindex-stale",
-                        "Reindex stale",
-                        false,
-                        cx.listener(|this, _, _, cx| this.run_reindex(true, cx)),
-                    ))
-                    .child(ui_button(
-                        "reindex-all",
-                        "Reindex all",
-                        false,
-                        cx.listener(|this, _, _, cx| this.run_reindex(false, cx)),
-                    )),
+                    .child(
+                        Button::new("reindex-stale")
+                            .label("Reindex stale")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_reindex(true, cx))),
+                    )
+                    .child(
+                        Button::new("reindex-all")
+                            .label("Reindex all")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_reindex(false, cx))),
+                    ),
             )
             .child(
                 if self

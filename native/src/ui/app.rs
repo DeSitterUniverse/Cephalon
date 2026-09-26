@@ -3,7 +3,11 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_right_panel(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_right_panel(
+        &mut self,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let content = match self.panel {
             Panel::History => self.render_history(cx),
             Panel::Document => self.render_document(cx),
@@ -35,15 +39,15 @@ impl NativeApp {
                             .text_color(text())
                             .child(self.panel.title()),
                     )
-                    .child(ui_button(
-                        "close-details",
-                        "×",
-                        false,
-                        cx.listener(|this, _, _, cx| {
-                            this.right_open = false;
-                            cx.notify();
-                        }),
-                    )),
+                    .child(
+                        Button::new("close-details")
+                            .label("×")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.right_open = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -55,99 +59,13 @@ impl NativeApp {
             )
     }
 
-    pub(super) fn render_overlays(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut notices = div().flex().flex_col().gap_1();
-        for notice in &self.notices {
-            notices = notices.child(
-                div()
-                    .id(SharedString::from(format!("notice-{}", notice.id)))
-                    .p_2()
-                    .bg(panel_3())
-                    .border_1()
-                    .border_color(notice.color)
-                    .text_size(px(12.))
-                    .text_color(notice.color)
-                    .child(notice.message.clone()),
-            );
-        }
-        let mut overlay = div().w_full().p_3().child(notices);
-        if let Some(confirmation) = self.confirmation.clone() {
-            overlay = overlay.child(self.render_confirmation_dialog(confirmation, cx));
-        }
-        overlay
-    }
-
-    fn render_confirmation_dialog(
-        &mut self,
-        confirmation: Confirmation,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id("confirmation-backdrop")
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::hsla(0., 0., 0., 0.62))
-            .block_mouse_except_scroll()
-            .child(
-                div()
-                    .id("confirmation-dialog")
-                    .track_focus(&self.confirmation_focus)
-                    .tab_stop(false)
-                    .role(gpui::Role::Dialog)
-                    .aria_label(confirmation.title.clone())
-                    .aria_modal(true)
-                    .w(px(420.))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .bg(panel_3())
-                    .border_1()
-                    .border_color(orange())
-                    .child(div().text_color(text()).child(confirmation.title))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(muted())
-                            .child(confirmation.message),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(ui_button_with_focus(
-                                "confirm-action",
-                                "Confirm",
-                                true,
-                                &self.confirmation_confirm_focus,
-                                cx.listener(|this, _, window, cx| this.confirm_action(window, cx)),
-                            ))
-                            .child(ui_button_with_focus(
-                                "cancel-action",
-                                "Cancel",
-                                false,
-                                &self.confirmation_cancel_focus,
-                                cx.listener(|this, _, window, cx| {
-                                    this.close_confirmation(window, cx)
-                                }),
-                            )),
-                    ),
-            )
-    }
-
-    pub(super) fn render_boot(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_boot(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let retry = if self.boot == BootState::Failed {
-            ui_button(
-                "boot-retry",
-                "Retry backend",
-                true,
-                cx.listener(|this, _, _, cx| this.retry_backend(cx)),
-            )
+            Button::new("boot-retry")
+                .label("Retry backend")
+                .primary()
+                .on_click(cx.listener(|this, _, _, cx| this.retry_backend(cx)))
+                .into_any_element()
         } else {
             div()
                 .id("boot-loading-status")
@@ -157,6 +75,7 @@ impl NativeApp {
                 .text_size(px(12.))
                 .text_color(faint())
                 .child("Waiting for local backend…")
+                .into_any_element()
         };
         let mut card = div()
             .w(px(540.))
@@ -205,7 +124,11 @@ impl NativeApp {
             .child(card)
     }
 
-    pub(super) fn render_shell(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_shell(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let viewport_width = window.viewport_size().width;
         let mode = layout_mode(viewport_width);
         let compact = compact_navigation(viewport_width);
@@ -287,12 +210,12 @@ impl NativeApp {
                             .text_color(orange_light())
                             .child("CEPHALON"),
                     )
-                    .child(ui_button(
-                        "new-chat",
-                        "+ New chat",
-                        false,
-                        cx.listener(|this, _, _, cx| this.new_conversation(cx)),
-                    )),
+                    .child(
+                        Button::new("new-chat")
+                            .label("+ New chat")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.new_conversation(cx))),
+                    ),
             )
             .child(
                 div()
@@ -309,12 +232,16 @@ impl NativeApp {
                             .text_color(model_color)
                             .child(model_name),
                     )
-                    .child(ui_button(
-                        "connect-model",
-                        "Connect",
-                        self.data.models.active_model.is_some(),
-                        cx.listener(|this, _, _, cx| this.connect_model(cx)),
-                    ))
+                    .child(
+                        Button::new("connect-model")
+                            .label("Connect")
+                            .with_variant(if self.data.models.active_model.is_some() {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.connect_model(cx))),
+                    )
                     .child(if compact {
                         div()
                     } else {
@@ -323,38 +250,38 @@ impl NativeApp {
                             .text_color(self.event_status.color())
                             .child(format!("● {}", self.model_status.label()))
                     })
-                    .child(ui_button(
-                        "toggle-library",
-                        if self.left_open {
-                            "Hide library"
-                        } else {
-                            "Show library"
-                        },
-                        false,
-                        cx.listener(|this, _, window, cx| {
-                            if layout_mode(window.viewport_size().width) != LayoutMode::Wide {
-                                this.right_open = false;
-                            }
-                            this.left_open = !this.left_open;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(ui_button(
-                        "toggle-details",
-                        if self.right_open {
-                            "Hide details"
-                        } else {
-                            "Show details"
-                        },
-                        false,
-                        cx.listener(|this, _, window, cx| {
-                            if layout_mode(window.viewport_size().width) == LayoutMode::Narrow {
-                                this.left_open = false;
-                            }
-                            this.right_open = !this.right_open;
-                            cx.notify();
-                        }),
-                    )),
+                    .child(
+                        Button::new("toggle-library")
+                            .label(if self.left_open {
+                                "Hide library"
+                            } else {
+                                "Show library"
+                            })
+                            .secondary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if layout_mode(window.viewport_size().width) != LayoutMode::Wide {
+                                    this.right_open = false;
+                                }
+                                this.left_open = !this.left_open;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-details")
+                            .label(if self.right_open {
+                                "Hide details"
+                            } else {
+                                "Show details"
+                            })
+                            .secondary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if layout_mode(window.viewport_size().width) == LayoutMode::Narrow {
+                                    this.left_open = false;
+                                }
+                                this.right_open = !this.right_open;
+                                cx.notify();
+                            })),
+                    ),
             );
         div()
             .size_full()
@@ -364,6 +291,5 @@ impl NativeApp {
             .text_color(text())
             .child(topbar)
             .child(body)
-            .child(self.render_overlays(cx))
     }
 }

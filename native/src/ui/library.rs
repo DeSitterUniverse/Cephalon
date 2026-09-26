@@ -3,7 +3,7 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_library(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_library(&mut self, width: f32, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut list = div().flex().flex_col().gap_1();
         let mut visible_count = 0;
         let query = self
@@ -72,23 +72,17 @@ impl NativeApp {
                     .items_center()
                     .justify_between()
                     .child(div().text_size(px(15.)).text_color(text()).child("Library"))
-                    .child(ui_button(
-                        "close-library",
-                        "×",
-                        false,
-                        cx.listener(|this, _, _, cx| {
-                            this.left_open = false;
-                            cx.notify();
-                        }),
-                    )),
+                    .child(
+                        Button::new("close-library")
+                            .label("×")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.left_open = false;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(input_field(
-                "library-search",
-                self.inputs.search.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::Search, window, cx)
-                }),
-            ))
+            .child(Input::new(&self.inputs.get(InputTarget::Search)).id("library-search"))
             .child(
                 div()
                     .flex()
@@ -101,18 +95,22 @@ impl NativeApp {
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        "import-folder",
-                        "Import folder",
-                        false,
-                        cx.listener(|this, _, _, cx| this.select_and_ingest(true, false, cx)),
-                    ))
-                    .child(ui_button(
-                        "import-text",
-                        "Import text",
-                        false,
-                        cx.listener(|this, _, _, cx| this.select_and_ingest(false, true, cx)),
-                    )),
+                    .child(
+                        Button::new("import-folder")
+                            .label("Import folder")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_and_ingest(true, false, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("import-text")
+                            .label("Import text")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_and_ingest(false, true, cx)
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -124,7 +122,7 @@ impl NativeApp {
             )
     }
 
-    pub(super) fn render_nav(&mut self, compact: bool, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_nav(&mut self, compact: bool, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut nav = div()
             .w(px(if compact { 96. } else { 112. }))
             .h_full()
@@ -148,12 +146,16 @@ impl NativeApp {
             (Panel::Sources, "Sources"),
             (Panel::Settings, "Settings"),
         ] {
-            nav = nav.child(ui_button(
-                format!("nav-{}", label.to_ascii_lowercase()),
-                label,
-                self.panel == panel,
-                cx.listener(move |this, _, _, cx| this.choose_panel(panel, cx)),
-            ));
+            nav = nav.child(
+                Button::new(format!("nav-{}", label.to_ascii_lowercase()))
+                    .label(label)
+                    .with_variant(if self.panel == panel {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_panel(panel, cx))),
+            );
         }
         nav = nav.child(
             div()
@@ -168,12 +170,16 @@ impl NativeApp {
             (Panel::Evaluation, "Eval"),
             (Panel::Support, "Support"),
         ] {
-            nav = nav.child(ui_button(
-                format!("nav-{}", label.to_ascii_lowercase()),
-                label,
-                self.panel == panel,
-                cx.listener(move |this, _, _, cx| this.choose_panel(panel, cx)),
-            ));
+            nav = nav.child(
+                Button::new(format!("nav-{}", label.to_ascii_lowercase()))
+                    .label(label)
+                    .with_variant(if self.panel == panel {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_panel(panel, cx))),
+            );
         }
         nav.child(
             div().flex_1().child(

@@ -1,4 +1,4 @@
-use gpui::{px, Pixels};
+use gpui_kit::{px, Pixels};
 
 /// The workbench keeps the primary chat surface available at every supported width.
 ///

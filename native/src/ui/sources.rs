@@ -3,7 +3,7 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_sources(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_sources(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let sources = self.selected_answer().map(|answer| &answer.sources);
         if sources.is_none_or(|sources| sources.is_empty()) {
             return div()
@@ -151,29 +151,33 @@ impl NativeApp {
                     div()
                         .flex()
                         .gap_1()
-                        .child(ui_button(
-                            format!("source-details-{index}"),
-                            if expanded {
-                                "Hide provenance"
-                            } else {
-                                "Show provenance"
-                            },
-                            expanded,
-                            cx.listener(move |this, _, _, cx| {
-                                if !this.expanded_sources.remove(&toggle_key) {
-                                    this.expanded_sources.insert(toggle_key.clone());
-                                }
-                                cx.notify();
-                            }),
-                        ))
-                        .child(ui_button(
-                            format!("open-source-document-{index}"),
-                            "Open document",
-                            false,
-                            cx.listener(move |this, _, _, cx| {
-                                this.open_document_by_id(doc_id.clone(), cx)
-                            }),
-                        )),
+                        .child(
+                            Button::new(format!("source-details-{index}"))
+                                .label(if expanded {
+                                    "Hide provenance"
+                                } else {
+                                    "Show provenance"
+                                })
+                                .with_variant(if expanded {
+                                    ButtonVariant::Primary
+                                } else {
+                                    ButtonVariant::Secondary
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_sources.remove(&toggle_key) {
+                                        this.expanded_sources.insert(toggle_key.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("open-source-document-{index}"))
+                                .label("Open document")
+                                .secondary()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_document_by_id(doc_id.clone(), cx)
+                                })),
+                        ),
                 ),
             );
         }

@@ -164,15 +164,15 @@ See [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for the complete environmen
 
 ## Development and packaging
 
-The desktop shell is a native Rust application built with GPUI Community Edition (GPUI-CE). GPUI is a hybrid immediate and retained mode, GPU accelerated, UI framework for Rust. Using the maintained gpui_elements primitives, chat, search, and settings feel fast, responsive, and distinctly native rather than like web interfaces wrapped in a desktop shell. The result is a focused, purpose-built workspace designed for fluid local research, with Rust performance and GPU-powered rendering underneath.
+The desktop shell is a native Rust application built with GPUI Kit. Kit provides the native runtime, editable fields, controls, dialogs, notifications, and forms. Cephalon supplies the research workspace, citation-aware chat, and Graphite theme.
 
-See[native-frontend.md](docs/native-frontend.md) for the dependency and packaging boundary.
+See [native-frontend.md](docs/native-frontend.md) for the dependency and packaging boundary.
 
 | Task                                    | Windows command                                    |
 | --------------------------------------- | -------------------------------------------------- |
 | Run the native desktop application      | `cargo run`                                         |
 | Run only the Python backend             | `py -3.14 python\main.py`                          |
-| Check the native GPUI-CE application    | `cargo check`                                       |
+| Check the native GPUI Kit application   | `cargo check`                                       |
 | Build the native release                | `cargo build --release`                             |
 | Build the packaged desktop directory    | `py -3.14 scripts\build_release.py`                |
 

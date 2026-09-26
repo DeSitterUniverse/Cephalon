@@ -3,28 +3,35 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_trace(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_trace(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut list = div().flex().flex_col().gap_1();
         for trace in &self.data.traces {
             let id = trace.query_id.clone();
-            list = list.child(ui_button(
-                format!("trace-{}", trace.query_id),
-                format!(
-                    "{} · {} ms · {}",
-                    trace.raw_query,
-                    trace
-                        .total_ms
-                        .map(|ms| format!("{ms:.1}"))
-                        .unwrap_or_else(|| "?".into()),
-                    trace.created_at
-                ),
-                self.data.selected_trace.is_some()
-                    && self
-                        .selected_answer()
-                        .is_none_or(|answer| answer.sources.is_empty())
-                    && self.panel == Panel::Trace,
-                cx.listener(move |this, _, _, cx| this.load_trace(id.clone(), cx)),
-            ));
+            list = list.child(
+                Button::new(format!("trace-{}", trace.query_id))
+                    .label(format!(
+                        "{} · {} ms · {}",
+                        trace.raw_query,
+                        trace
+                            .total_ms
+                            .map(|ms| format!("{ms:.1}"))
+                            .unwrap_or_else(|| "?".into()),
+                        trace.created_at
+                    ))
+                    .with_variant(
+                        if self.data.selected_trace.is_some()
+                            && self
+                                .selected_answer()
+                                .is_none_or(|answer| answer.sources.is_empty())
+                            && self.panel == Panel::Trace
+                        {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.load_trace(id.clone(), cx))),
+            );
         }
         if let Some(trace) = &self.data.selected_trace {
             list = list.child(
@@ -43,16 +50,16 @@ impl NativeApp {
             .flex_col()
             .gap_2()
             .flex_1()
-            .child(ui_button(
-                "refresh-traces",
-                "Refresh traces",
-                false,
-                cx.listener(|this, _, _, cx| this.refresh_traces(cx)),
-            ))
+            .child(
+                Button::new("refresh-traces")
+                    .label("Refresh traces")
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_traces(cx))),
+            )
             .child(list)
     }
 
-    pub(super) fn render_health(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_health(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut panel = div().flex().flex_col().gap_2().flex_1();
         if let Some(health) = &self.data.health {
             panel = panel
@@ -227,21 +234,21 @@ impl NativeApp {
                 ));
         }
         panel
-            .child(ui_button(
-                "refresh-health",
-                "Refresh health",
-                false,
-                cx.listener(|this, _, _, cx| this.refresh_health(cx)),
-            ))
-            .child(ui_button(
-                "export-metrics",
-                "Export metrics",
-                false,
-                cx.listener(|this, _, _, cx| this.export_metrics(cx)),
-            ))
+            .child(
+                Button::new("refresh-health")
+                    .label("Refresh health")
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_health(cx))),
+            )
+            .child(
+                Button::new("export-metrics")
+                    .label("Export metrics")
+                    .secondary()
+                    .on_click(cx.listener(|this, _, _, cx| this.export_metrics(cx))),
+            )
     }
 
-    pub(super) fn render_evaluation(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_evaluation(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mut runs = div().flex().flex_col().gap_1();
         for run in &self.data.eval_runs {
             runs = runs.child(
@@ -271,26 +278,14 @@ impl NativeApp {
             .flex_col()
             .gap_2()
             .flex_1()
-            .child(input_field(
-                "eval-question",
-                self.inputs.eval_question.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::EvalQuestion, window, cx)
-                }),
-            ))
-            .child(input_field(
-                "eval-document",
-                self.inputs.eval_document.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::EvalDocument, window, cx)
-                }),
-            ))
-            .child(ui_button(
-                "run-eval",
-                "Run evaluation",
-                true,
-                cx.listener(|this, _, _, cx| this.run_eval(cx)),
-            ))
+            .child(Input::new(&self.inputs.get(InputTarget::EvalQuestion)).id("eval-question"))
+            .child(Input::new(&self.inputs.get(InputTarget::EvalDocument)).id("eval-document"))
+            .child(
+                Button::new("run-eval")
+                    .label("Run evaluation")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.run_eval(cx))),
+            )
             .child(
                 div()
                     .text_size(px(12.))
@@ -300,7 +295,7 @@ impl NativeApp {
             .child(runs)
     }
 
-    pub(super) fn render_support(&mut self, _cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_support(&mut self, _cx: &mut Context<Self>) -> gpui_kit::Div {
         match self
             .selected_answer()
             .and_then(|answer| answer.support.as_ref())

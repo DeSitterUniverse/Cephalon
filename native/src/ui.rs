@@ -6,11 +6,19 @@ use crate::api::{
 };
 use crate::backend::BackendService;
 use async_channel::{Receiver, Sender};
-use gpui::prelude::*;
-use gpui::{
-    actions, div, px, App, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Focusable,
-    KeyDownEvent, ParentElement, PathPromptOptions, ScrollHandle, SharedString, Subscription,
-    Window,
+use gpui_kit::component::input::{Input, InputEvent, InputState, NumberInput, TextareaState};
+use gpui_kit::component::{
+    button::{Button, ButtonVariant, ButtonVariants},
+    dialog::DialogButtonProps,
+    notification::{Notification, NotificationType},
+    switch::Switch,
+    Disableable, Root, WindowExt,
+};
+use gpui_kit::prelude::*;
+use gpui_kit::{
+    actions, div, px, AnyWindowHandle, App, AppContext, Context, Entity, ExternalPaths,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, ParentElement, PathPromptOptions,
+    ScrollHandle, SharedString, Subscription, Window,
 };
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,23 +30,31 @@ mod chat;
 mod diagnostics;
 mod document;
 mod history;
+#[cfg(test)]
+mod kit_input_tests;
 mod layout;
 mod library;
 mod markdown;
 mod settings;
 mod sources;
-pub(crate) mod text_input;
 mod theme;
+pub(crate) fn init_theme(cx: &mut App) {
+    theme::apply_to_kit(cx);
+}
 use layout::{compact_navigation, layout_mode, LayoutMode};
 use markdown::visible_answer;
-pub use text_input::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, Submit};
-use text_input::{TextInput, TextSubmitted};
 use theme::*;
 
-actions!([FocusNext, FocusPrevious]);
+actions!([FocusNext, FocusPrevious, Submit]);
 
-const MAX_NOTICES: usize = 4;
-const NOTICE_AUTO_DISMISS: Duration = Duration::from_secs(6);
+pub(crate) fn bind_form_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-enter", Submit, Some("Input")),
+        // Kit's editor still binds Tab for indentation in ordinary fields.
+        KeyBinding::new("tab", FocusNext, Some("Input")),
+        KeyBinding::new("shift-tab", FocusPrevious, Some("Input")),
+    ]);
+}
 
 fn selected_request_is_current(
     request_generation: u64,
@@ -104,133 +120,75 @@ enum InputTarget {
 }
 
 struct InputEntities {
-    composer: Entity<TextInput>,
-    search: Entity<TextInput>,
-    server_url: Entity<TextInput>,
-    model_name: Entity<TextInput>,
-    context_tokens: Entity<TextInput>,
-    eval_question: Entity<TextInput>,
-    eval_document: Entity<TextInput>,
-    rename: Entity<TextInput>,
-    tag: Entity<TextInput>,
-    rag_top_k: Entity<TextInput>,
-    rag_rerank_top_n: Entity<TextInput>,
-    rag_max_tokens: Entity<TextInput>,
-    rag_temperature: Entity<TextInput>,
-    rag_parent_target_tokens: Entity<TextInput>,
-    rag_parent_max_tokens: Entity<TextInput>,
-    rag_child_target_tokens: Entity<TextInput>,
-    rag_child_max_tokens: Entity<TextInput>,
-    rag_child_overlap_tokens: Entity<TextInput>,
-    rag_context_tokens: Entity<TextInput>,
-    rag_min_confidence: Entity<TextInput>,
-    rag_min_rerank_score: Entity<TextInput>,
-    rag_min_vector_score: Entity<TextInput>,
-    rag_min_source_count: Entity<TextInput>,
+    composer: Entity<TextareaState>,
+    fields: std::collections::HashMap<InputTarget, Entity<InputState>>,
 }
 
 impl InputEntities {
-    fn new(cx: &mut Context<NativeApp>) -> Self {
-        Self {
-            composer: cx.new(|cx| {
-                TextInput::new(
-                    cx,
-                    "composer-input",
-                    "",
-                    "Ask Cephalon about your documents…",
-                    true,
-                )
-            }),
-            search: cx.new(|cx| TextInput::new(cx, "search-input", "", "Search library…", false)),
-            server_url: cx.new(|cx| {
-                TextInput::new(cx, "server-url-input", "", "http://127.0.0.1:8080", false)
-            }),
-            model_name: cx
-                .new(|cx| TextInput::new(cx, "model-name-input", "", "Model name", false)),
-            context_tokens: cx
-                .new(|cx| TextInput::new(cx, "context-tokens-input", "", "Context tokens", false)),
-            eval_question: cx.new(|cx| {
-                TextInput::new(cx, "eval-question-input", "", "Evaluation question", false)
-            }),
-            eval_document: cx.new(|cx| {
-                TextInput::new(cx, "eval-document-input", "", "Expected document id", false)
-            }),
-            rename: cx.new(|cx| TextInput::new(cx, "rename-input", "", "Rename", false)),
-            tag: cx.new(|cx| TextInput::new(cx, "tag-input", "", "Add a tag", false)),
-            rag_top_k: cx.new(|cx| TextInput::new(cx, "rag-top-k-input", "", "Top K", false)),
-            rag_rerank_top_n: cx
-                .new(|cx| TextInput::new(cx, "rag-rerank-top-n-input", "", "Rerank top N", false)),
-            rag_max_tokens: cx.new(|cx| {
-                TextInput::new(cx, "rag-max-tokens-input", "", "Answer max tokens", false)
-            }),
-            rag_temperature: cx
-                .new(|cx| TextInput::new(cx, "rag-temperature-input", "", "Temperature", false)),
-            rag_parent_target_tokens: cx.new(|cx| {
-                TextInput::new(cx, "rag-parent-target-input", "", "Parent target", false)
-            }),
-            rag_parent_max_tokens: cx
-                .new(|cx| TextInput::new(cx, "rag-parent-max-input", "", "Parent max", false)),
-            rag_child_target_tokens: cx
-                .new(|cx| TextInput::new(cx, "rag-child-target-input", "", "Child target", false)),
-            rag_child_max_tokens: cx
-                .new(|cx| TextInput::new(cx, "rag-child-max-input", "", "Child max", false)),
-            rag_child_overlap_tokens: cx.new(|cx| {
-                TextInput::new(cx, "rag-child-overlap-input", "", "Child overlap", false)
-            }),
-            rag_context_tokens: cx.new(|cx| {
-                TextInput::new(
-                    cx,
-                    "rag-context-tokens-input",
-                    "",
-                    "Retrieval context",
-                    false,
-                )
-            }),
-            rag_min_confidence: cx.new(|cx| {
-                TextInput::new(cx, "rag-min-confidence-input", "", "Min confidence", false)
-            }),
-            rag_min_rerank_score: cx
-                .new(|cx| TextInput::new(cx, "rag-min-rerank-input", "", "Min rerank", false)),
-            rag_min_vector_score: cx
-                .new(|cx| TextInput::new(cx, "rag-min-vector-input", "", "Min vector", false)),
-            rag_min_source_count: cx.new(|cx| {
-                TextInput::new(
-                    cx,
-                    "rag-min-source-count-input",
-                    "",
-                    "Min source count",
-                    false,
-                )
-            }),
+    fn new(window: &mut Window, cx: &mut Context<NativeApp>) -> Self {
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 5)
+                .placeholder("Ask Cephalon about your documents…")
+        });
+        let mut fields = std::collections::HashMap::new();
+        for (target, placeholder) in [
+            (InputTarget::Search, "Search library…"),
+            (InputTarget::ServerUrl, "http://127.0.0.1:8080"),
+            (InputTarget::ModelName, "Model name"),
+            (InputTarget::ContextTokens, "Context tokens"),
+            (InputTarget::EvalQuestion, "Evaluation question"),
+            (InputTarget::EvalDocument, "Expected document id"),
+            (InputTarget::Rename, "Rename"),
+            (InputTarget::Tag, "Add a tag"),
+            (InputTarget::RagTopK, "Top K"),
+            (InputTarget::RagRerankTopN, "Rerank top N"),
+            (InputTarget::RagMaxTokens, "Answer max tokens"),
+            (InputTarget::RagTemperature, "Temperature"),
+            (InputTarget::RagParentTargetTokens, "Parent target"),
+            (InputTarget::RagParentMaxTokens, "Parent max"),
+            (InputTarget::RagChildTargetTokens, "Child target"),
+            (InputTarget::RagChildMaxTokens, "Child max"),
+            (InputTarget::RagChildOverlapTokens, "Child overlap"),
+            (InputTarget::RagContextTokens, "Retrieval context"),
+            (InputTarget::RagMinConfidence, "Min confidence"),
+            (InputTarget::RagMinRerankScore, "Min rerank"),
+            (InputTarget::RagMinVectorScore, "Min vector"),
+            (InputTarget::RagMinSourceCount, "Min source count"),
+        ] {
+            fields.insert(
+                target,
+                cx.new(|cx| {
+                    let state = InputState::new(window, cx).placeholder(placeholder);
+                    match target {
+                        InputTarget::RagTemperature
+                        | InputTarget::RagMinConfidence
+                        | InputTarget::RagMinRerankScore
+                        | InputTarget::RagMinVectorScore => state.step(0.01),
+                        InputTarget::ContextTokens
+                        | InputTarget::RagTopK
+                        | InputTarget::RagRerankTopN
+                        | InputTarget::RagMaxTokens
+                        | InputTarget::RagParentTargetTokens
+                        | InputTarget::RagParentMaxTokens
+                        | InputTarget::RagChildTargetTokens
+                        | InputTarget::RagChildMaxTokens
+                        | InputTarget::RagChildOverlapTokens
+                        | InputTarget::RagContextTokens
+                        | InputTarget::RagMinSourceCount => state.step(1.),
+                        _ => state,
+                    }
+                }),
+            );
         }
+        Self { composer, fields }
     }
 
-    fn get(&self, target: InputTarget) -> Entity<TextInput> {
-        match target {
-            InputTarget::Composer => self.composer.clone(),
-            InputTarget::Search => self.search.clone(),
-            InputTarget::ServerUrl => self.server_url.clone(),
-            InputTarget::ModelName => self.model_name.clone(),
-            InputTarget::ContextTokens => self.context_tokens.clone(),
-            InputTarget::EvalQuestion => self.eval_question.clone(),
-            InputTarget::EvalDocument => self.eval_document.clone(),
-            InputTarget::Rename => self.rename.clone(),
-            InputTarget::Tag => self.tag.clone(),
-            InputTarget::RagTopK => self.rag_top_k.clone(),
-            InputTarget::RagRerankTopN => self.rag_rerank_top_n.clone(),
-            InputTarget::RagMaxTokens => self.rag_max_tokens.clone(),
-            InputTarget::RagTemperature => self.rag_temperature.clone(),
-            InputTarget::RagParentTargetTokens => self.rag_parent_target_tokens.clone(),
-            InputTarget::RagParentMaxTokens => self.rag_parent_max_tokens.clone(),
-            InputTarget::RagChildTargetTokens => self.rag_child_target_tokens.clone(),
-            InputTarget::RagChildMaxTokens => self.rag_child_max_tokens.clone(),
-            InputTarget::RagChildOverlapTokens => self.rag_child_overlap_tokens.clone(),
-            InputTarget::RagContextTokens => self.rag_context_tokens.clone(),
-            InputTarget::RagMinConfidence => self.rag_min_confidence.clone(),
-            InputTarget::RagMinRerankScore => self.rag_min_rerank_score.clone(),
-            InputTarget::RagMinVectorScore => self.rag_min_vector_score.clone(),
-            InputTarget::RagMinSourceCount => self.rag_min_source_count.clone(),
-        }
+    fn get(&self, target: InputTarget) -> Entity<InputState> {
+        self.fields
+            .get(&target)
+            .expect("single-line input target")
+            .clone()
     }
 }
 
@@ -250,7 +208,7 @@ enum EventStatus {
 }
 
 impl EventStatus {
-    fn color(self) -> gpui::Rgba {
+    fn color(self) -> gpui_kit::Rgba {
         match self {
             Self::Connected => green(),
             Self::Connecting | Self::Reconnecting => yellow(),
@@ -275,7 +233,7 @@ impl ModelStatus {
         }
     }
 
-    fn color(self) -> gpui::Rgba {
+    fn color(self) -> gpui_kit::Rgba {
         match self {
             Self::Connected => green(),
             Self::Connecting => yellow(),
@@ -342,41 +300,12 @@ fn drain_query_tokens(rx: &Receiver<QueryEvent>, text: &mut String) -> Option<Qu
     None
 }
 
-#[derive(Debug, Clone)]
-struct Notice {
-    id: u64,
-    message: String,
-    color: gpui::Rgba,
-}
-
-fn remove_notice_by_id(notices: &mut Vec<Notice>, id: u64) -> bool {
-    let Some(index) = notices.iter().position(|notice| notice.id == id) else {
-        return false;
-    };
-    notices.remove(index);
-    true
-}
-
 fn next_response_effort(current: &str) -> &'static str {
     match current {
         "quick" => "balanced",
         "balanced" => "thorough",
         _ => "quick",
     }
-}
-
-#[derive(Debug, Clone)]
-struct Confirmation {
-    title: String,
-    message: String,
-    action: ConfirmationAction,
-    return_focus: Option<FocusHandle>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfirmationFocus {
-    Confirm,
-    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -404,13 +333,11 @@ struct WorkspaceData {
 }
 
 pub struct NativeApp {
+    window_handle: AnyWindowHandle,
     api: ApiClient,
     backend: Arc<BackendService>,
     stop: Arc<AtomicBool>,
     focus: FocusHandle,
-    confirmation_focus: FocusHandle,
-    confirmation_confirm_focus: FocusHandle,
-    confirmation_cancel_focus: FocusHandle,
     boot: BootState,
     boot_status: String,
     boot_error: Option<String>,
@@ -418,7 +345,6 @@ pub struct NativeApp {
     panel: Panel,
     left_open: bool,
     right_open: bool,
-    theme_graphite: bool,
     event_status: EventStatus,
     model_status: ModelStatus,
     status_filter: String,
@@ -436,13 +362,8 @@ pub struct NativeApp {
     chat_scroll: ScrollHandle,
     chat_following: bool,
     regenerate_without_user: bool,
-    active_input: InputTarget,
-    notice_counter: u64,
-    notices: Vec<Notice>,
-    confirmation: Option<Confirmation>,
     inputs: InputEntities,
     _search_subscription: Subscription,
-    _submit_subscription: Subscription,
     documents_refresh_generation: u64,
     conversations_refresh_generation: u64,
     settings_refresh_generation: u64,
@@ -481,30 +402,27 @@ impl NativeApp {
         api: ApiClient,
         backend: Arc<BackendService>,
         stop: Arc<AtomicBool>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let window_handle = window.window_handle();
         let focus = cx.focus_handle();
-        let confirmation_focus = cx.focus_handle();
-        let confirmation_confirm_focus = cx.focus_handle().tab_stop(true);
-        let confirmation_cancel_focus = cx.focus_handle().tab_stop(true);
-        let inputs = InputEntities::new(cx);
-        let search_state = inputs.search.read(cx).editor_state();
-        let search_subscription = cx.subscribe(
-            &search_state,
-            |_, _, _: &gpui_elements::editable_text::TextChanged, cx| cx.notify(),
+        let inputs = InputEntities::new(window, cx);
+        let search_subscription = cx.subscribe_in(
+            &inputs.get(InputTarget::Search),
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
         );
-        let submit_subscription =
-            cx.subscribe(&inputs.composer, |this, _, _: &TextSubmitted, cx| {
-                this.send_message(cx);
-            });
         let mut app = Self {
+            window_handle,
             api,
             backend,
             stop,
             focus,
-            confirmation_focus,
-            confirmation_confirm_focus,
-            confirmation_cancel_focus,
             boot: BootState::Starting,
             boot_status: "Starting local service…".into(),
             boot_error: None,
@@ -512,7 +430,6 @@ impl NativeApp {
             panel: Panel::History,
             left_open: true,
             right_open: true,
-            theme_graphite: false,
             event_status: EventStatus::Connecting,
             model_status: ModelStatus::Connecting,
             status_filter: "all".into(),
@@ -530,13 +447,8 @@ impl NativeApp {
             chat_scroll: ScrollHandle::new(),
             chat_following: true,
             regenerate_without_user: false,
-            active_input: InputTarget::Composer,
-            notice_counter: 0,
-            notices: Vec::new(),
-            confirmation: None,
             inputs,
             _search_subscription: search_subscription,
-            _submit_subscription: submit_subscription,
             documents_refresh_generation: 0,
             conversations_refresh_generation: 0,
             settings_refresh_generation: 0,
@@ -555,7 +467,11 @@ impl NativeApp {
     }
 
     fn input_text(&self, target: InputTarget, cx: &App) -> String {
-        self.inputs.get(target).read(cx).text(cx)
+        if target == InputTarget::Composer {
+            self.inputs.composer.read(cx).value().to_string()
+        } else {
+            self.inputs.get(target).read(cx).value().to_string()
+        }
     }
 
     fn set_input_text(
@@ -564,9 +480,45 @@ impl NativeApp {
         value: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        let value = value.into();
-        let input = self.inputs.get(target);
-        input.update(cx, |input, cx| input.set_text(value, cx));
+        self.update_input_text(target, value.into(), false, cx);
+    }
+
+    fn set_unfocused_input_text(
+        &mut self,
+        target: InputTarget,
+        value: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_input_text(target, value.into(), true, cx);
+    }
+
+    fn update_input_text(
+        &mut self,
+        target: InputTarget,
+        value: String,
+        only_if_unfocused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let window_handle = self.window_handle;
+        if target == InputTarget::Composer {
+            let input = self.inputs.composer.clone();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    if !only_if_unfocused || !input.read(cx).focus_handle(cx).is_focused(window) {
+                        input.update(cx, |input, cx| input.set_value(value, window, cx));
+                    }
+                });
+            });
+        } else {
+            let input = self.inputs.get(target);
+            cx.defer(move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    if !only_if_unfocused || !input.read(cx).focus_handle(cx).is_focused(window) {
+                        input.update(cx, |input, cx| input.set_value(value, window, cx));
+                    }
+                });
+            });
+        }
     }
 
     fn rag_input(
@@ -574,23 +526,21 @@ impl NativeApp {
         target: InputTarget,
         id: &'static str,
         label: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        form_field(
-            id,
-            label,
-            self.inputs.get(target),
-            cx.listener(move |this, _, window, cx| this.focus_input(target, window, cx)),
+        _cx: &mut Context<Self>,
+    ) -> gpui_kit::component::form::Form {
+        gpui_kit::component::form::h_form().child(
+            gpui_kit::component::form::field().label(label).child(
+                div()
+                    .id(id)
+                    .child(NumberInput::new(&self.inputs.get(target))),
+            ),
         )
     }
 
     fn sync_rag_inputs(&mut self, settings: &RagSettings, cx: &mut Context<Self>) {
         for target in rag_input_targets() {
-            if self.active_input == target {
-                continue;
-            }
             let value = rag_setting_value(settings, target);
-            self.set_input_text(target, value, cx);
+            self.set_unfocused_input_text(target, value, cx);
         }
     }
 
@@ -599,7 +549,7 @@ impl NativeApp {
         let backend = self.backend.clone();
         let selected_conversation = self.selected_conversation.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || {
                     backend.start().map_err(|message| ApiError {
                         status: None,
@@ -664,7 +614,7 @@ impl NativeApp {
         .detach();
 
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 while let Ok(event) = rx.recv().await {
                     let _ = this.update(&mut *cx, |this, cx| {
                         match event {
@@ -730,7 +680,7 @@ impl NativeApp {
         let selected_document = self.selected_document.clone();
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || {
                     let documents = api.documents()?;
                     let selected = selected_document
@@ -768,7 +718,7 @@ impl NativeApp {
         let generation = self.conversations_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.conversations()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.conversations_refresh_generation {
@@ -788,7 +738,7 @@ impl NativeApp {
         let generation = self.retrieval_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.fixed_retrieval_status()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.retrieval_refresh_generation {
@@ -808,7 +758,7 @@ impl NativeApp {
         let generation = self.health_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.health()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.health_refresh_generation {
@@ -835,7 +785,7 @@ impl NativeApp {
         let generation = self.eval_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.eval_runs()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.eval_refresh_generation {
@@ -855,7 +805,7 @@ impl NativeApp {
         let generation = self.traces_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.retrieval_traces()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.traces_refresh_generation {
@@ -875,7 +825,7 @@ impl NativeApp {
         let generation = self.settings_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.settings()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if generation == this.settings_refresh_generation {
@@ -896,7 +846,7 @@ impl NativeApp {
         let generation = self.server_refresh_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || {
                     let models = api.models()?;
                     let server = api.server_settings().ok();
@@ -918,30 +868,24 @@ impl NativeApp {
                             };
                             if let Some(server) = server {
                                 this.data.server = Some(server.clone());
-                                if this.active_input != InputTarget::ServerUrl {
-                                    this.set_input_text(
-                                        InputTarget::ServerUrl,
-                                        server.server_url,
-                                        cx,
-                                    );
-                                }
-                                if this.active_input != InputTarget::ModelName {
-                                    this.set_input_text(
-                                        InputTarget::ModelName,
-                                        server.model_name,
-                                        cx,
-                                    );
-                                }
-                                if this.active_input != InputTarget::ContextTokens {
-                                    this.set_input_text(
-                                        InputTarget::ContextTokens,
-                                        server
-                                            .context_tokens
-                                            .map(|tokens| tokens.to_string())
-                                            .unwrap_or_default(),
-                                        cx,
-                                    );
-                                }
+                                this.set_unfocused_input_text(
+                                    InputTarget::ServerUrl,
+                                    server.server_url,
+                                    cx,
+                                );
+                                this.set_unfocused_input_text(
+                                    InputTarget::ModelName,
+                                    server.model_name,
+                                    cx,
+                                );
+                                this.set_unfocused_input_text(
+                                    InputTarget::ContextTokens,
+                                    server
+                                        .context_tokens
+                                        .map(|tokens| tokens.to_string())
+                                        .unwrap_or_default(),
+                                    cx,
+                                );
                             }
                         } else {
                             this.data.models.active_model = None;
@@ -958,7 +902,7 @@ impl NativeApp {
     fn refresh_reindex_progress(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.reindex_progress()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if let Ok(progress) = result {
@@ -974,7 +918,7 @@ impl NativeApp {
     fn refresh_index_health(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.index_health()).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if let Ok(health) = result {
@@ -1011,22 +955,16 @@ impl NativeApp {
         self.data.reindex_progress = snapshot.reindex_progress;
         self.data.conversation = snapshot.conversation;
         if let Some(server) = self.data.server.clone() {
-            if self.active_input != InputTarget::ServerUrl {
-                self.set_input_text(InputTarget::ServerUrl, server.server_url, cx);
-            }
-            if self.active_input != InputTarget::ModelName {
-                self.set_input_text(InputTarget::ModelName, server.model_name, cx);
-            }
-            if self.active_input != InputTarget::ContextTokens {
-                self.set_input_text(
-                    InputTarget::ContextTokens,
-                    server
-                        .context_tokens
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                    cx,
-                );
-            }
+            self.set_unfocused_input_text(InputTarget::ServerUrl, server.server_url, cx);
+            self.set_unfocused_input_text(InputTarget::ModelName, server.model_name, cx);
+            self.set_unfocused_input_text(
+                InputTarget::ContextTokens,
+                server
+                    .context_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                cx,
+            );
         }
         if self.selected_conversation.is_none() {
             self.selected_conversation = first_conversation;
@@ -1062,7 +1000,7 @@ impl NativeApp {
         let expected_id = id.clone();
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.conversation(&id)).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     if selected_request_is_current(
@@ -1100,7 +1038,7 @@ impl NativeApp {
         let request_generation = self.conversation_request_generation;
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result =
                     smol::unblock(move || api.conversation_page(&id, 100, Some(before))).await;
                 let _ = this.update(&mut *cx, |this, cx| {
@@ -1129,91 +1067,41 @@ impl NativeApp {
         .detach();
     }
 
-    fn notify(&mut self, message: impl Into<String>, color: gpui::Rgba, cx: &mut Context<Self>) {
-        self.notice_counter += 1;
-        let id = self.notice_counter;
-        self.notices.push(Notice {
-            id,
-            message: message.into(),
-            color,
+    fn notify(
+        &mut self,
+        message: impl Into<String>,
+        color: gpui_kit::Rgba,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = if color == red() {
+            NotificationType::Error
+        } else if color == yellow() {
+            NotificationType::Warning
+        } else if color == green() {
+            NotificationType::Success
+        } else {
+            NotificationType::Info
+        };
+        let note = Notification::new().message(message.into()).with_type(kind);
+        let window_handle = self.window_handle;
+        cx.defer(move |cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                window.push_notification(note, cx)
+            });
         });
-        if self.notices.len() > MAX_NOTICES {
-            self.notices.remove(0);
-        }
-        cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
-                smol::Timer::after(NOTICE_AUTO_DISMISS).await;
-                let _ = this.update(&mut *cx, |this, cx| {
-                    if remove_notice_by_id(&mut this.notices, id) {
-                        cx.notify();
-                    }
-                });
-            },
-        )
-        .detach();
-        cx.notify();
-    }
-
-    fn focus_input(&mut self, target: InputTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_input = target;
-        let input = self.inputs.get(target);
-        let focus_handle = input.read(cx).focus_handle();
-        window.focus(&focus_handle, cx);
     }
 
     fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirmation.is_some() {
-            self.focus_confirmation(false, window, cx);
-        } else {
-            window.focus_next(cx);
-        }
+        traverse_form_focus(window, cx, false);
     }
 
     fn focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirmation.is_some() {
-            self.focus_confirmation(true, window, cx);
-        } else {
-            window.focus_prev(cx);
-        }
-    }
-
-    fn focus_confirmation(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let current = window.focused(cx).and_then(|focused| {
-            if focused == self.confirmation_confirm_focus {
-                Some(ConfirmationFocus::Confirm)
-            } else if focused == self.confirmation_cancel_focus {
-                Some(ConfirmationFocus::Cancel)
-            } else {
-                None
-            }
-        });
-        let target = next_confirmation_focus(current, backwards);
-        let handle = match target {
-            ConfirmationFocus::Confirm => self.confirmation_confirm_focus.clone(),
-            ConfirmationFocus::Cancel => self.confirmation_cancel_focus.clone(),
-        };
-        window.focus(&handle, cx);
-    }
-
-    fn restore_confirmation_focus(
-        &self,
-        confirmation: &Confirmation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(focus) = &confirmation.return_focus {
-            window.focus(focus, cx);
-        }
+        traverse_form_focus(window, cx, true);
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.to_ascii_lowercase();
-        if key == "escape" {
-            if let Some(confirmation) = self.confirmation.take() {
-                self.restore_confirmation_focus(&confirmation, window, cx);
-            } else {
-                self.right_open = false;
-            }
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && !window.has_active_dialog(cx) {
+            self.right_open = false;
             cx.notify();
         }
     }
@@ -1303,7 +1191,7 @@ impl NativeApp {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.create_conversation()).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(conversation) => {
@@ -1326,6 +1214,10 @@ impl NativeApp {
             .input_text(InputTarget::Composer, cx)
             .trim()
             .to_string();
+        self.send_prompt(prompt, cx);
+    }
+
+    fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         if self.model_status != ModelStatus::Connected {
             self.notify(
                 format!(
@@ -1367,10 +1259,7 @@ impl NativeApp {
                 content: message.content.clone(),
             })
             .collect();
-        let assistant_id = format!(
-            "draft-{}",
-            self.notice_counter + self.messages.len() as u64 + 1
-        );
+        let assistant_id = format!("draft-{request_generation}");
         if !regenerate {
             self.messages.push(ChatMessage {
                 id: None,
@@ -1427,7 +1316,7 @@ impl NativeApp {
         })
         .detach();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let mut failed = false;
                 let mut pending = None;
                 let mut first_token = true;
@@ -1574,7 +1463,7 @@ impl NativeApp {
         });
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = receiver.await;
                 let Some(path) = result
                     .ok()
@@ -1611,7 +1500,7 @@ impl NativeApp {
         }
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let results = smol::unblock(move || {
                     paths
                         .into_iter()
@@ -1700,27 +1589,36 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let return_focus = window.focused(cx);
-        self.confirmation = Some(Confirmation {
-            title,
-            message,
-            action,
-            return_focus,
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(title.clone())
+                .description(message.clone())
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel")
+                        .show_cancel(true),
+                )
+                .on_ok({
+                    let this = this.clone();
+                    let action = action.clone();
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |app, cx| app.confirm_action(action.clone(), cx));
+                        true
+                    }
+                })
         });
-        window.focus(&self.confirmation_cancel_focus, cx);
-        cx.notify();
     }
 
-    fn confirm_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(confirmation) = self.confirmation.take() else {
-            return;
-        };
-        self.restore_confirmation_focus(&confirmation, window, cx);
+    fn confirm_action(&mut self, action: ConfirmationAction, cx: &mut Context<Self>) {
         let api = self.api.clone();
-        match confirmation.action {
+        match action {
             ConfirmationAction::Document(id) => {
                 cx.spawn(
-                    async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+                    async move |this: gpui_kit::WeakEntity<NativeApp>,
+                                cx: &mut gpui_kit::AsyncApp| {
                         let result = smol::unblock(move || api.delete_document(&id)).await;
                         let _ = this.update(&mut *cx, |this, cx| match result {
                             Ok(_) => {
@@ -1739,7 +1637,8 @@ impl NativeApp {
             ConfirmationAction::Conversation(id) => {
                 let selected_id = id.clone();
                 cx.spawn(
-                    async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+                    async move |this: gpui_kit::WeakEntity<NativeApp>,
+                                cx: &mut gpui_kit::AsyncApp| {
                         let result = smol::unblock(move || api.delete_conversation(&id)).await;
                         let _ = this.update(&mut *cx, |this, cx| match result {
                             Ok(_) => {
@@ -1759,7 +1658,8 @@ impl NativeApp {
             }
             ConfirmationAction::Model(kind) => {
                 cx.spawn(
-                    async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+                    async move |this: gpui_kit::WeakEntity<NativeApp>,
+                                cx: &mut gpui_kit::AsyncApp| {
                         let result = smol::unblock(move || api.delete_fixed_model(&kind)).await;
                         let _ = this.update(&mut *cx, |this, cx| match result {
                             Ok(_) => {
@@ -1773,13 +1673,6 @@ impl NativeApp {
                 .detach();
             }
         }
-    }
-
-    fn close_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(confirmation) = self.confirmation.take() {
-            self.restore_confirmation_focus(&confirmation, window, cx);
-        }
-        cx.notify();
     }
 
     fn save_server_settings(&mut self, cx: &mut Context<Self>) {
@@ -1800,7 +1693,7 @@ impl NativeApp {
         };
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.update_server_settings(&settings)).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(settings) => {
@@ -1823,7 +1716,7 @@ impl NativeApp {
         self.notify("Connecting to external llama.cpp server…", yellow(), cx);
         cx.notify();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.load_model()).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(response) => {
@@ -1873,7 +1766,7 @@ impl NativeApp {
     fn reindex_document(&mut self, id: String, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.reindex_document(&id)).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
                     Ok(response) => {
@@ -1912,7 +1805,7 @@ impl NativeApp {
         }
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result =
                     smol::unblock(move || api.run_manual_eval(&question, &expected_doc)).await;
                 let _ = this.update(&mut *cx, |this, cx| match result {
@@ -1934,7 +1827,7 @@ impl NativeApp {
         let expected_id = id.clone();
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.retrieval_trace(&id)).await;
                 let _ = this.update(&mut *cx, |this, cx| {
                     let trace_is_available = this
@@ -1978,8 +1871,8 @@ impl Drop for NativeApp {
 
 impl NativeApp {
     fn set_theme(&mut self, graphite: bool, cx: &mut Context<Self>) {
-        self.theme_graphite = graphite;
         theme::set_graphite(graphite);
+        theme::apply_to_kit(cx);
         cx.notify();
     }
 
@@ -2031,7 +1924,7 @@ impl NativeApp {
         self.data.settings = Some(settings.clone());
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.update_settings(&settings)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(settings) => {
@@ -2053,7 +1946,7 @@ impl NativeApp {
     fn run_reindex(&mut self, stale_only: bool, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || {
                     if stale_only {
                         api.reindex_stale()
@@ -2097,7 +1990,7 @@ impl NativeApp {
         }
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.rename_document(&id, &name)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(document) => {
@@ -2122,7 +2015,7 @@ impl NativeApp {
         }
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.rename_conversation(&id, &title)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(conversation) => {
@@ -2148,7 +2041,7 @@ impl NativeApp {
         }
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.add_document_tag(&id, &tag)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(_) => {
@@ -2169,7 +2062,7 @@ impl NativeApp {
         };
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.delete_document_tag(&id, &tag)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(_) => this.refresh_documents(cx),
@@ -2183,7 +2076,7 @@ impl NativeApp {
     fn verify_fixed_model(&mut self, kind: String, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.verify_fixed_model(&kind)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(model) if model.verified => {
@@ -2201,7 +2094,7 @@ impl NativeApp {
         let api = self.api.clone();
         self.notify(format!("Downloading {kind}…"), yellow(), cx);
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.download_fixed_model(&kind)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(_) => {
@@ -2218,7 +2111,7 @@ impl NativeApp {
     fn open_fixed_model(&mut self, kind: String, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.open_fixed_model_directory(&kind)).await;
                 let _ = this.update(cx, |this, cx| {
                     if let Err(error) = result {
@@ -2233,7 +2126,7 @@ impl NativeApp {
     fn export_metrics(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(
-            async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
+            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
                 let result = smol::unblock(move || api.export_metrics()).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(export) if export.status == "success" => this.notify(
@@ -2257,198 +2150,47 @@ impl NativeApp {
     }
 }
 
-fn next_confirmation_focus(
-    current: Option<ConfirmationFocus>,
-    backwards: bool,
-) -> ConfirmationFocus {
-    match (current, backwards) {
-        (None, _) => ConfirmationFocus::Cancel,
-        (Some(ConfirmationFocus::Confirm), false) => ConfirmationFocus::Cancel,
-        (Some(ConfirmationFocus::Cancel), false) => ConfirmationFocus::Confirm,
-        (Some(ConfirmationFocus::Confirm), true) => ConfirmationFocus::Cancel,
-        (Some(ConfirmationFocus::Cancel), true) => ConfirmationFocus::Confirm,
-    }
-}
-
-fn cephalon_button(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    active: bool,
-    disabled: bool,
-    focus_handle: Option<&FocusHandle>,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let label = label.into();
-    let mut button = div()
-        .id(id.into())
-        .flex_none()
-        .px_2()
-        .py_1()
-        .bg(if active { panel_3() } else { panel_2() })
-        .border_1()
-        .border_color(if active { orange() } else { line() })
-        .rounded_sm()
-        .text_size(px(12.))
-        .text_color(if disabled {
-            muted()
-        } else if active {
-            orange_light()
+fn traverse_form_focus(window: &mut Window, cx: &mut App, backwards: bool) {
+    let trap = gpui_kit::base::active_focus_trap(window, cx);
+    let starting_focus = window.focused(cx);
+    for _ in 0..100 {
+        if backwards {
+            window.focus_prev(cx);
         } else {
-            text()
-        })
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .aria_disabled(disabled)
-        .tab_stop(!disabled)
-        .focus_visible(|style| style.border_color(orange_light()).shadow_sm())
-        .child(label);
-    if let Some(focus_handle) = focus_handle {
-        button = button.track_focus(focus_handle);
-    } else if !disabled {
-        button = button.focusable();
+            window.focus_next(cx);
+        }
+        if trap
+            .as_ref()
+            .is_none_or(|handle| handle.contains_focused(window, cx))
+        {
+            return;
+        }
+        if window.focused(cx) == starting_focus {
+            return;
+        }
     }
-    if disabled {
-        button
-    } else {
-        button.cursor_pointer().on_click(listener)
-    }
-}
-
-fn ui_button(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    active: bool,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    cephalon_button(id, label, active, false, None, listener)
-}
-
-fn ui_button_disabled(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    active: bool,
-    disabled: bool,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    cephalon_button(id, label, active, disabled, None, listener)
-}
-
-fn ui_button_with_focus(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    active: bool,
-    focus_handle: &FocusHandle,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    cephalon_button(id, label, active, false, Some(focus_handle), listener)
-}
-
-fn ui_disabled_button(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    cephalon_button(id, label, false, true, None, |_, _, _| {})
-}
-
-fn ui_toggle(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    ui_toggle_with_focus(id, label, enabled, None, listener)
-}
-
-fn ui_toggle_with_focus(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    focus_handle: Option<&FocusHandle>,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let label = label.into();
-    let mut toggle = div()
-        .id(id.into())
-        .flex()
-        .items_center()
-        .gap_2()
-        .flex_none()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .role(gpui::Role::Switch)
-        .aria_label(label.clone())
-        .aria_toggled(enabled.into())
-        .focus_visible(|style| style.border_color(orange_light()).shadow_sm())
-        .child(
-            div()
-                .w(px(38.))
-                .h(px(18.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if enabled { orange() } else { line() })
-                .text_size(px(9.))
-                .text_color(if enabled { bg() } else { muted() })
-                .child(if enabled { "ON" } else { "OFF" }),
-        )
-        .child(div().text_size(px(12.)).text_color(text()).child(label));
-    if let Some(focus_handle) = focus_handle {
-        toggle = toggle.track_focus(focus_handle);
-    } else {
-        toggle = toggle.focusable();
-    }
-    toggle.tab_stop(true).on_click(listener)
-}
-
-fn input_field(
-    id: impl Into<SharedString>,
-    input: Entity<TextInput>,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    div().id(id.into()).w_full().child(input).on_click(listener)
-}
-
-fn form_field(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    input: Entity<TextInput>,
-    listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(muted())
-                .child(label.into()),
-        )
-        .child(input_field(id, input, listener))
 }
 
 fn status_filter_button(
     status: &'static str,
     selected: &str,
     cx: &mut Context<NativeApp>,
-) -> gpui::Stateful<gpui::Div> {
+) -> Button {
     let value = status.to_string();
-    ui_button(
-        format!("status-filter-{status}"),
-        status,
-        selected == status,
-        cx.listener(move |this, _, _, cx| {
+    Button::new(format!("status-filter-{status}"))
+        .label(status)
+        .with_variant(if selected == status {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
             this.status_filter = value.clone();
             cx.notify();
-        }),
-    )
+        }))
 }
 
-fn detail_line(label: &str, value: &str, color: gpui::Rgba) -> gpui::Div {
+fn detail_line(label: &str, value: &str, color: gpui_kit::Rgba) -> gpui_kit::Div {
     div()
         .flex()
         .justify_between()
@@ -2470,7 +2212,7 @@ fn detail_line(label: &str, value: &str, color: gpui::Rgba) -> gpui::Div {
         )
 }
 
-fn status_color(status: &str) -> gpui::Rgba {
+fn status_color(status: &str) -> gpui_kit::Rgba {
     match status {
         "ready" | "completed" | "connected" | "ok" => green(),
         "error" | "failed" | "offline" => red(),
@@ -2621,7 +2363,7 @@ fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-fn diagnostic_value(title: &str, value: &Value) -> gpui::Div {
+fn diagnostic_value(title: &str, value: &Value) -> gpui_kit::Div {
     let mut panel = div()
         .flex()
         .flex_col()
@@ -2690,7 +2432,7 @@ fn humanize_key(key: &str) -> String {
         .join(" ")
 }
 
-fn render_chunk_preview(index: usize, chunk: &Value) -> gpui::Div {
+fn render_chunk_preview(index: usize, chunk: &Value) -> gpui_kit::Div {
     let kind = value_string(chunk, &["block_type", "source_kind", "type"])
         .unwrap_or_else(|| "paragraph".into());
     let tokens = value_string(chunk, &["token_count", "tokens"])
@@ -2735,7 +2477,7 @@ fn source_key(source: &SourceChunk) -> String {
         .unwrap_or_else(|| format!("rank-{}", source.rank))
 }
 
-fn score_badge(label: &str, value: Option<f64>) -> gpui::Div {
+fn score_badge(label: &str, value: Option<f64>) -> gpui_kit::Div {
     div()
         .px_1()
         .py(px(1.))
@@ -2751,7 +2493,7 @@ fn score_badge(label: &str, value: Option<f64>) -> gpui::Div {
         ))
 }
 
-fn disclosure_text(title: &str, value: &str) -> gpui::Div {
+fn disclosure_text(title: &str, value: &str) -> gpui_kit::Div {
     div()
         .p_2()
         .bg(panel_3())
@@ -2774,7 +2516,7 @@ fn disclosure_text(title: &str, value: &str) -> gpui::Div {
         )
 }
 
-fn disclosure_value(title: &str, value: &Value) -> gpui::Div {
+fn disclosure_value(title: &str, value: &Value) -> gpui_kit::Div {
     disclosure_text(title, &pretty_value(value))
 }
 
@@ -2939,6 +2681,7 @@ impl Render for NativeApp {
         };
         root = root
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Submit, _, cx| this.send_message(cx)))
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -2947,7 +2690,9 @@ impl Render for NativeApp {
             .on_drop::<ExternalPaths>(
                 cx.listener(|this, paths, _, cx| this.ingest_dropped(paths, cx)),
             );
-        root
+        root.children(Root::render_notification_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
     }
 }
 
@@ -2955,17 +2700,11 @@ impl Render for NativeApp {
 mod tests {
     use super::{
         apply_rag_inputs, drain_query_tokens, find_selected_answer, model_status_from_parts,
-        model_transport_error, next_response_effort, remove_notice_by_id,
-        selected_request_is_current, visible_answer, ChatMessage, InputTarget, ModelStatus, Notice,
+        model_transport_error, next_response_effort, selected_request_is_current, visible_answer,
+        ChatMessage, InputTarget, ModelStatus,
     };
     use crate::api::{LlamaBackendStatus, QueryEvent, RagSettings};
-    use gpui::{
-        AnyWindowHandle, AppContext, Context, FocusHandle, InputEvent, IntoElement, KeyDownEvent,
-        KeyUpEvent, Keystroke, Render, TestAppContext, Window,
-    };
-    use std::cell::Cell;
     use std::collections::HashMap;
-    use std::rc::Rc;
 
     #[test]
     fn answer_selection_survives_prepending_older_messages() {
@@ -3013,93 +2752,6 @@ mod tests {
             Some(QueryEvent::Phase(_))
         ));
         assert_eq!(text, "abc");
-    }
-
-    struct ButtonHarness {
-        focus: FocusHandle,
-        clicks: Rc<Cell<u32>>,
-        disabled: bool,
-    }
-
-    impl Render for ButtonHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let clicks = self.clicks.clone();
-            super::cephalon_button(
-                "test-button",
-                "Test button",
-                false,
-                self.disabled,
-                Some(&self.focus),
-                move |_, _, _| clicks.set(clicks.get() + 1),
-            )
-        }
-    }
-
-    struct ToggleHarness {
-        focus: FocusHandle,
-        enabled: Rc<Cell<bool>>,
-    }
-
-    impl Render for ToggleHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let enabled = self.enabled.clone();
-            super::ui_toggle_with_focus(
-                "test-toggle",
-                "Test setting",
-                enabled.get(),
-                Some(&self.focus),
-                move |_, _, _| enabled.set(!enabled.get()),
-            )
-        }
-    }
-
-    fn focus_and_draw(cx: &mut TestAppContext, window: AnyWindowHandle, focus: &FocusHandle) {
-        cx.update_window(window, |_, window, cx| window.focus(focus, cx))
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window, |_, window, cx| {
-            window.draw(cx).clear(cx);
-        })
-        .unwrap();
-    }
-
-    fn dispatch_key(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
-        cx.update_window(window, |_, window, cx| {
-            window.dispatch_event(
-                KeyDownEvent {
-                    keystroke,
-                    is_held: false,
-                    prefer_character_input: false,
-                }
-                .to_platform_input(),
-                cx,
-            );
-        })
-        .unwrap();
-        let keystroke = Keystroke::parse(key).unwrap();
-        cx.update_window(window, |_, window, cx| {
-            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
-        })
-        .unwrap();
-    }
-
-    fn button_test_window(
-        cx: &mut TestAppContext,
-        disabled: bool,
-    ) -> (AnyWindowHandle, FocusHandle, Rc<Cell<u32>>) {
-        let focus = cx.update(|cx| cx.focus_handle());
-        let clicks = Rc::new(Cell::new(0));
-        let window = cx.add_window({
-            let focus = focus.clone();
-            let clicks = clicks.clone();
-            move |_, _| ButtonHarness {
-                focus,
-                clicks,
-                disabled,
-            }
-        });
-        (window.into(), focus, clicks)
     }
 
     #[test]
@@ -3152,26 +2804,6 @@ mod tests {
     }
 
     #[test]
-    fn notice_dismissal_removes_only_the_expired_notice() {
-        let mut notices = vec![
-            Notice {
-                id: 1,
-                message: "first".into(),
-                color: gpui::rgb(0xffffff),
-            },
-            Notice {
-                id: 2,
-                message: "second".into(),
-                color: gpui::rgb(0xffffff),
-            },
-        ];
-        assert!(!remove_notice_by_id(&mut notices, 3));
-        assert!(remove_notice_by_id(&mut notices, 1));
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].id, 2);
-    }
-
-    #[test]
     fn response_effort_cycles_through_backend_values() {
         assert_eq!(next_response_effort("quick"), "balanced");
         assert_eq!(next_response_effort("balanced"), "thorough");
@@ -3219,66 +2851,5 @@ mod tests {
         assert!(!model_transport_error(
             "llama.cpp returned no visible answer."
         ));
-    }
-
-    #[gpui::test]
-    fn button_activates_with_enter_and_space(cx: &mut TestAppContext) {
-        let (window, focus, clicks) = button_test_window(cx, false);
-        focus_and_draw(cx, window, &focus);
-        dispatch_key(cx, window, "enter");
-        dispatch_key(cx, window, "space");
-        assert_eq!(clicks.get(), 2);
-    }
-
-    #[gpui::test]
-    fn disabled_button_does_not_activate(cx: &mut TestAppContext) {
-        let (window, focus, clicks) = button_test_window(cx, true);
-        focus_and_draw(cx, window, &focus);
-        dispatch_key(cx, window, "enter");
-        dispatch_key(cx, window, "space");
-        assert_eq!(clicks.get(), 0);
-    }
-
-    #[gpui::test]
-    fn toggle_changes_state_with_space(cx: &mut TestAppContext) {
-        let focus = cx.update(|cx| cx.focus_handle());
-        let enabled = Rc::new(Cell::new(false));
-        let window = cx.add_window({
-            let focus = focus.clone();
-            let enabled = enabled.clone();
-            move |_, _| ToggleHarness { focus, enabled }
-        });
-        let window: AnyWindowHandle = window.into();
-        focus_and_draw(cx, window, &focus);
-        dispatch_key(cx, window, "space");
-        assert!(enabled.get());
-    }
-
-    #[test]
-    fn destructive_confirmation_focus_starts_safe_and_wraps_both_directions() {
-        assert_eq!(
-            super::next_confirmation_focus(None, false),
-            super::ConfirmationFocus::Cancel
-        );
-        assert_eq!(
-            super::next_confirmation_focus(None, true),
-            super::ConfirmationFocus::Cancel
-        );
-        assert_eq!(
-            super::next_confirmation_focus(Some(super::ConfirmationFocus::Cancel), false),
-            super::ConfirmationFocus::Confirm
-        );
-        assert_eq!(
-            super::next_confirmation_focus(Some(super::ConfirmationFocus::Confirm), false),
-            super::ConfirmationFocus::Cancel
-        );
-        assert_eq!(
-            super::next_confirmation_focus(Some(super::ConfirmationFocus::Cancel), true),
-            super::ConfirmationFocus::Confirm
-        );
-        assert_eq!(
-            super::next_confirmation_focus(Some(super::ConfirmationFocus::Confirm), true),
-            super::ConfirmationFocus::Cancel
-        );
     }
 }

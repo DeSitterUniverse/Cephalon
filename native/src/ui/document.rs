@@ -3,7 +3,7 @@
 use super::*;
 
 impl NativeApp {
-    pub(super) fn render_document(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_document(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let document = self
             .selected_document
             .as_ref()
@@ -18,12 +18,14 @@ impl NativeApp {
         let mut tags = div().flex().flex_wrap().gap_1();
         for tag in &document.tags {
             let tag_value = tag.clone();
-            tags = tags.child(ui_button(
-                format!("tag-{}", tag),
-                format!("{} ×", tag),
-                false,
-                cx.listener(move |this, _, _, cx| this.remove_tag(tag_value.clone(), cx)),
-            ));
+            tags = tags.child(
+                Button::new(format!("tag-{}", tag))
+                    .label(format!("{} ×", tag))
+                    .secondary()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.remove_tag(tag_value.clone(), cx)),
+                    ),
+            );
         }
         let mut chunk_preview = div().flex().flex_col().gap_1();
         for (index, chunk) in document.chunk_preview.iter().enumerate() {
@@ -133,66 +135,70 @@ impl NativeApp {
                     .flex()
                     .flex_wrap()
                     .gap_1()
-                    .child(input_field(
-                        "new-tag",
-                        self.inputs.tag.clone(),
-                        cx.listener(|this, _, window, cx| {
-                            this.focus_input(InputTarget::Tag, window, cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        "add-tag",
-                        "Add",
-                        false,
-                        cx.listener(|this, _, _, cx| this.add_tag(cx)),
-                    )),
+                    .child(Input::new(&self.inputs.get(InputTarget::Tag)).id("new-tag"))
+                    .child(
+                        Button::new("add-tag")
+                            .label("Add")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.add_tag(cx))),
+                    ),
             )
-            .child(input_field(
-                "rename-document",
-                self.inputs.rename.clone(),
-                cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::Rename, window, cx)
-                }),
-            ))
+            .child(Input::new(&self.inputs.get(InputTarget::Rename)).id("rename-document"))
             .child(
                 div()
                     .flex()
                     .gap_1()
-                    .child(ui_button(
-                        "open-document",
-                        "Open",
-                        false,
-                        cx.listener({
-                            let path = document_path.clone();
-                            move |this, _, _, cx| this.open_document_path(path.clone(), false, cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        "reveal-document",
-                        "Reveal",
-                        false,
-                        cx.listener({
-                            let path = document_path.clone();
-                            move |this, _, _, cx| this.open_document_path(path.clone(), true, cx)
-                        }),
-                    ))
-                    .child(ui_button(
-                        "save-document-name",
-                        "Save name",
-                        false,
-                        cx.listener(|this, _, _, cx| this.rename_document(cx)),
-                    ))
-                    .child(ui_button("reindex-document", "Reindex", false, {
-                        let id = document_id.clone();
-                        cx.listener(move |this, _, _, cx| this.reindex_document(id.clone(), cx))
-                    }))
-                    .child(ui_button("delete-document", "Delete", false, {
-                        let id = document_id.clone();
-                        let name = document.name.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.ask_delete_document(id.clone(), name.clone(), window, cx)
-                        })
-                    })),
+                    .child(
+                        Button::new("open-document")
+                            .label("Open")
+                            .secondary()
+                            .on_click(cx.listener({
+                                let path = document_path.clone();
+                                move |this, _, _, cx| {
+                                    this.open_document_path(path.clone(), false, cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("reveal-document")
+                            .label("Reveal")
+                            .secondary()
+                            .on_click(cx.listener({
+                                let path = document_path.clone();
+                                move |this, _, _, cx| {
+                                    this.open_document_path(path.clone(), true, cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("save-document-name")
+                            .label("Save name")
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.rename_document(cx))),
+                    )
+                    .child(
+                        Button::new("reindex-document")
+                            .label("Reindex")
+                            .secondary()
+                            .on_click({
+                                let id = document_id.clone();
+                                cx.listener(move |this, _, _, cx| {
+                                    this.reindex_document(id.clone(), cx)
+                                })
+                            }),
+                    )
+                    .child(
+                        Button::new("delete-document")
+                            .label("Delete")
+                            .secondary()
+                            .on_click({
+                                let id = document_id.clone();
+                                let name = document.name.clone();
+                                cx.listener(move |this, _, window, cx| {
+                                    this.ask_delete_document(id.clone(), name.clone(), window, cx)
+                                })
+                            }),
+                    ),
             )
     }
 }

@@ -1,64 +1,62 @@
 # Native frontend
 
-Cephalon's desktop frontend is a native Rust application. It uses the pinned
-GPUI Community Edition (GPUI-CE) runtime, with GPUI-CE's maintained
-`gpui_elements` editable-text primitives for native inputs and text areas.
+Cephalon's desktop frontend is a native Rust application built with GPUI Kit
+`=0.6.6`. Kit supplies the GPUI runtime, platform application, assets, and
+component layer through one direct dependency. The lockfile resolves Kit's
+GPUI family to `gpui-pre` 0.3.6. The previous GPUI-CE pin was
+`c39bf5abfa81e3851367be0830c6caf7360f6af3`.
+
+Kit owns editable inputs and text areas, buttons, switches, forms, dialogs,
+notifications, and their native interaction behavior. Cephalon still owns its
+research and RAG surfaces: the workspace layout, document/library/history
+presentation, citation-aware chat Markdown, source and support panels, and
+the Graphite palette. The palette is applied to Kit's theme at startup and
+when the user changes the theme.
+
+Each field's `InputState` or `TextareaState` is the editable text source of
+truth. `InputEntities` stores those Kit entities; `NativeApp` reads values
+when submitting or saving. Only live library search subscribes to input
+changes to redraw results. The composer is a Kit auto-growing text area.
+Ordinary form fields use Kit inputs, and numeric settings use `NumberInput`.
+
+Cephalon binds Tab and Shift-Tab to form focus traversal because Kit 0.6.6
+still binds Tab to editor indentation. Traversal respects Kit's active dialog
+focus trap. Ctrl/Cmd+Enter submits from an input. Kit's Cut action leaves a
+field unchanged when nothing is selected, so the old Cephalon Cut override is
+gone. Input value updates are deferred to a window update because Kit's
+`set_value` requires both the window and app contexts.
+
+Confirmation prompts use Kit alert dialogs, and transient messages use Kit
+notifications. The old `TextInput` wrapper, input text mirrors and sync
+subscriptions, notice timer, and custom confirmation state were removed.
+Cephalon retains only application-specific callbacks for actions such as
+deleting a conversation or document.
+
 The frontend talks to the existing local Python service over typed HTTP and
-SSE; retrieval, reranking, ingestion, model behavior, and backend process
-ownership remain in Python.
-
-The current GPUI-CE source revision is pinned in `native/Cargo.toml` and the
-workspace `Cargo.lock`:
-
-```text
-c39bf5abfa81e3851367be0830c6caf7360f6af3
-```
-
-`gpui` provides the UI runtime, `gpui_platform::application()` selects the
-native Windows/Linux platform, and `gpui_elements` provides the maintained
-editable-text state and elements. All three direct dependencies use the same
-exact commit. The GPUI-CE renderer uses WGPU/WGSL internally; Cephalon does
-not enable its optional custom GPU, profiler, capture, or embedded-asset APIs.
-The platform's defaults retain Wayland and X11 on Linux. Its Windows manifest
-feature remains enabled by an upstream platform dependency, alongside
-Cephalon's own executable icon resource.
-
-Editable input text lives in `EditableTextState`. Cephalon's `TextInput` keeps
-only form styling and form-specific submit, Tab traversal, and selection-only
-Cut behavior. The app reads text directly from each editor when submitting or
-saving. Each wrapper observes its supplied editor state to redraw itself;
-only live library search also notifies the app when its text changes.
+SSE. Retrieval, reranking, ingestion, model behavior, and backend process
+ownership remain in Python. The query stream uses a bounded channel and
+combines nearby token events before redrawing chat. Source and support panels
+resolve the selected answer by message ID. Stop also sends a cancellation
+request to the Python service.
 
 Other direct dependencies serve distinct needs: `image` decodes the window
-icon, `async-channel` and `smol` carry backend events, `reqwest` and Serde
-handle the typed HTTP/SSE API, `pulldown-cmark` renders answers, `libc` manages
-the Unix backend process group, and `winresource` embeds the Windows icon.
+icon; `async-channel` and `smol` carry backend events; `reqwest` and Serde
+handle HTTP/SSE; `pulldown-cmark` renders citation-aware answers; `libc`
+manages the Unix backend process group; and `winresource` embeds the Windows
+icon. Kit's default component and asset features are used. Optional
+profiler, inspector, code editor, and language parser features are not
+enabled. Linux retains Kit's native X11 and Wayland platform support.
 
-The query stream uses a bounded channel and combines nearby token events before
-redrawing chat. Source and support panels resolve their selected answer from
-the message list by ID, so they do not keep separate copies of answer data.
-The Stop action also sends a query cancellation request to the Python service,
-which can interrupt a model stream waiting for its next token. Completed
-answers, their sources, and their support records commit together; optional
-conversation-memory embedding runs from a durable queue after the answer is
-delivered.
-
-Native development and CI require Rust 1.95 or newer. The existing Rust 2021
-edition and workspace resolver 2 remain in place; changing them would add
-unrelated API and process-manager Clippy churn to this migration.
-
-For local development:
+Native development and CI use Rust 1.95 or newer; Rust 1.98.1 was used for
+this migration. The workspace remains on Rust 2021 and resolver 2 to keep
+the framework migration focused. For local development:
 
 ```powershell
 cargo run
 ```
 
-The managed Python backend remains the source of truth for application data
-and is launched or connected by `BackendService` according to the normal
-development, packaged, and external-backend modes.
-
-The desktop identity is kept with the native shell: `assets/cephalon.png` is
-passed to GPUI for the X11 window icon, while `assets/cephalon.ico` is embedded
-as the Windows executable resource so the title bar and taskbar use the same
-Cephalon mark. The portable Linux package keeps the SVG beside its relocatable
-`.desktop` entry.
+The managed Python backend is launched or connected by `BackendService`
+according to the normal development, packaged, and external-backend modes.
+`assets/cephalon.png` is passed to the native window as its icon, while
+`assets/cephalon.ico` is embedded as the Windows executable resource. The
+portable Linux package keeps the SVG beside its relocatable `.desktop` entry.
