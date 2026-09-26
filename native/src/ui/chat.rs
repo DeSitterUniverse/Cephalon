@@ -388,6 +388,7 @@ impl NativeApp {
         table
     }
 
+    #[allow(clippy::too_many_arguments)] // All arguments are local rendering context; bundling them obscures the row.
     fn render_table_row(
         &mut self,
         message_index: usize,

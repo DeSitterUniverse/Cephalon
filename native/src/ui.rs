@@ -32,7 +32,7 @@ mod theme;
 use layout::{compact_navigation, layout_mode, LayoutMode};
 use markdown::visible_answer;
 pub use text_input::{CutSelectionOnly, FocusNextInput, FocusPreviousInput, Submit};
-use text_input::{TextChanged, TextInput, TextSubmitted};
+use text_input::{TextInput, TextSubmitted};
 use theme::*;
 
 actions!([FocusNext, FocusPrevious]);
@@ -85,8 +85,7 @@ enum InputTarget {
     ContextTokens,
     EvalQuestion,
     EvalDocument,
-    RenameDocument,
-    RenameConversation,
+    Rename,
     Tag,
     RagTopK,
     RagRerankTopN,
@@ -215,7 +214,7 @@ impl InputEntities {
             InputTarget::ContextTokens => self.context_tokens.clone(),
             InputTarget::EvalQuestion => self.eval_question.clone(),
             InputTarget::EvalDocument => self.eval_document.clone(),
-            InputTarget::RenameDocument | InputTarget::RenameConversation => self.rename.clone(),
+            InputTarget::Rename => self.rename.clone(),
             InputTarget::Tag => self.tag.clone(),
             InputTarget::RagTopK => self.rag_top_k.clone(),
             InputTarget::RagRerankTopN => self.rag_rerank_top_n.clone(),
@@ -356,9 +355,9 @@ enum ConfirmationFocus {
 
 #[derive(Debug, Clone)]
 enum ConfirmationAction {
-    DeleteDocument(String),
-    DeleteConversation(String),
-    DeleteModel(String),
+    Document(String),
+    Conversation(String),
+    Model(String),
 }
 
 #[derive(Debug, Default)]
@@ -396,14 +395,12 @@ pub struct NativeApp {
     theme_graphite: bool,
     event_status: EventStatus,
     model_status: ModelStatus,
-    search: String,
     status_filter: String,
     selected_document: Option<String>,
     selected_conversation: Option<String>,
     selected_sources: Vec<SourceChunk>,
     expanded_sources: std::collections::HashSet<String>,
     selected_support: Option<Value>,
-    composer: String,
     retrieval_scope: String,
     response_effort: String,
     response_phase: String,
@@ -414,19 +411,12 @@ pub struct NativeApp {
     chat_following: bool,
     regenerate_without_user: bool,
     active_input: InputTarget,
-    server_url_draft: String,
-    model_name_draft: String,
-    context_tokens_draft: String,
-    eval_question: String,
-    eval_document: String,
-    rename_draft: String,
-    tag_draft: String,
-    rag_drafts: std::collections::HashMap<InputTarget, String>,
     notice_counter: u64,
     notices: Vec<Notice>,
     confirmation: Option<Confirmation>,
     inputs: InputEntities,
-    input_subscriptions: Vec<Subscription>,
+    _search_subscription: Subscription,
+    _submit_subscription: Subscription,
     documents_refresh_generation: u64,
     conversations_refresh_generation: u64,
     settings_refresh_generation: u64,
@@ -468,6 +458,15 @@ impl NativeApp {
         let confirmation_confirm_focus = cx.focus_handle().tab_stop(true);
         let confirmation_cancel_focus = cx.focus_handle().tab_stop(true);
         let inputs = InputEntities::new(cx);
+        let search_state = inputs.search.read(cx).editor_state();
+        let search_subscription = cx.subscribe(
+            &search_state,
+            |_, _, _: &gpui_elements::editable_text::TextChanged, cx| cx.notify(),
+        );
+        let submit_subscription =
+            cx.subscribe(&inputs.composer, |this, _, _: &TextSubmitted, cx| {
+                this.send_message(cx);
+            });
         let mut app = Self {
             api,
             backend,
@@ -486,14 +485,12 @@ impl NativeApp {
             theme_graphite: false,
             event_status: EventStatus::Connecting,
             model_status: ModelStatus::Connecting,
-            search: String::new(),
             status_filter: "all".into(),
             selected_document: None,
             selected_conversation: None,
             selected_sources: Vec::new(),
             expanded_sources: std::collections::HashSet::new(),
             selected_support: None,
-            composer: String::new(),
             retrieval_scope: "medium".into(),
             response_effort: "balanced".into(),
             response_phase: String::new(),
@@ -504,19 +501,12 @@ impl NativeApp {
             chat_following: true,
             regenerate_without_user: false,
             active_input: InputTarget::Composer,
-            server_url_draft: String::new(),
-            model_name_draft: String::new(),
-            context_tokens_draft: String::new(),
-            eval_question: String::new(),
-            eval_document: String::new(),
-            rename_draft: String::new(),
-            tag_draft: String::new(),
-            rag_drafts: std::collections::HashMap::new(),
             notice_counter: 0,
             notices: Vec::new(),
             confirmation: None,
             inputs,
-            input_subscriptions: Vec::new(),
+            _search_subscription: search_subscription,
+            _submit_subscription: submit_subscription,
             documents_refresh_generation: 0,
             conversations_refresh_generation: 0,
             settings_refresh_generation: 0,
@@ -529,74 +519,13 @@ impl NativeApp {
             trace_request_generation: 0,
             query_generation: 0,
         };
-        app.subscribe_input(InputTarget::Composer, cx);
-        app.subscribe_input(InputTarget::Search, cx);
-        app.subscribe_input(InputTarget::ServerUrl, cx);
-        app.subscribe_input(InputTarget::ModelName, cx);
-        app.subscribe_input(InputTarget::ContextTokens, cx);
-        app.subscribe_input(InputTarget::EvalQuestion, cx);
-        app.subscribe_input(InputTarget::EvalDocument, cx);
-        app.subscribe_input(InputTarget::RenameConversation, cx);
-        app.subscribe_input(InputTarget::Tag, cx);
-        for target in [
-            InputTarget::RagTopK,
-            InputTarget::RagRerankTopN,
-            InputTarget::RagMaxTokens,
-            InputTarget::RagTemperature,
-            InputTarget::RagParentTargetTokens,
-            InputTarget::RagParentMaxTokens,
-            InputTarget::RagChildTargetTokens,
-            InputTarget::RagChildMaxTokens,
-            InputTarget::RagChildOverlapTokens,
-            InputTarget::RagContextTokens,
-            InputTarget::RagMinConfidence,
-            InputTarget::RagMinRerankScore,
-            InputTarget::RagMinVectorScore,
-            InputTarget::RagMinSourceCount,
-        ] {
-            app.subscribe_input(target, cx);
-        }
-        app.subscribe_submit(cx);
         app.start_boot(cx);
         app.start_event_stream(cx);
         app
     }
 
-    fn subscribe_input(&mut self, target: InputTarget, cx: &mut Context<Self>) {
-        let input = self.inputs.get(target);
-        let subscription = cx.subscribe(&input, move |this, entity, _: &TextChanged, cx| {
-            let value = entity.read_with(cx, |input, _| input.text().to_owned());
-            this.set_input_mirror(target, value);
-            cx.notify();
-        });
-        self.input_subscriptions.push(subscription);
-    }
-
-    fn subscribe_submit(&mut self, cx: &mut Context<Self>) {
-        let input = self.inputs.composer.clone();
-        let subscription = cx.subscribe(&input, |this, _, _: &TextSubmitted, cx| {
-            this.send_message(cx);
-        });
-        self.input_subscriptions.push(subscription);
-    }
-
-    fn set_input_mirror(&mut self, target: InputTarget, value: String) {
-        match target {
-            InputTarget::Composer => self.composer = value,
-            InputTarget::Search => self.search = value,
-            InputTarget::ServerUrl => self.server_url_draft = value,
-            InputTarget::ModelName => self.model_name_draft = value,
-            InputTarget::ContextTokens => self.context_tokens_draft = value,
-            InputTarget::EvalQuestion => self.eval_question = value,
-            InputTarget::EvalDocument => self.eval_document = value,
-            InputTarget::RenameDocument | InputTarget::RenameConversation => {
-                self.rename_draft = value
-            }
-            InputTarget::Tag => self.tag_draft = value,
-            target => {
-                self.rag_drafts.insert(target, value);
-            }
-        }
+    fn input_text(&self, target: InputTarget, cx: &App) -> String {
+        self.inputs.get(target).read(cx).text(cx)
     }
 
     fn set_input_text(
@@ -606,9 +535,8 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         let value = value.into();
-        self.set_input_mirror(target, value.clone());
         let input = self.inputs.get(target);
-        let _ = input.update(cx, |input, cx| input.set_text(value, cx));
+        input.update(cx, |input, cx| input.set_text(value, cx));
     }
 
     fn rag_input(
@@ -632,7 +560,6 @@ impl NativeApp {
                 continue;
             }
             let value = rag_setting_value(settings, target);
-            self.rag_drafts.insert(target, value.clone());
             self.set_input_text(target, value, cx);
         }
     }
@@ -1257,7 +1184,6 @@ impl NativeApp {
                 self.right_open = false;
             }
             cx.notify();
-            return;
         }
     }
 
@@ -1279,7 +1205,7 @@ impl NativeApp {
             .find(|conversation| conversation.id == id)
             .map(|conversation| conversation.title.clone())
             .unwrap_or_default();
-        self.set_input_text(InputTarget::RenameConversation, title, cx);
+        self.set_input_text(InputTarget::Rename, title, cx);
         self.selected_conversation = Some(id);
         self.panel = Panel::History;
         self.right_open = true;
@@ -1295,7 +1221,7 @@ impl NativeApp {
             .find(|document| document.id == id)
             .map(|document| document.name.clone())
             .unwrap_or_default();
-        self.set_input_text(InputTarget::RenameDocument, name, cx);
+        self.set_input_text(InputTarget::Rename, name, cx);
         self.selected_document = Some(id);
         self.panel = Panel::Document;
         self.right_open = true;
@@ -1363,7 +1289,10 @@ impl NativeApp {
     }
 
     fn send_message(&mut self, cx: &mut Context<Self>) {
-        let prompt = self.composer.trim().to_string();
+        let prompt = self
+            .input_text(InputTarget::Composer, cx)
+            .trim()
+            .to_string();
         if self.model_status != ModelStatus::Connected {
             self.notify(
                 format!(
@@ -1451,7 +1380,7 @@ impl NativeApp {
             response_effort: self.response_effort.clone(),
         };
         smol::spawn(async move {
-            let result = smol::unblock(move || {
+            smol::unblock(move || {
                 let result = api.query_stream(request, &stop, |event| {
                     let _ = tx.try_send(event);
                 });
@@ -1460,7 +1389,6 @@ impl NativeApp {
                 }
             })
             .await;
-            let _ = result;
         })
         .detach();
         cx.spawn(
@@ -1516,6 +1444,7 @@ impl NativeApp {
                 }
             }
             QueryEvent::Source(source) => {
+                let source = *source;
                 last.sources.push(source.clone());
                 self.selected_sources.push(source);
             }
@@ -1674,7 +1603,7 @@ impl NativeApp {
         self.open_confirmation(
             "Delete document?".into(),
             format!("Delete {name} from the library and remove its indexed content?"),
-            ConfirmationAction::DeleteDocument(id),
+            ConfirmationAction::Document(id),
             window,
             cx,
         );
@@ -1690,7 +1619,7 @@ impl NativeApp {
         self.open_confirmation(
             "Delete chat?".into(),
             format!("Delete {title} and its saved messages?"),
-            ConfirmationAction::DeleteConversation(id),
+            ConfirmationAction::Conversation(id),
             window,
             cx,
         );
@@ -1700,7 +1629,7 @@ impl NativeApp {
         self.open_confirmation(
             "Delete cached model?".into(),
             format!("Remove the cached {kind} model?"),
-            ConfirmationAction::DeleteModel(kind),
+            ConfirmationAction::Model(kind),
             window,
             cx,
         );
@@ -1732,7 +1661,7 @@ impl NativeApp {
         self.restore_confirmation_focus(&confirmation, window, cx);
         let api = self.api.clone();
         match confirmation.action {
-            ConfirmationAction::DeleteDocument(id) => {
+            ConfirmationAction::Document(id) => {
                 cx.spawn(
                     async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                         let result = smol::unblock(move || api.delete_document(&id)).await;
@@ -1750,7 +1679,7 @@ impl NativeApp {
                 )
                 .detach();
             }
-            ConfirmationAction::DeleteConversation(id) => {
+            ConfirmationAction::Conversation(id) => {
                 let selected_id = id.clone();
                 cx.spawn(
                     async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
@@ -1770,7 +1699,7 @@ impl NativeApp {
                 )
                 .detach();
             }
-            ConfirmationAction::DeleteModel(kind) => {
+            ConfirmationAction::Model(kind) => {
                 cx.spawn(
                     async move |this: gpui::WeakEntity<NativeApp>, cx: &mut gpui::AsyncApp| {
                         let result = smol::unblock(move || api.delete_fixed_model(&kind)).await;
@@ -1797,9 +1726,19 @@ impl NativeApp {
 
     fn save_server_settings(&mut self, cx: &mut Context<Self>) {
         let settings = LlamaServerSettings {
-            server_url: self.server_url_draft.trim().to_string(),
-            model_name: self.model_name_draft.trim().to_string(),
-            context_tokens: self.context_tokens_draft.trim().parse().ok(),
+            server_url: self
+                .input_text(InputTarget::ServerUrl, cx)
+                .trim()
+                .to_string(),
+            model_name: self
+                .input_text(InputTarget::ModelName, cx)
+                .trim()
+                .to_string(),
+            context_tokens: self
+                .input_text(InputTarget::ContextTokens, cx)
+                .trim()
+                .parse()
+                .ok(),
         };
         let api = self.api.clone();
         cx.spawn(
@@ -1897,8 +1836,14 @@ impl NativeApp {
     }
 
     fn run_eval(&mut self, cx: &mut Context<Self>) {
-        let question = self.eval_question.trim().to_string();
-        let expected_doc = self.eval_document.trim().to_string();
+        let question = self
+            .input_text(InputTarget::EvalQuestion, cx)
+            .trim()
+            .to_string();
+        let expected_doc = self
+            .input_text(InputTarget::EvalDocument, cx)
+            .trim()
+            .to_string();
         if question.is_empty() || expected_doc.is_empty() {
             self.notify(
                 "Enter an evaluation question and expected document id.",
@@ -2024,7 +1969,7 @@ impl NativeApp {
         let Some(mut settings) = self.data.settings.clone() else {
             return;
         };
-        apply_rag_drafts(&mut settings, &self.rag_drafts);
+        apply_rag_inputs(&mut settings, |target| self.input_text(target, cx));
         self.data.settings = Some(settings.clone());
         let api = self.api.clone();
         cx.spawn(
@@ -2088,7 +2033,7 @@ impl NativeApp {
         let Some(id) = self.selected_document.clone() else {
             return;
         };
-        let name = self.rename_draft.trim().to_string();
+        let name = self.input_text(InputTarget::Rename, cx).trim().to_string();
         if name.is_empty() {
             return;
         }
@@ -2098,7 +2043,7 @@ impl NativeApp {
                 let result = smol::unblock(move || api.rename_document(&id, &name)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(document) => {
-                        this.set_input_text(InputTarget::RenameDocument, document.name.clone(), cx);
+                        this.set_input_text(InputTarget::Rename, document.name.clone(), cx);
                         this.notify("Document renamed.", green(), cx);
                         this.refresh_documents(cx);
                     }
@@ -2113,7 +2058,7 @@ impl NativeApp {
         let Some(id) = self.selected_conversation.clone() else {
             return;
         };
-        let title = self.rename_draft.trim().to_string();
+        let title = self.input_text(InputTarget::Rename, cx).trim().to_string();
         if title.is_empty() {
             return;
         }
@@ -2123,11 +2068,7 @@ impl NativeApp {
                 let result = smol::unblock(move || api.rename_conversation(&id, &title)).await;
                 let _ = this.update(cx, |this, cx| match result {
                     Ok(conversation) => {
-                        this.set_input_text(
-                            InputTarget::RenameConversation,
-                            conversation.title.clone(),
-                            cx,
-                        );
+                        this.set_input_text(InputTarget::Rename, conversation.title.clone(), cx);
                         this.data.conversation = Some(conversation);
                         this.notify("Chat renamed.", green(), cx);
                         this.refresh_conversations(cx);
@@ -2143,7 +2084,7 @@ impl NativeApp {
         let Some(id) = self.selected_document.clone() else {
             return;
         };
-        let tag = self.tag_draft.trim().to_string();
+        let tag = self.input_text(InputTarget::Tag, cx).trim().to_string();
         if tag.is_empty() {
             return;
         }
@@ -2299,6 +2240,7 @@ fn cephalon_button(
         })
         .role(gpui::Role::Button)
         .aria_label(label.clone())
+        .aria_disabled(disabled)
         .tab_stop(!disabled)
         .focus_visible(|style| style.border_color(orange_light()).shadow_sm())
         .child(label);
@@ -2555,20 +2497,9 @@ fn rag_setting_value(settings: &RagSettings, target: InputTarget) -> String {
     }
 }
 
-fn apply_rag_drafts(
-    settings: &mut RagSettings,
-    drafts: &std::collections::HashMap<InputTarget, String>,
-) {
-    let integer = |target| {
-        drafts
-            .get(&target)
-            .and_then(|value| value.trim().parse().ok())
-    };
-    let decimal = |target| {
-        drafts
-            .get(&target)
-            .and_then(|value| value.trim().parse().ok())
-    };
+fn apply_rag_inputs(settings: &mut RagSettings, text: impl Fn(InputTarget) -> String) {
+    let integer = |target| text(target).trim().parse().ok();
+    let decimal = |target| text(target).trim().parse().ok();
     if let Some(value) = integer(InputTarget::RagTopK) {
         settings.top_k = value;
     }
@@ -2965,7 +2896,7 @@ impl Render for NativeApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_rag_drafts, model_status_from_parts, model_transport_error, next_response_effort,
+        apply_rag_inputs, model_status_from_parts, model_transport_error, next_response_effort,
         remove_notice_by_id, selected_request_is_current, visible_answer, InputTarget, ModelStatus,
         Notice,
     };
@@ -3085,7 +3016,9 @@ mod tests {
             (InputTarget::RagTemperature, "0.35".to_string()),
             (InputTarget::RagChildMaxTokens, "not-a-number".to_string()),
         ]);
-        apply_rag_drafts(&mut settings, &drafts);
+        apply_rag_inputs(&mut settings, |target| {
+            drafts.get(&target).cloned().unwrap_or_default()
+        });
         assert_eq!(settings.top_k, 24);
         assert_eq!(settings.parent_target_tokens, 768);
         assert_eq!(settings.temperature, 0.35);

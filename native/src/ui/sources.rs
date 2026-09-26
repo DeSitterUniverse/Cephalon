@@ -1,7 +1,5 @@
 //! Native GPUI view rendering for this part of the workbench.
 
-use gpui::prelude::*;
-
 use super::*;
 
 impl NativeApp {

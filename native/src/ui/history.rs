@@ -1,7 +1,5 @@
 //! Native GPUI view rendering for this part of the workbench.
 
-use gpui::prelude::*;
-
 use super::*;
 
 impl NativeApp {
@@ -88,7 +86,7 @@ impl NativeApp {
                 "rename-chat",
                 self.inputs.rename.clone(),
                 cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::RenameConversation, window, cx)
+                    this.focus_input(InputTarget::Rename, window, cx)
                 }),
             ))
             .child(ui_button(

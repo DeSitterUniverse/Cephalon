@@ -1,7 +1,5 @@
 //! Native GPUI view rendering for this part of the workbench.
 
-use gpui::prelude::*;
-
 use super::*;
 
 impl NativeApp {
@@ -102,6 +100,7 @@ impl NativeApp {
                     .tab_stop(false)
                     .role(gpui::Role::Dialog)
                     .aria_label(confirmation.title.clone())
+                    .aria_modal(true)
                     .w(px(420.))
                     .p_3()
                     .flex()

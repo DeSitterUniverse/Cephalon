@@ -1,7 +1,5 @@
 //! Native GPUI view rendering for this part of the workbench.
 
-use gpui::prelude::*;
-
 use super::*;
 
 impl NativeApp {
@@ -60,7 +58,7 @@ impl NativeApp {
                 "Size",
                 &document
                     .size_bytes
-                    .map(|size| format_bytes(size))
+                    .map(format_bytes)
                     .unwrap_or_else(|| "Unknown".into()),
                 muted(),
             ))
@@ -153,7 +151,7 @@ impl NativeApp {
                 "rename-document",
                 self.inputs.rename.clone(),
                 cx.listener(|this, _, window, cx| {
-                    this.focus_input(InputTarget::RenameDocument, window, cx)
+                    this.focus_input(InputTarget::Rename, window, cx)
                 }),
             ))
             .child(

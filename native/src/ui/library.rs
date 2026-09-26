@@ -1,14 +1,14 @@
 //! Native GPUI view rendering for this part of the workbench.
 
-use gpui::prelude::*;
-
 use super::*;
 
 impl NativeApp {
     pub(super) fn render_library(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
         let mut list = div().flex().flex_col().gap_1();
         let mut visible_count = 0;
-        let query = self.search.to_ascii_lowercase();
+        let query = self
+            .input_text(InputTarget::Search, cx)
+            .to_ascii_lowercase();
         for document in self.data.documents.iter().filter(|document| {
             let status_match = self.status_filter == "all" || document.status == self.status_filter;
             let text_match = query.is_empty()

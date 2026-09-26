@@ -510,7 +510,9 @@ fn decode_query_event(event_name: &str, data: &str) -> Option<QueryEvent> {
                 .unwrap_or_default()
                 .to_string(),
         )),
-        "source" => serde_json::from_value(value).ok().map(QueryEvent::Source),
+        "source" => serde_json::from_value(value)
+            .ok()
+            .map(|source| QueryEvent::Source(Box::new(source))),
         "conversation" => Some(QueryEvent::Conversation(
             value
                 .get("conversation_id")
@@ -558,7 +560,7 @@ fn decode_event_stream_event(event_name: &str, data: &str) -> Option<EventStream
 pub enum QueryEvent {
     Phase(String),
     Token(String),
-    Source(SourceChunk),
+    Source(Box<SourceChunk>),
     Conversation(String),
     AnswerMeta(Value),
     Error(String),

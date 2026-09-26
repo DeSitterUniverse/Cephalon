@@ -16,19 +16,14 @@ use super::theme::{
 actions!([Submit, FocusNextInput, FocusPreviousInput, CutSelectionOnly]);
 
 #[derive(Debug, Clone, Copy)]
-pub struct TextChanged;
-
-#[derive(Debug, Clone, Copy)]
 pub struct TextSubmitted;
 
 /// A small Cephalon-facing wrapper around GPUI-CE's maintained editable text element.
 ///
-/// Keeping an entity wrapper lets the rest of the application continue to subscribe to
-/// typed changes and mirror values into its draft state, while the actual editing behavior
-/// (selection, IME, clipboard, wrapping, caret scrolling, and navigation) remains in GPUI-CE.
+/// GPUI-CE owns the text, selection, IME, clipboard, and caret state. This
+/// wrapper keeps Cephalon's form styling and form-specific key semantics.
 pub struct TextInput {
     id: SharedString,
-    content: SharedString,
     placeholder: SharedString,
     multiline: bool,
     focus_handle: FocusHandle,
@@ -36,7 +31,6 @@ pub struct TextInput {
     _state_subscription: Subscription,
 }
 
-impl EventEmitter<TextChanged> for TextInput {}
 impl EventEmitter<TextSubmitted> for TextInput {}
 
 impl TextInput {
@@ -52,19 +46,13 @@ impl TextInput {
         let state =
             cx.new(|cx| EditableTextState::new(StringStorage::from(content.to_string()), cx));
         let focus_handle = state.read(cx).focus_handle(cx).tab_stop(true);
+        // A supplied state does not get the observer that a keyed editor state gets.
         let state_subscription = cx.subscribe(
             &state,
-            |this, state, _: &gpui_elements::editable_text::TextChanged, cx| {
-                let content = state.read_with(cx, |state, _| state.as_str().to_owned());
-                this.content = content.into();
-                cx.emit(TextChanged);
-                cx.notify();
-            },
+            |_, _, _: &gpui_elements::editable_text::TextChanged, cx| cx.notify(),
         );
-
         Self {
             id,
-            content,
             placeholder: placeholder.into(),
             multiline,
             focus_handle,
@@ -73,15 +61,17 @@ impl TextInput {
         }
     }
 
-    pub fn text(&self) -> &str {
-        &self.content
+    pub fn text(&self, cx: &App) -> String {
+        self.state.read(cx).as_str().to_owned()
+    }
+
+    pub fn editor_state(&self) -> Entity<EditableTextState> {
+        self.state.clone()
     }
 
     pub fn set_text(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
         let value = value.into();
-        self.content = value.clone().into();
         self.state.update(cx, |state, cx| state.emplace(&value, cx));
-        cx.notify();
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -195,7 +185,46 @@ impl Focusable for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{
+        AnyWindowHandle, AppContext, InputEvent, KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke,
+        TestAppContext,
+    };
+
+    struct FormHarness {
+        first: Entity<TextInput>,
+        second: Entity<TextInput>,
+    }
+
+    impl Render for FormHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .child(self.first.clone())
+                .child(self.second.clone())
+        }
+    }
+
+    fn dispatch_key(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+    }
 
     #[gpui::test]
     fn editable_text_state_round_trips_unicode_and_newlines(cx: &mut TestAppContext) {
@@ -207,5 +236,58 @@ mod tests {
         cx.read_entity(&state, |state, _| {
             assert_eq!(state.as_str(), "café ✅\n第二行");
         });
+    }
+
+    #[gpui::test]
+    fn wrapper_reads_the_editor_as_the_only_text_state(cx: &mut TestAppContext) {
+        let input = cx.update(|cx| cx.new(|cx| TextInput::new(cx, "test", "", "", true)));
+        let editor = cx.read_entity(&input, |input, _| input.editor_state());
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| editor.emplace("café ✅\n第二行", cx));
+        });
+        cx.read_entity(&input, |input, cx| {
+            assert_eq!(input.text(cx), "café ✅\n第二行");
+        });
+    }
+
+    #[gpui::test]
+    fn form_cut_and_tab_navigation_keep_editor_semantics(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-x", CutSelectionOnly, Some("EditableText")),
+                KeyBinding::new("tab", FocusNextInput, Some("EditableText")),
+                KeyBinding::new("shift-tab", FocusPreviousInput, Some("EditableText")),
+            ]);
+        });
+        let first = cx.update(|cx| cx.new(|cx| TextInput::new(cx, "first", "café ✅", "", false)));
+        let second = cx.update(|cx| cx.new(|cx| TextInput::new(cx, "second", "", "", false)));
+        let first_focus = cx.read_entity(&first, |input, _| input.focus_handle());
+        let second_focus = cx.read_entity(&second, |input, _| input.focus_handle());
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let first = first.clone();
+                let second = second.clone();
+                move |_, _| FormHarness { first, second }
+            })
+            .into();
+        cx.update_window(window, |_, window, cx| {
+            window.focus(&first_focus, cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+
+        dispatch_key(cx, window, "ctrl-x");
+        cx.read_entity(&first, |input, cx| assert_eq!(input.text(cx), "café ✅"));
+
+        dispatch_key(cx, window, "tab");
+        cx.update_window(window, |_, window, _| {
+            assert!(second_focus.is_focused(window))
+        })
+        .unwrap();
+        dispatch_key(cx, window, "shift-tab");
+        cx.update_window(window, |_, window, _| {
+            assert!(first_focus.is_focused(window))
+        })
+        .unwrap();
     }
 }

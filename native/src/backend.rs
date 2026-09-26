@@ -90,13 +90,10 @@ impl BackendService {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(child) = guard.as_mut() {
                 managed_process = true;
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        exited = true;
-                        exit_code = status.code();
-                        *guard = None;
-                    }
-                    Ok(None) | Err(_) => {}
+                if let Ok(Some(status)) = child.try_wait() {
+                    exited = true;
+                    exit_code = status.code();
+                    *guard = None;
                 }
             }
         }
