@@ -1,4 +1,3 @@
-import datetime as dt
 import json
 import os
 import sqlite3
@@ -9,7 +8,7 @@ from typing import Any
 import lancedb
 import pyarrow as pa
 
-from .config import ACTIVE_VECTOR_TABLE, EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, Settings
+from .config import ACTIVE_VECTOR_TABLE, EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, Settings, embedding_config_hash
 from .schemas import LlamaServerSettings, RagSettings
 
 
@@ -602,6 +601,36 @@ def run_migrations(conn: sqlite3.Connection, settings: Settings) -> None:
         """)
         mark_migration(conn, "020_deferred_conversation_memory")
 
+    if not migration_applied(conn, "021_embedding_vector_space"):
+        add_column_if_missing(conn, "documents", "embedding_vector_space_json", "TEXT")
+        mark_migration(conn, "021_embedding_vector_space")
+    if not migration_applied(conn, "022_conversation_memory_vector_space"):
+        add_column_if_missing(conn, "conversation_memory", "text", "TEXT")
+        add_column_if_missing(conn, "conversation_memory", "embedding_config_hash", "TEXT")
+        # Legacy memories refer to the retired embedding space. The source
+        # conversations remain available, but their old retrieval memories
+        # and queued memory work are intentionally discarded on upgrade.
+        execute(conn, "DELETE FROM conversation_memory")
+        execute(conn, "DELETE FROM memory_jobs")
+        mark_migration(conn, "022_conversation_memory_vector_space")
+    if not migration_applied(conn, "023_retrieval_model_diagnostics"):
+        add_column_if_missing(conn, "retrieval_queries", "model_stack_json", "TEXT NOT NULL DEFAULT '{}'")
+        mark_migration(conn, "023_retrieval_model_diagnostics")
+
+    if not migration_applied(conn, "024_embeddinggemma2_vector_space"):
+        # A 768d legacy model is still incompatible with Gemma's 768d space.
+        execute(conn, "UPDATE documents SET stale_embedding = 1 WHERE type = 'file' AND COALESCE(embedding_config_hash, '') != ?", (embedding_config_hash(),))
+        # Saved messages survive; retrieval memories from prior models do not.
+        execute(conn, "DELETE FROM memory_jobs WHERE message_id IN (SELECT message_id FROM conversation_memory WHERE COALESCE(embedding_config_hash, '') != ?)", (embedding_config_hash(),))
+        execute(conn, "DELETE FROM conversation_memory WHERE COALESCE(embedding_config_hash, '') != ?", (embedding_config_hash(),))
+        mark_migration(conn, "024_embeddinggemma2_vector_space")
+
+    if not migration_applied(conn, "025_embeddinggemma2_q8_vector_space"):
+        execute(conn, "UPDATE documents SET stale_embedding = 1 WHERE type = 'file' AND COALESCE(embedding_config_hash, '') != ?", (embedding_config_hash(),))
+        execute(conn, "DELETE FROM memory_jobs WHERE message_id IN (SELECT message_id FROM conversation_memory WHERE COALESCE(embedding_config_hash, '') != ?)", (embedding_config_hash(),))
+        execute(conn, "DELETE FROM conversation_memory WHERE COALESCE(embedding_config_hash, '') != ?", (embedding_config_hash(),))
+        mark_migration(conn, "025_embeddinggemma2_q8_vector_space")
+
     execute(
         conn,
         "INSERT OR IGNORE INTO documents (id, path, display_name, content_hash, chunk_count, status, type) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -642,24 +671,6 @@ def upsert_chunk_fts(conn: sqlite3.Connection, chunk_id: str, doc_id: str, text:
         cursor.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
         cursor.execute("INSERT INTO chunks_fts (chunk_id, doc_id, text) VALUES (?, ?, ?)", (chunk_id, doc_id, text))
         conn.commit()
-
-
-def delete_document_fts(conn: sqlite3.Connection, doc_id: str) -> None:
-    ensure_chunks_fts(conn)
-    execute(conn, "DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
-
-
-def delete_document_hierarchy(conn: sqlite3.Connection, doc_id: str) -> None:
-    with SQLITE_LOCK:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM summary_nodes WHERE doc_id = ?", (doc_id,))
-        cursor.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
-        conn.commit()
-
-
-def clean_generated_vector_state(_settings: Settings, _lance_conn, _active_table: str = ACTIVE_VECTOR_TABLE) -> None:
-    """Compatibility hook: never back up or delete vector tables at startup."""
-    return None
 
 
 def ensure_default_settings(conn: sqlite3.Connection, settings: Settings) -> None:
@@ -1032,6 +1043,11 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
     query_id = trace["query_id"]
     no_answer = trace.get("no_answer") or {}
     subqueries = trace.get("subqueries") or []
+    model_stack = {key: trace.get(key) for key in (
+        "embedding_model_id", "embedding_model_revision", "embedding_dimension",
+        "reranker_model_id", "reranker_revision", "reranker_score_type",
+        "reranker_precision", "reranker_llama_cpp_revision", "reranker_degraded",
+    )}
     with SQLITE_LOCK:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM retrieval_candidates WHERE query_id = ?", (query_id,))
@@ -1042,9 +1058,9 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
             """
             INSERT INTO retrieval_queries (
                 id, raw_query, normalized_query, rewritten_query, retrieval_mode,
-                created_at, subqueries_json, no_answer_json, ledger_json, table_execution_json
+                created_at, subqueries_json, no_answer_json, ledger_json, table_execution_json, model_stack_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 query_id,
@@ -1057,6 +1073,7 @@ def save_retrieval_trace(conn: sqlite3.Connection, trace: dict[str, Any]) -> Non
                 json.dumps(no_answer, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(trace.get("evidence_ledger") or {}, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(trace.get("table_execution") or {}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(model_stack, ensure_ascii=False, separators=(",", ":")),
             ),
         )
         stage_map = {
@@ -1180,6 +1197,7 @@ def get_retrieval_trace(conn: sqlite3.Connection, query_id: str) -> dict[str, An
         "no_answer": json.loads(row["no_answer_json"] or "{}"),
         "evidence_ledger": json.loads(row["ledger_json"] or "{}") if "ledger_json" in row.keys() else {},
         "table_execution": json.loads(row["table_execution_json"] or "{}") if "table_execution_json" in row.keys() else {},
+        "model_stack": json.loads(row["model_stack_json"] or "{}") if "model_stack_json" in row.keys() else {},
         "latency": json.loads(latency["payload_json"] or "{}") if latency else {},
         "candidates": candidates,
         "final_context": [json.loads(item["payload_json"]) for item in context_rows],

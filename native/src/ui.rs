@@ -2090,24 +2090,6 @@ impl NativeApp {
         .detach();
     }
 
-    fn download_fixed_model(&mut self, kind: String, cx: &mut Context<Self>) {
-        let api = self.api.clone();
-        self.notify(format!("Downloading {kind}…"), yellow(), cx);
-        cx.spawn(
-            async move |this: gpui_kit::WeakEntity<NativeApp>, cx: &mut gpui_kit::AsyncApp| {
-                let result = smol::unblock(move || api.download_fixed_model(&kind)).await;
-                let _ = this.update(cx, |this, cx| match result {
-                    Ok(_) => {
-                        this.notify("Model downloaded and verified.", green(), cx);
-                        this.refresh_retrieval_status(cx);
-                    }
-                    Err(error) => this.notify(error.to_string(), red(), cx),
-                });
-            },
-        )
-        .detach();
-    }
-
     fn open_fixed_model(&mut self, kind: String, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(

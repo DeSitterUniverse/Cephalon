@@ -4,7 +4,7 @@ The normal path delegates once to the existing retriever. Thorough mode may
 perform one additional deterministic gap query when the request ledger still
 contains missing, partial, or conflicting requirements. This controller never
 calls the chat model: reformulation is lexical, and the second pass reuses the
-existing embedder, hybrid search, Jina reranker, assembly, and compression.
+existing embedder, hybrid search, reranker, assembly, and compression.
 
 The gap round has one query, a 20-second timeout, at most three novel sources,
 and at most 50 percent of the initial context's estimated tokens. Duplicate
@@ -104,7 +104,7 @@ async def retrieve_with_gap_control(
     })
     started = time.perf_counter()
     try:
-        gap_vector = await retrieval.get_embedding(app_state, gap_query)
+        gap_vector = await retrieval.get_query_embedding(app_state, gap_query)
         gap_context, gap_sources, gap_meta = await asyncio.wait_for(
             retrieval.retrieve_context(app_state, gap_query, gap_vector, gap_settings),
             timeout=GAP_TIMEOUT_SECONDS,

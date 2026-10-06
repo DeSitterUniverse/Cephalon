@@ -21,7 +21,7 @@ from cephalon_core.routes import _settings_for_retrieval_scope
 from cephalon_core.routes import documents as document_routes
 from cephalon_core.app_factory import create_app
 from cephalon_core import routes
-from cephalon_core.services import document_assets, generation, ingestion, jina_runtime, metrics, observability, pdf_parser, retrieval, table_ingestion, table_models
+from cephalon_core.services import document_assets, embedding_runtime, generation, ingestion, metrics, observability, pdf_parser, reranker_runtime, retrieval, table_ingestion, table_models
 from cephalon_core.services.memory_jobs import MemoryJobManager
 from cephalon_core.services import models
 from cephalon_core.services import documents
@@ -96,9 +96,9 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CEPHALON_MODEL_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("CEPHALON_PORT", "9999")
     monkeypatch.setenv("CEPHALON_MAX_TOKENS", "64")
-    monkeypatch.setenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan2")
-    monkeypatch.setenv("CEPHALON_EMBEDDER_GPU_LAYERS", "123")
-    monkeypatch.setenv("CEPHALON_EMBEDDER_PHYSICAL_BATCH_SIZE", "2048")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_DEVICE", "Vulkan1")
+    monkeypatch.setenv("CEPHALON_EMBEDDER_LLAMA_SERVER_BIN", str(tmp_path / "llama-server.exe"))
+    monkeypatch.setenv("CEPHALON_EMBEDDER_GPU_LAYERS", "0")
     monkeypatch.setenv("CEPHALON_CORS_ORIGINS", "http://localhost:9999,https://example.test")
 
     settings = Settings()
@@ -107,9 +107,9 @@ def test_settings_reads_environment(monkeypatch, tmp_path):
     assert settings.model_dir.endswith("models")
     assert settings.port == 9999
     assert settings.max_tokens == 64
-    assert settings.embedder_device == "Vulkan2"
-    assert settings.embedder_gpu_layers == 123
-    assert settings.embedder_physical_batch_size == 2048
+    assert settings.embedder_device == "Vulkan1"
+    assert settings.embedder_llama_server_bin == str(tmp_path / "llama-server.exe")
+    assert settings.embedder_gpu_layers == 0
     assert settings.cors_origins == ["http://localhost:9999", "https://example.test"]
 
 
@@ -207,13 +207,14 @@ def test_embedding_runtime_uses_bounded_batches(monkeypatch):
     state = SimpleNamespace(embedder=object(), embedding_batch_size=2)
     batch_sizes = []
 
-    def fake_run(_app_state, texts: list[str]):
+    def fake_run(_app_state, role: str, texts: list[str]):
+        assert role == "document"
         batch_sizes.append(len(texts))
         return [[float(index)] * 3 for index, _text in enumerate(texts)]
 
     monkeypatch.setattr(retrieval, "_run_embedding_batch", fake_run)
 
-    vectors = retrieval._get_embeddings_sync(state, ["one", "two", "three", "four", "five"])
+    vectors = retrieval._get_embeddings_sync(state, "document", ["one", "two", "three", "four", "five"])
 
     assert batch_sizes == [2, 2, 1]
     assert len(vectors) == 5
@@ -730,7 +731,7 @@ def test_process_single_file_skips_duplicate_hash(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     asyncio.run(process_single_file(state, str(file_path), RagSettings()))
@@ -834,7 +835,7 @@ def test_csv_typed_tables_round_trip_stable_ids_and_cascade(monkeypatch, tmp_pat
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     assert first["status"] == "ready"
     first_tables = table_ingestion.load_document_tables(state.sqlite, first["doc_id"])
@@ -878,7 +879,7 @@ def test_typed_table_reindex_failure_rolls_back_previous_rows(monkeypatch, tmp_p
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     original = table_ingestion.persistence_rows
     file_path.write_text("Name,Value\nnew,2\n", encoding="utf-8")
@@ -1011,7 +1012,7 @@ def test_typed_tables_flag_rolls_back_to_existing_text_index(monkeypatch, tmp_pa
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     result = asyncio.run(process_single_file(state, str(path), RagSettings()))
     assert result["status"] == "ready"
     assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM tables")["count"] == 0
@@ -1166,7 +1167,7 @@ def test_structured_pdf_ingestion_persists_source_provenance(monkeypatch, tmp_pa
     async def fake_embedding(_app_state, _text):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     chunk = storage.fetchone(
@@ -1257,7 +1258,7 @@ def test_force_text_import_allows_unknown_extension(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings(), force_text=True))
     row = storage.fetchone(state.sqlite, "SELECT extraction_mode, embedding_dim FROM documents WHERE id = ?", (result["doc_id"],))
@@ -1281,7 +1282,7 @@ def test_process_single_file_creates_parent_child_summary_metadata(monkeypatch, 
         base = float(len(text) % 7) / 10.0
         return [base] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     parents = storage.fetchall(state.sqlite, "SELECT id, summary FROM parent_chunks WHERE doc_id = ?", (result["doc_id"],))
@@ -1312,8 +1313,8 @@ def test_process_single_file_batches_final_embeddings(monkeypatch, tmp_path):
             for index, _text in enumerate(texts)
         ]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embeddings", fake_embeddings)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embeddings", fake_embeddings)
 
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
 
@@ -1327,8 +1328,8 @@ def test_semantic_child_chunking_does_not_embed_each_sentence(monkeypatch):
     async def unexpected_embedding(*_args, **_kwargs):
         raise AssertionError("Chunk boundary selection should not invoke the embedder.")
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embeddings", unexpected_embedding)
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", unexpected_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embeddings", unexpected_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", unexpected_embedding)
     text = "First sentence has enough words to be a real unit. Second sentence is another separate unit. Third sentence completes the test."
 
     chunks = asyncio.run(ingestion.build_semantic_child_chunks(state, text, RagSettings()))
@@ -1348,7 +1349,7 @@ def test_process_single_file_reports_stage_progress(monkeypatch, tmp_path):
     async def report(stage: str, percent: int):
         progress.append((stage, percent))
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     result = asyncio.run(
         process_single_file(
             state,
@@ -1376,7 +1377,7 @@ def test_unknown_text_file_imports_without_force_text(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     row = storage.fetchone(state.sqlite, "SELECT status, extraction_mode FROM documents WHERE id = ?", (result["doc_id"],))
@@ -1611,7 +1612,7 @@ def test_retrieval_uses_sqlite_fts_dense_and_rrf(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     context, sources, meta = asyncio.run(
         retrieval.retrieve_context(state, "sqlite lexical search", [0.0] * storage.active_embedding_metadata()["embedding_dim"], RagSettings())
@@ -1672,7 +1673,7 @@ def test_hydrate_sources_adds_structured_provenance():
     assert retrieval.source_location_label(sources[0]) == "page 7-8 | Experimental Results | table"
 
 
-def test_reranker_uses_jina_v35_listwise_indices(monkeypatch):
+def test_reranker_uses_jina_candidate_indices(monkeypatch):
     state = SimpleNamespace(
         rerank_cache=OrderedDict(),
         reranker_runtime_status={},
@@ -1682,12 +1683,12 @@ def test_reranker_uses_jina_v35_listwise_indices(monkeypatch):
     def fake_listwise(_state, query, documents):
         calls.append((query, documents))
         return [
-            {"index": 2, "relevance_score": 0.92},
-            {"index": 0, "relevance_score": 0.61},
-            {"index": 1, "relevance_score": -0.08},
+            {"index": 2, "score": 0.92},
+            {"index": 0, "score": 0.61},
+            {"index": 1, "score": 0.08},
         ]
 
-    monkeypatch.setattr(jina_runtime, "rerank", fake_listwise)
+    monkeypatch.setattr(reranker_runtime, "rerank", fake_listwise)
     results = [
         {"id": "a", "text": "first candidate", "score": 0.0},
         {"id": "b", "text": "second candidate", "score": 0.0},
@@ -1700,6 +1701,21 @@ def test_reranker_uses_jina_v35_listwise_indices(monkeypatch):
     assert [item["id"] for item in ranked] == ["c", "a", "b"]
     assert ranked[0]["listwise_rank"] == 1
     assert ranked[0]["reranker_raw_score"] == 0.92
+
+
+def test_unavailable_jina_is_explicitly_degraded_without_old_fallback(monkeypatch):
+    state = SimpleNamespace(rerank_cache=OrderedDict(), reranker_runtime_status={})
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("Jina worker unavailable")
+
+    monkeypatch.setattr(reranker_runtime, "rerank", unavailable)
+    rows = [{"id": "a", "text": "alpha", "score": 0.3}, {"id": "b", "text": "beta", "score": 0.2}]
+    result = retrieval.rerank(state, "alpha", rows)
+
+    assert len(result) == 2
+    assert all(row["rerank_score"] is None and row["reranker_raw_score"] is None for row in result)
+    assert state.reranker_runtime_status == {"status": "error", "last_failure": "Jina worker unavailable"}
 
 
 def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatch):
@@ -1726,7 +1742,7 @@ def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatc
     monkeypatch.setattr(retrieval, "rerank", fake_rerank)
     monkeypatch.setattr(retrieval.metrics, "append_retrieval_event", lambda *_args, **_kwargs: None)
 
-    _context, _sources, meta = asyncio.run(retrieval.retrieve_context(state, "question", [0.0] * 768, RagSettings(top_k=2, rerank_top_n=2)))
+    _context, _sources, meta = asyncio.run(retrieval.retrieve_context(state, "question", [0.0] * storage.active_embedding_metadata()["embedding_dim"], RagSettings(top_k=2, rerank_top_n=2)))
 
     assert rerank_calls == [[f"chunk-{index}" for index in range(7)]]
     assert len(meta["trace"]["reranked_candidates"]) == 7
@@ -1734,47 +1750,201 @@ def test_retrieval_submits_every_fused_candidate_to_listwise_reranker(monkeypatc
     assert meta["trace"]["reranked_candidates"][0]["listwise_rank"] == 1
 
 
-def test_reranker_verification_requires_and_compares_gguf_assets(monkeypatch, tmp_path):
+def test_reranker_verification_checks_pinned_snapshot(tmp_path, monkeypatch):
+    import json
+    from cephalon_core.config import RERANKER_MODEL_ID, RERANKER_REPO, RERANKER_REVISION, RERANKER_PACKAGES, RERANKER_PRECISION
     model_dir = tmp_path / "reranker"
     model_dir.mkdir()
     state = build_memory_state()
     state.settings.reranker_model_dir = str(model_dir)
-    files = {
-        jina_runtime.RERANKER_GGUF_FILE: b"gguf",
-        jina_runtime.RERANKER_PROJECTOR_FILE: b"projector",
-        jina_runtime.RERANKER_TOKENIZER_FILE: b"tokenizer",
+    names = [*reranker_runtime.RERANKER_FILE_SHA256, reranker_runtime.WORKER_FILE]
+    for name in names:
+        (model_dir / name).write_bytes(name.encode())
+    files = {name: reranker_runtime._hash(model_dir / name) for name in names}
+    monkeypatch.setattr(reranker_runtime, "RERANKER_FILE_SHA256", {name: files[name] for name in names[:-1]})
+    monkeypatch.setattr(reranker_runtime, "RERANKER_WORKER_SHA256", files[names[-1]])
+    manifest = {
+        "model_id": RERANKER_MODEL_ID, "repo": RERANKER_REPO, "revision": RERANKER_REVISION,
+        "precision": RERANKER_PRECISION, "packages": RERANKER_PACKAGES, "files": files,
     }
-    for filename, content in files.items():
-        (model_dir / filename).write_bytes(content)
-    monkeypatch.setattr(
-        jina_runtime,
-        "RERANKER_FILE_SHA256",
-        {filename: jina_runtime._sha256(model_dir / filename) for filename in files},
-    )
-
-    assert jina_runtime.verify_model(state, "reranker")["verified"] is True
-    assert jina_runtime.verify_model(state, "reranker")["verified_backend"] == "gguf_vulkan"
-    (model_dir / jina_runtime.RERANKER_GGUF_FILE).write_bytes(b"tampered")
-    invalid = jina_runtime.verify_model(state, "reranker")
-
+    manifest_path = model_dir / reranker_runtime.MANIFEST_FILE
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert reranker_runtime.verify_model(state)["verified"] is True
+    assert reranker_runtime.verify_model(state)["selected_backend"] == "llama_cpp_vulkan"
+    (model_dir / names[0]).write_bytes(b"tampered")
+    invalid = reranker_runtime.verify_model(state)
     assert invalid["verified"] is False
-    assert f"mismatch for {jina_runtime.RERANKER_GGUF_FILE}" in invalid["error"]
+    assert "checksum mismatch" in invalid["error"]
+    # Rewriting the manifest cannot bless substituted weights.
+    manifest["files"][names[0]] = reranker_runtime._hash(model_dir / names[0])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert reranker_runtime.verify_model(state)["verified"] is False
 
 
-def test_reranker_backend_never_selects_a_cpu_fallback(monkeypatch):
-    settings = SimpleNamespace(
-        reranker_backend="transformers",
-        reranker_llama_embedding_bin="missing-llama-embedding.exe",
+def test_reranker_requires_isolated_python_without_tensor_runtime(monkeypatch):
+    state = build_memory_state()
+    state.settings.reranker_python_bin = ""
+    monkeypatch.setattr(reranker_runtime, "verify_model", lambda _state: {"verified": True})
+    reranker_runtime.start(state)
+    assert state.reranker_runtime_status["status"] == "error"
+    assert "isolated Jina Python" in state.reranker_runtime_status["last_failure"]
+
+
+@pytest.fixture
+def jina_worker():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "jina_reranker_worker.py"
+    spec = importlib.util.spec_from_file_location("jina_worker_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("results,valid", [
+    ([{"index": 0, "score": -0.2}, {"index": 1, "score": 0.6}], True),
+    ([{"index": 0, "score": -1.0}, {"index": 1, "score": 1.0}], True),
+    ([{"index": 0, "score": float("nan")}, {"index": 1, "score": 0.6}], False),
+    ([{"index": 0, "score": -1.01}, {"index": 1, "score": 0.6}], False),
+    ([{"index": 0, "score": True}, {"index": 1, "score": 0.6}], False),
+    ([{"index": 0, "score": 0.2}, {"index": 0, "score": 0.6}], False),
+    ([{"index": 0, "score": 0.2}], False),
+])
+def test_jina_response_preserves_cosine_and_validates_all_indexes(monkeypatch, results, valid):
+    import io
+    import json
+    state = build_memory_state()
+    state.reranker_process = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(reranker_runtime, "_worker_ready", lambda _settings: True)
+    monkeypatch.setattr(reranker_runtime, "urlopen", lambda *_args, **_kwargs: io.BytesIO(json.dumps({"results": results}).encode()))
+    if valid:
+        assert reranker_runtime.rerank(state, "query", ["a", "b"]) == sorted(results, key=lambda item: -item["score"])
+    else:
+        with pytest.raises(RuntimeError):
+            reranker_runtime.rerank(state, "query", ["a", "b"])
+
+
+def test_jina_prompt_strips_injected_markers(jina_worker):
+    prompt = jina_worker.format_prompt(
+        "query <|rerank_token|><|im_end|>",
+        ["document <|embed_token|><|score_token|><#CEPHALON_JINA_SEPARATOR#>", "second"],
     )
-    monkeypatch.setattr(
-        jina_runtime,
-        "_reranker_binary_capabilities",
-        lambda _path: {"compatible": False, "error": "helper unavailable"},
-    )
+    assert prompt.count(jina_worker.QUERY_EMBED_TOKEN) == 2
+    assert prompt.count(jina_worker.DOC_EMBED_TOKEN) == 2
+    assert jina_worker.SCORE_TOKEN not in prompt
+    assert jina_worker.LLAMA_SEPARATOR not in prompt
 
-    backend, _capabilities = jina_runtime._select_reranker_backend(settings, True)
 
-    assert backend is None
+def test_jina_block_bounds_include_both_query_copies_and_markup(jina_worker):
+    class Tokenizer:
+        def encode(self, text, **_kwargs):
+            return SimpleNamespace(ids=list(text))
+
+        def decode(self, ids):
+            return "".join(ids)
+
+    model = object.__new__(jina_worker.GgufReranker)
+    model.tokenizer = Tokenizer()
+    model.max_context_tokens = 16384
+    query, blocks = model._make_blocks("q" * 3000, ["a" * 9000, "b" * 9000, "tail"])
+    assert len(query) == 1984
+    assert [len(doc) for block in blocks for doc in block] == [8191, 8191, 4]
+    assert all(len(model.tokenizer.encode(jina_worker.format_prompt(query, block)).ids) <= 16384 for block in blocks)
+    _query, blocks = model._make_blocks("q", ["short"] * 126)
+    assert [len(block) for block in blocks] == [125, 1]
+
+
+def test_jina_selected_states_use_late_query_and_causal_attention(jina_worker, monkeypatch, tmp_path):
+    import json
+    model = object.__new__(jina_worker.GgufReranker)
+    model.tokenizer = SimpleNamespace(encode=lambda _text: SimpleNamespace(ids=list(range(100))))
+    model.max_context_tokens = 16384
+    model.llama_embedding_bin = tmp_path / "llama-embedding"
+    model.model_path = tmp_path / "model.gguf"
+    model.device, model.gpu_layers = "Vulkan0", 99
+    model.projector = lambda values: values[:, :512]
+    compact = np.zeros((4, 1024), dtype=np.float32)
+    compact[:, 0] = [-1, 1, -1, 1]  # early query, doc 0, doc 1, late query
+    commands = []
+
+    def helper(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout=json.dumps({"data": [{"embedding": row.tolist()} for row in compact]}), stderr="")
+
+    monkeypatch.setattr(jina_worker.subprocess, "run", helper)
+    documents, query, weight = model._score_block("query", ["first", "second"])
+    assert jina_worker._cosine_scores(documents, query).tolist() == [1.0, -1.0]
+    assert weight == 1.0
+    command = commands[0]
+    assert command[command.index("--attention") + 1] == "causal"
+    assert command[command.index("--output-token-ids") + 1] == "151670,151671"
+    assert command[command.index("--pooling") + 1] == "none"
+    assert command[command.index("--embd-normalize") + 1] == "-1"
+    compact[1, 0] = float("nan")
+    with pytest.raises(RuntimeError, match="non-finite"):
+        model._score_block("query", ["first", "second"])
+
+
+def test_jina_projector_loads_bf16_without_torch(jina_worker, tmp_path):
+    import json
+    import struct
+    first = np.zeros((512, 1024), dtype=np.float32)
+    second = np.zeros((512, 512), dtype=np.float32)
+    first[0, 0], second[0, 0] = 1.5, 2.0
+    payload, header = b"", {}
+    for name, matrix in [("projector.0.weight", first), ("projector.2.weight", second)]:
+        data = (matrix.view(np.uint32) >> 16).astype("<u2").tobytes()
+        header[name] = {"dtype": "BF16", "shape": list(matrix.shape), "data_offsets": [len(payload), len(payload) + len(data)]}
+        payload += data
+    encoded = json.dumps(header).encode()
+    path = tmp_path / "projector.safetensors"
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + payload)
+    projector = jina_worker.load_projector(path)
+    values = np.zeros((2, 1024), dtype=np.float32)
+    values[:, 0] = [2.0, -2.0]
+    assert projector(values)[:, 0].tolist() == [6.0, 0.0]
+
+
+def test_jina_block_query_fusion_preserves_global_indexes(jina_worker, monkeypatch):
+    model = object.__new__(jina_worker.GgufReranker)
+    monkeypatch.setattr(model, "_make_blocks", lambda *_args: ("query", [["a", "b"], ["c"]]))
+    outputs = iter([
+        (np.array([[1.0, 0.0], [0.0, 1.0]]), np.array([1.0, 0.0]), 0.75),
+        (np.array([[1.0, 1.0]]), np.array([0.0, 1.0]), 0.25),
+    ])
+    monkeypatch.setattr(model, "_score_block", lambda *_args: next(outputs))
+    results = model.rerank("query", ["a", "b", "c"])
+    assert [item["index"] for item in results] == [0, 2, 1]
+    expected = np.array([0.75, 1.0 / np.sqrt(2), 0.25]) / np.sqrt(0.75 ** 2 + 0.25 ** 2)
+    assert np.allclose([item["score"] for item in results], expected)
+
+
+def test_jina_runtime_rejects_wrong_pr_head_and_changed_binary(monkeypatch, tmp_path):
+    import json
+    executable = tmp_path / "llama-embedding.exe"
+    executable.write_bytes(b"helper")
+    manifest_path = tmp_path / "cephalon-runtime-manifest.json"
+    manifest = {"source_commit": "old-head", "backend": "vulkan", "files": {executable.name: reranker_runtime._hash(executable)}}
+    manifest_path.write_text(json.dumps(manifest))
+    settings = SimpleNamespace(reranker_llama_embedding_bin=str(executable))
+    with pytest.raises(RuntimeError, match="PR #26286"):
+        reranker_runtime.verify_runtime(settings)
+    manifest["source_commit"] = reranker_runtime.RERANKER_LLAMA_CPP_REVISION
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(reranker_runtime, "_runtime_version", lambda *_args: "version (build 1, commit 491219a)")
+    reranker_runtime.verify_runtime(settings)
+    executable.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="checksum"):
+        reranker_runtime.verify_runtime(settings)
+
+
+def test_jina_cache_distinguishes_query_case_and_block_context():
+    rows = [{"id": "a", "text": "candidate"}]
+    settings = Settings()
+    original = retrieval._rerank_cache_key("Query", rows, settings)
+    assert retrieval._rerank_cache_key("query", rows, settings) != original
+    settings.reranker_max_context_tokens = 16384
+    assert retrieval._rerank_cache_key("Query", rows, settings) != original
 
 
 def test_pdf_asset_transaction_deduplicates_repeated_content_addressed_asset(tmp_path):
@@ -1833,17 +2003,262 @@ def test_embedder_calls_dedicated_server_in_one_batch(monkeypatch):
     calls = []
     state.retrieval_error = None
 
-    def fake_embed(_state, texts):
+    def fake_embed(_state, role, texts):
+        assert role == "document"
         calls.append(list(texts))
         return [[float(index + 1)] * state.embedding_dim for index, _ in enumerate(texts)]
 
-    monkeypatch.setattr(jina_runtime, "embed", fake_embed)
+    monkeypatch.setattr(embedding_runtime, "embed", fake_embed)
 
-    vectors = asyncio.run(retrieval.get_embeddings(state, ["first", "second", "third"]))
+    vectors = asyncio.run(retrieval.get_document_embeddings(state, ["first", "second", "third"]))
 
     assert calls == [["first", "second", "third"]]
     assert len(vectors) == 3
     assert vectors[1][0] == pytest.approx(1 / np.sqrt(state.embedding_dim))
+
+
+def test_query_and_passage_embeddings_have_separate_cache_entries(monkeypatch):
+    state = build_memory_state()
+    state.embedding_dim = storage.active_embedding_metadata()["embedding_dim"]
+    state.retrieval_error = None
+    calls = []
+
+    def fake_embed(_state, role, texts):
+        calls.append((role, list(texts)))
+        return [[1.0 if role == "query" else -1.0] * state.embedding_dim for _ in texts]
+
+    monkeypatch.setattr(embedding_runtime, "embed", fake_embed)
+    query = asyncio.run(retrieval.get_query_embedding(state, "relativity"))
+    passage = asyncio.run(retrieval.get_document_embedding(state, "relativity"))
+    cached = asyncio.run(retrieval.get_query_embedding(state, "relativity"))
+
+    assert calls == [("query", ["relativity"]), ("document", ["relativity"])]
+    assert len(query) == len(passage) == state.embedding_dim
+    assert query[0] > 0 and passage[0] < 0
+    assert cached == query
+    assert np.linalg.norm(query) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_embeddinggemma_prompts_are_role_specific():
+    assert embedding_runtime.PROMPTS == {"query": "task: search result | query: ", "document": "title: none | text: "}
+
+
+def _embeddinggemma_snapshot(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from cephalon_core.config import embedding_vector_space
+    files = {}
+    for name in (embedding_runtime.EMBEDDER_MODEL_FILE,):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+        files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(embedding_runtime, "EMBEDDING_GGUF_SHA256", files[embedding_runtime.EMBEDDER_MODEL_FILE])
+    manifest = {"vector_space": embedding_vector_space(), "gguf_repo": embedding_runtime.EMBEDDING_GGUF_REPO, "gguf_revision": embedding_runtime.EMBEDDING_GGUF_REVISION, "files": files}
+    (tmp_path / embedding_runtime.MANIFEST_FILE).write_text(json.dumps(manifest), encoding="utf-8")
+    state = build_memory_state()
+    state.settings.embedder_model_dir = str(tmp_path)
+    return state, manifest
+
+
+def test_embeddinggemma_manifest_verifies_pinned_gguf_bytes(tmp_path, monkeypatch):
+    state, _manifest = _embeddinggemma_snapshot(tmp_path, monkeypatch)
+    assert embedding_runtime.verify_model(state)["verified"]
+    (tmp_path / embedding_runtime.EMBEDDER_MODEL_FILE).write_text("changed", encoding="utf-8")
+    result = embedding_runtime.verify_model(state)
+    assert not result["verified"]
+    assert embedding_runtime.EMBEDDER_MODEL_FILE in result["error"]
+
+
+def test_embeddinggemma_rejects_same_dimension_legacy_vector_space(tmp_path, monkeypatch):
+    import json
+    state, manifest = _embeddinggemma_snapshot(tmp_path, monkeypatch)
+    manifest["vector_space"]["model_id"] = "legacy-768d-model"
+    (tmp_path / embedding_runtime.MANIFEST_FILE).write_text(json.dumps(manifest), encoding="utf-8")
+    assert not embedding_runtime.verify_model(state)["verified"]
+
+
+def test_embeddinggemma_ready_checks_gguf_identity_and_context(monkeypatch, tmp_path):
+    state, _manifest = _embeddinggemma_snapshot(tmp_path, monkeypatch)
+    identity = {
+        "model_alias": embedding_runtime.MODEL_ALIAS, "model_ftype": "Q8_0",
+        "modalities": {"vision": False, "video": False, "audio": False},
+        "default_generation_settings": {"n_ctx": 8192}, "total_slots": 1,
+        "model_path": str(tmp_path / embedding_runtime.EMBEDDER_MODEL_FILE),
+    }
+    monkeypatch.setattr(embedding_runtime, "_get", lambda _url, endpoint: {"status": "ok"} if endpoint == "/health" else identity)
+    assert embedding_runtime._server_ready(state.settings)
+    for field, wrong in [("model_alias", "other"), ("model_ftype", "BF16"), ("model_path", "other.gguf"), ("total_slots", 4), ("default_generation_settings", {"n_ctx": 2048}), ("modalities", {"vision": True})]:
+        original = identity[field]
+        identity[field] = wrong
+        assert not embedding_runtime._server_ready(state.settings)
+        identity[field] = original
+
+
+@pytest.mark.parametrize("bad_data", [
+    [{"index": 0, "embedding": [1.0] * 2048}],
+    [{"index": 1, "embedding": [1.0] * 768}],
+    [{"index": 0, "embedding": [float("nan")] * 768}],
+    [{"index": 0, "embedding": [True] * 768}],
+    [{"index": 0, "embedding": [0.0] * 768}],
+])
+def test_embeddinggemma_rejects_invalid_worker_vectors(monkeypatch, bad_data):
+    state = build_memory_state()
+    monkeypatch.setattr(embedding_runtime, "_server_ready", lambda _settings: True)
+    monkeypatch.setattr(embedding_runtime, "_post", lambda _settings, endpoint, _payload: {"tokens": [1, 2]} if endpoint == "/tokenize" else {"data": bad_data})
+    with pytest.raises(RuntimeError):
+        embedding_runtime.embed(state, "query", ["test"])
+
+
+def test_embeddinggemma_gguf_uses_role_prompts_and_preserves_batch_order(monkeypatch):
+    state = build_memory_state()
+    calls = []
+    monkeypatch.setattr(embedding_runtime, "_server_ready", lambda _settings: True)
+    def respond(_settings, endpoint, payload):
+        calls.append((endpoint, payload))
+        if endpoint == "/tokenize":
+            return {"tokens": [1, 2, 3]}
+        return {"data": [{"index": 1, "embedding": [-1.0] * 768}, {"index": 0, "embedding": [1.0] * 768}]}
+    monkeypatch.setattr(embedding_runtime, "_post", respond)
+    for role in ("query", "document"):
+        calls.clear()
+        vectors = embedding_runtime.embed(state, role, ["one", "two"])
+        assert [vector[0] for vector in vectors] == [1.0, -1.0]
+        assert [payload["content"] for endpoint, payload in calls if endpoint == "/tokenize"] == [embedding_runtime.PROMPTS[role] + "one", embedding_runtime.PROMPTS[role] + "two"]
+        assert calls[-1][1]["input"] == [[1, 2, 3], [1, 2, 3]]
+
+
+def test_embeddinggemma_truncates_token_arrays_before_inference(monkeypatch):
+    state = build_memory_state()
+    monkeypatch.setattr(embedding_runtime, "_server_ready", lambda _settings: True)
+    def respond(_settings, endpoint, payload):
+        if endpoint == "/tokenize":
+            assert payload["add_special"] is True and payload["parse_special"] is False
+            return {"tokens": list(range(9000))}
+        assert payload["input"] == [list(range(8192))]
+        return {"data": [{"index": 0, "embedding": [1.0] * 768}]}
+    monkeypatch.setattr(embedding_runtime, "_post", respond)
+    assert len(embedding_runtime.embed(state, "query", ["long"])[0]) == 768
+
+
+def test_embeddinggemma_q8_command_retains_full_bidirectional_sequence():
+    from cephalon_core.config import ACTIVE_VECTOR_TABLE, embedding_vector_space
+    command = embedding_runtime.server_command(Settings())
+    for option in ("--ctx-size", "--batch-size", "--ubatch-size"):
+        assert command[command.index(option) + 1] == "8192"
+    assert command[command.index("--parallel") + 1] == "1"
+    assert command[command.index("--flash-attn") + 1] == "on"
+    assert command[command.index("--pooling") + 1] == "mean"
+    assert "--offline" in command and "--no-mmproj" in command
+    assert "q8_0" in ACTIVE_VECTOR_TABLE
+    assert embedding_vector_space()["quantization"] == "Q8_0"
+
+
+def test_embedder_rejects_unexpected_service_on_its_port(monkeypatch):
+    state = build_memory_state()
+    monkeypatch.setattr(embedding_runtime, "verify_model", lambda _state: {"verified": True})
+    monkeypatch.setattr(embedding_runtime, "_server_ready", lambda _settings: False)
+    monkeypatch.setattr(embedding_runtime, "_port_occupied", lambda _port: True)
+
+    embedding_runtime.start(state)
+
+    assert "Another service occupies" in state.retrieval_error
+    assert state.embedder_process is None
+
+
+def test_embeddinggemma_start_isolates_chat_environment_and_stops_owned_process(monkeypatch, tmp_path):
+    state = build_memory_state()
+    binary = tmp_path / "llama-server.exe"
+    binary.write_bytes(b"test binary")
+    state.settings.embedder_llama_server_bin = str(binary)
+    state.settings.data_dir = str(tmp_path)
+    monkeypatch.setattr(embedding_runtime, "verify_model", lambda _state: {"verified": True})
+    monkeypatch.setattr(embedding_runtime, "_port_occupied", lambda _port: False)
+    monkeypatch.setattr(embedding_runtime, "_runtime_version", lambda *_args: "build 11456")
+    monkeypatch.setenv("LLAMA_ARG_MODEL", "chat-model.gguf")
+    monkeypatch.setenv("LLAMA_ARG_PORT", "8080")
+    monkeypatch.setenv("LLAMA_API_KEY", "chat-key")
+    process = SimpleNamespace(pid=123, terminated=False)
+    process.poll = lambda: 0 if process.terminated else None
+    process.terminate = lambda: setattr(process, "terminated", True)
+    process.wait = lambda **_kwargs: 0
+    def spawn(command, **kwargs):
+        assert not any(name.startswith("LLAMA_ARG_") or name == "LLAMA_API_KEY" for name in kwargs["env"])
+        assert command == embedding_runtime.server_command(state.settings)
+        return process
+    monkeypatch.setattr(embedding_runtime.subprocess, "Popen", spawn)
+    embedding_runtime.start(state)
+    assert state.retrieval_error is None and state.embedder_process_owned
+    embedding_runtime.stop(state)
+    assert process.terminated and not state.embedder_process_owned
+
+
+def test_embeddinggemma_rejects_an_older_llama_build(monkeypatch, tmp_path):
+    binary = str(tmp_path / "old-server.exe")
+    monkeypatch.setattr(embedding_runtime.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="version: build 10975", stderr=""))
+    with pytest.raises(ValueError, match="b11456"):
+        embedding_runtime._runtime_version(binary, 1, 1)
+
+
+def test_upgrade_discards_legacy_memory_but_preserves_conversation():
+    state = build_memory_state()
+    storage.execute(state.sqlite, "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('c1', 'Test', 1, 2)")
+    storage.execute(state.sqlite, "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES ('u1', 'c1', 'user', 'What is Aurora?', 1)")
+    storage.execute(state.sqlite, "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES ('a1', 'c1', 'assistant', 'Aurora is a launch.', 2)")
+    storage.execute(state.sqlite, "INSERT INTO conversation_memory (id, conversation_id, message_id, created_at) VALUES ('mem_a1', 'c1', 'a1', 2)")
+    storage.execute(state.sqlite, "INSERT INTO memory_jobs (message_id, conversation_id, prompt) VALUES ('a1', 'c1', 'What is Aurora?')")
+    storage.execute(state.sqlite, "DELETE FROM schema_migrations WHERE version = '022_conversation_memory_vector_space'")
+
+    storage.run_migrations(state.sqlite, state.settings)
+
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM conversation_memory")["count"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS count FROM memory_jobs")["count"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT content FROM messages WHERE id = 'a1'")["content"] == "Aurora is a launch."
+    assert storage.fetchone(state.sqlite, "SELECT title FROM conversations WHERE id = 'c1'")["title"] == "Test"
+
+
+def test_embeddinggemma_q8_upgrade_marks_bf16_documents_and_preserves_chat():
+    import hashlib
+    import json
+    from cephalon_core.config import EMBEDDING_MODEL_ID, embedding_config_hash, embedding_vector_space
+    state = build_memory_state()
+    storage.execute(state.sqlite, "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('c1', 'Saved', 1, 2)")
+    storage.execute(state.sqlite, "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES ('a1', 'c1', 'assistant', 'Saved answer', 2)")
+    storage.execute(state.sqlite, "INSERT INTO conversation_memory (id, conversation_id, message_id, text, embedding_config_hash, created_at) VALUES ('old-memory', 'c1', 'a1', 'Old memory', 'old-space', 2)")
+    storage.execute(state.sqlite, "INSERT INTO memory_jobs (message_id, conversation_id, prompt) VALUES ('a1', 'c1', 'Old query')")
+    bf16_space = embedding_vector_space()
+    bf16_space["quantization"] = "BF16"
+    bf16_hash = hashlib.sha256(json.dumps(bf16_space, sort_keys=True).encode()).hexdigest()
+    for doc_id, model, config_hash in [("old-768", EMBEDDING_MODEL_ID, bf16_hash), ("new-768", EMBEDDING_MODEL_ID, embedding_config_hash())]:
+        storage.execute(state.sqlite, "INSERT INTO documents (id, path, content_hash, type, status, embedding_model_id, embedding_dim, embedding_config_hash, stale_embedding) VALUES (?, ?, 'content', 'file', 'ready', ?, 768, ?, 0)", (doc_id, doc_id + '.txt', model, config_hash))
+    storage.execute(state.sqlite, "DELETE FROM schema_migrations WHERE version = '025_embeddinggemma2_q8_vector_space'")
+    storage.run_migrations(state.sqlite, state.settings)
+    assert storage.fetchone(state.sqlite, "SELECT stale_embedding FROM documents WHERE id = 'old-768'")["stale_embedding"] == 1
+    assert storage.fetchone(state.sqlite, "SELECT stale_embedding FROM documents WHERE id = 'new-768'")["stale_embedding"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS n FROM conversation_memory")["n"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT COUNT(*) AS n FROM memory_jobs")["n"] == 0
+    assert storage.fetchone(state.sqlite, "SELECT content FROM messages WHERE id = 'a1'")["content"] == "Saved answer"
+    assert storage.fetchone(state.sqlite, "SELECT 1 FROM schema_migrations WHERE version = '022_conversation_memory_vector_space'") is not None
+
+
+def test_partial_reindex_queries_only_current_documents():
+    state = build_memory_state()
+    state.reindex_required = True
+    for doc_id, stale in (("current-doc", 0), ("old-doc", 1)):
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO documents (id, path, display_name, content_hash, chunk_count, status, type, stale_embedding) VALUES (?, ?, ?, 'hash', 1, 'ready', 'file', ?)",
+            (doc_id, f"{doc_id}.txt", doc_id, stale),
+        )
+        storage.execute(
+            state.sqlite,
+            "INSERT INTO chunks (id, doc_id, chunk_index, text) VALUES (?, ?, 0, 'aurora launch')",
+            (f"{doc_id}-chunk", doc_id),
+        )
+        storage.upsert_chunk_fts(state.sqlite, f"{doc_id}-chunk", doc_id, "aurora launch")
+
+    assert routes._retrieval_index_unavailable(state) is False
+    assert [row["doc_id"] for row in retrieval._lexical_search(state, "aurora launch", 10)] == ["current-doc"]
 
 
 def test_context_compressor_keeps_relevant_cited_sentences():
@@ -2006,7 +2421,7 @@ def test_delete_document_rows_cleans_sqlite_fts(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     result = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     delete_document_vectors(state, result["doc_id"])
     delete_document_rows(state, result["doc_id"])
@@ -2024,7 +2439,7 @@ def test_job_manager_lifecycle_and_events(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
 
     async def run_job():
         job = await manager.enqueue_ingest(str(file_path))
@@ -2085,7 +2500,7 @@ def test_reindex_preserves_display_name_and_tags(monkeypatch, tmp_path):
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     storage.execute(state.sqlite, "UPDATE documents SET display_name = ? WHERE id = ?", ("Renamed Fixture", first["doc_id"]))
     storage.execute(state.sqlite, "INSERT INTO document_tags (doc_id, tag) VALUES (?, ?)", (first["doc_id"], "rag"))
@@ -2116,7 +2531,7 @@ def test_failed_reindex_keeps_previous_searchable_chunks(monkeypatch, tmp_path):
     async def good_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", good_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", good_embedding)
     first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     original_chunks = [row["text"] for row in storage.fetchall(state.sqlite, "SELECT text FROM chunks WHERE doc_id = ?", (first["doc_id"],))]
     file_path.write_text("Replacement content that fails.", encoding="utf-8")
@@ -2124,7 +2539,7 @@ def test_failed_reindex_keeps_previous_searchable_chunks(monkeypatch, tmp_path):
     async def failed_embedding(_app_state, _text: str):
         raise RuntimeError("embedding failed")
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", failed_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", failed_embedding)
 
     async def run_job():
         job = await manager.enqueue_ingest(str(file_path), kind="reindex", target_doc_id=first["doc_id"])
@@ -2148,7 +2563,7 @@ def test_failed_vector_replacement_rolls_back_reindex_rows(monkeypatch, tmp_path
     async def fake_embedding(_app_state, _text: str):
         return [0.0] * storage.active_embedding_metadata()["embedding_dim"]
 
-    monkeypatch.setattr("cephalon_core.services.ingestion.get_embedding", fake_embedding)
+    monkeypatch.setattr("cephalon_core.services.ingestion.get_document_embedding", fake_embedding)
     first = asyncio.run(process_single_file(state, str(file_path), RagSettings()))
     original_chunks = [
         row["text"]

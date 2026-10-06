@@ -4,7 +4,7 @@ import httpx
 
 
 BASE_URL = os.getenv("CEPHALON_TEST_BASE_URL", "http://127.0.0.1:8765")
-MODEL = os.getenv("CEPHALON_TEST_MODEL", "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf")
+MODEL = os.getenv("CEPHALON_TEST_MODEL", "External llama.cpp server")
 
 
 def main():

@@ -4,7 +4,7 @@ Cephalon indexes extractive parent summaries and child chunks in LanceDB while
 retaining document structure in SQLite. A request follows this bounded path:
 
 ```text
-question -> dense + FTS5 retrieval -> RRF -> Jina v3.5 rerank
+question -> EmbeddingGemma 2 dense + FTS5 retrieval -> RRF -> Jina v3.5 rerank
          -> optional validated table plan + deterministic execution
          -> hierarchical context assembly -> compression -> generation
          -> citation and claim diagnostics
@@ -12,7 +12,7 @@ question -> dense + FTS5 retrieval -> RRF -> Jina v3.5 rerank
 
 ```mermaid
 flowchart TD
-  Q[Question] --> H[Hybrid retrieval and Jina rerank]
+  Q[Question] --> H[Hybrid retrieval and Jina v3.5 rerank]
   H --> C[Hierarchy, layout, coverage, ledger]
   C --> E{Response effort}
   E -->|Quick or Balanced| G[One generation completion]
@@ -27,7 +27,13 @@ flowchart TD
   P --> F
 ```
 
-The Jina reranker is an external llama.cpp Vulkan service. Retrieval and
+EmbeddingGemma 2 Text 270M Q8_0 runs in its own managed llama.cpp Vulkan server,
+with mean pooling, normalized 768-dimensional vectors, role-specific prompts,
+and one 8192-token slot. Tokenization and truncation use the GGUF tokenizer.
+The Q8 vector table and cache fingerprint are separate from earlier precision
+and model configurations. The embedder uses no Transformers/PyTorch worker.
+
+The Jina v3.5 reranker uses an isolated NumPy/tokenizers worker and a Vulkan `llama-embedding` helper built from PR #26286 commit `491219a2bfa0a5a51acfc6a233bea911515b2134`. It applies the separate FP32 scoring projector to selected document and query hidden states, then fuses block queries and returns cosine scores in [-1, 1]. It loads no Transformers or PyTorch model. Retrieval and
 context assembly do not load a chat model; the selected chat model is required
 only for answer generation and later model-assisted verification.
 
@@ -44,7 +50,7 @@ for the complete schema, limits, and rollback contract.
 
 At request time, recognizable table questions may produce a validated
 `TablePlan`. The executor reads only bound table IDs and numeric column indexes
-through application-owned statements. Safe results join—not replace—the hybrid
+through application-owned statements. Safe results joinâ€”not replaceâ€”the hybrid
 context, then participate in compression and the evidence ledger. B3 promotes
 result provenance to the public source contract: table identity/location,
 exact result cells, verification-only cells, header cells, cell values and
@@ -119,7 +125,7 @@ therefore remains partial or missing for the gap controller.
 
 ## Coverage-aware selection and compression
 
-`services/coverage_selection.py` greedily chooses from Jina's reranked list by
+`services/coverage_selection.py` greedily chooses from Jina v3.5's reranked list by
 marginal value: normalized relevance and uncovered requirement coverage receive
 the largest weights, with smaller source-diversity, parent-coherence, and dense
 anchor bonuses; redundancy and estimated token cost are penalties. Every
@@ -138,7 +144,7 @@ reindexing or schema changes.
 `services/retrieval_control.py` wraps the normal retriever. Balanced and Quick
 return after the initial pass. Thorough inspects the ledger and may issue one
 deterministic evidence query for missing, partial, or conflicting requirements.
-The gap query uses the existing embedder, hybrid retrieval, Jina reranker, and
+The gap query uses the existing embedder, hybrid retrieval, Jina v3.5 reranker, and
 context path; it does not make a chat-model planning call.
 
 The round is limited to one query, a full bounded candidate/rerank width of 12,
@@ -189,7 +195,7 @@ Thorough restores one-call generation; no reindex or migration is involved.
 ## Rollback controls
 
 All Stack A request-time stages are persisted booleans in `RagSettings`, shown
-under **Settings → Retrieval behavior → Adaptive evidence controls**. Existing
+under **Settings â†’ Retrieval behavior â†’ Adaptive evidence controls**. Existing
 settings JSON omits the fields safely and receives the documented defaults.
 Environment defaults use the equivalent `CEPHALON_*` names in operations docs.
 

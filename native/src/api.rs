@@ -137,14 +137,6 @@ impl ApiClient {
         self.request_json(Method::GET, "/models/status", None)
     }
 
-    pub fn download_fixed_model(&self, kind: &str) -> Result<Value, ApiError> {
-        self.request_value(
-            Method::POST,
-            "/models/download",
-            Some(json!({"kind": kind})),
-        )
-    }
-
     pub fn verify_fixed_model(&self, kind: &str) -> Result<FixedModelInfo, ApiError> {
         self.request_json(Method::POST, "/models/verify", Some(json!({"kind": kind})))
     }
@@ -960,6 +952,28 @@ pub struct FixedModelInfo {
     pub verified: bool,
     #[serde(default)]
     pub selected_backend: Option<String>,
+    #[serde(default)]
+    pub dimension: Option<i64>,
+    #[serde(default)]
+    pub precision: Option<String>,
+    #[serde(default)]
+    pub pooling: Option<String>,
+    #[serde(default)]
+    pub score_type: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<FixedRuntimeInfo>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FixedRuntimeInfo {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

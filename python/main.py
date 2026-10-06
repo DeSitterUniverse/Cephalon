@@ -6,7 +6,7 @@ from cephalon_core.routes import chat_and_remember, delete_document, get_documen
 from cephalon_core.schemas import IngestRequest, Message, QueryRequest, RagSettings
 from cephalon_core.services.documents import extract_text, find_existing_doc_by_hash, get_file_hash
 from cephalon_core.services.models import load_llm
-from cephalon_core.services.retrieval import get_embedding, save_permanent_memory
+from cephalon_core.services.retrieval import save_permanent_memory
 from cephalon_core.storage import (
     SQLITE_LOCK,
     VECTOR_SCHEMA as schema,

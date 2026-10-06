@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from .. import storage
 from ..schemas import EvalRunRequest, IngestRequest, LlamaServerSettings, LoadModelRequest, QueryRequest, RagSettings
-from ..services import evaluation, generation, ingestion, jina_runtime, metrics, models, observability, retrieval, retrieval_control, support
+from ..services import embedding_runtime, evaluation, generation, ingestion, metrics, models, observability, reranker_runtime, retrieval, retrieval_control, support
 from ..services.claim_verification import strip_hidden_reasoning
 from ..validators import normalize_existing_path
 from .conversations import router as conversations_router
@@ -32,6 +32,15 @@ async def cancel_query(request: Request, request_id: str):
 
 def state(request: Request):
     return request.app.state
+
+
+def _retrieval_index_unavailable(app_state) -> bool:
+    if not getattr(app_state, "reindex_required", False):
+        return False
+    return storage.fetchone(
+        app_state.sqlite,
+        "SELECT 1 FROM documents WHERE type = 'file' AND status = 'ready' AND stale_embedding = 0 AND chunk_count > 0 LIMIT 1",
+    ) is None
 
 
 def _ensure_query_model_loaded(app_state, requested_model: str) -> None:
@@ -169,13 +178,13 @@ def health(request: Request):
         "python_runtime": models.python_runtime_info(),
         "llama_backend": models.llama_backend_info(app_state, probe=True),
         "retrieval_index": getattr(app_state, "retrieval_index", None),
-        "generated_index_backup": getattr(app_state, "generated_index_backup", None),
+        "generated_index_backup": None,
         "embedding": {
             "model_id": storage.active_embedding_metadata(app_state)["embedding_model_id"],
             "dimension": storage.active_embedding_metadata(app_state)["embedding_dim"],
             "table": retrieval.vector_table_name(app_state),
         },
-        "retrieval_stack": jina_runtime.model_status(app_state),
+        "retrieval_stack": reranker_runtime.model_status(app_state),
     }
 
 
@@ -187,14 +196,14 @@ def identity():
 
 @router.get("/models/status")
 def get_model_status(request: Request):
-    return jina_runtime.model_status(state(request))
+    return reranker_runtime.model_status(state(request))
 
 
 @router.post("/models/download")
 def download_model(request: Request, body: dict):
     app_state = state(request)
     try:
-        payload = jina_runtime.download_model(app_state, str(body.get("kind", "")))
+        payload = reranker_runtime.download_model(app_state, str(body.get("kind", "")))
         # Downloads are intentionally not hot-loaded: a restart provides a
         # predictable model process boundary and avoids replacing active files.
         return {"status": "downloaded", "restart_required": True, "model": payload}
@@ -205,7 +214,12 @@ def download_model(request: Request, body: dict):
 @router.post("/models/verify")
 def verify_model(request: Request, body: dict):
     try:
-        return jina_runtime.verify_model(state(request), str(body.get("kind", "")))
+        kind = str(body.get("kind", ""))
+        if kind == "embedder":
+            return embedding_runtime.verify_model(state(request))
+        if kind == "reranker":
+            return reranker_runtime.verify_model(state(request))
+        raise ValueError("kind must be embedder or reranker")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -215,7 +229,7 @@ def delete_model(request: Request, body: dict):
     if body.get("confirmed") is not True:
         raise HTTPException(status_code=400, detail="Model deletion requires confirmed: true.")
     try:
-        return jina_runtime.delete_model(state(request), str(body.get("kind", "")))
+        return reranker_runtime.delete_model(state(request), str(body.get("kind", "")))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -223,19 +237,19 @@ def delete_model(request: Request, body: dict):
 @router.post("/models/open")
 def open_model_directory(request: Request, body: dict):
     try:
-        return jina_runtime.open_model_directory(state(request), str(body.get("kind", "")))
+        return reranker_runtime.open_model_directory(state(request), str(body.get("kind", "")))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/runtime/embedder/status")
 def get_embedder_runtime(request: Request):
-    return jina_runtime.embedder_status(state(request))
+    return embedding_runtime.status(state(request))
 
 
 @router.get("/runtime/reranker/status")
 def get_reranker_runtime(request: Request):
-    return jina_runtime.reranker_status(state(request))
+    return reranker_runtime.status(state(request))
 
 
 @router.get("/models")
@@ -459,8 +473,8 @@ async def create_eval_run(request: Request, body: EvalRunRequest):
     app_state = state(request)
     if app_state.startup_error:
         raise HTTPException(status_code=503, detail=app_state.startup_error)
-    if getattr(app_state, "retrieval_error", None) or getattr(app_state, "reindex_required", False):
-        raise HTTPException(status_code=503, detail=getattr(app_state, "retrieval_error", None) or "The 768-dimensional Jina index requires reindexing.")
+    if getattr(app_state, "retrieval_error", None) or _retrieval_index_unavailable(app_state):
+        raise HTTPException(status_code=503, detail=getattr(app_state, "retrieval_error", None) or "The embedding index requires reindexing.")
     settings = storage.get_rag_settings(app_state.sqlite).model_copy(update={"top_k": body.top_k, "rerank_top_n": min(body.top_k, 10)})
     retrieved_by_id = {}
     for item in body.evals:
@@ -472,7 +486,7 @@ async def create_eval_run(request: Request, body: EvalRunRequest):
             # omit this field and continue through the normal live path below.
             retrieved_by_id[item.id] = body.sources[item.id]
             continue
-        vector = await retrieval.get_embedding(app_state, item.question)
+        vector = await retrieval.get_query_embedding(app_state, item.question)
         _context, sources, _meta = await retrieval.retrieve_context(app_state, item.question, vector, settings)
         # Preserve source identifiers and provenance so answer/citation metrics
         # use the same evidence contract as the chat UI.
@@ -554,8 +568,8 @@ async def chat_and_remember(request: Request, req: QueryRequest):
     rag_settings = _settings_for_retrieval_scope(base_rag_settings, retrieval_route["resolved"])
     if retrieval_route["retrieve"] and getattr(app_state, "retrieval_error", None):
         raise HTTPException(status_code=503, detail=app_state.retrieval_error)
-    if retrieval_route["retrieve"] and getattr(app_state, "reindex_required", False):
-        raise HTTPException(status_code=409, detail="The previous 1024-dimensional index is stale. Reindex documents before querying retrieval.")
+    if retrieval_route["retrieve"] and _retrieval_index_unavailable(app_state):
+        raise HTTPException(status_code=409, detail="The embedding index has no current documents. Reindex documents before querying retrieval.")
     _ensure_query_model_loaded(app_state, req.model)
     cancellation = generation.CompletionCancellation()
     if not hasattr(app_state, "active_queries"):
@@ -573,7 +587,7 @@ async def chat_and_remember(request: Request, req: QueryRequest):
             yield _sse("phase", {"phase": "routing"})
             if retrieval_route["retrieve"]:
                 yield _sse("phase", {"phase": "retrieving"})
-                query_vector = await retrieval.get_embedding(app_state, req.prompt)
+                query_vector = await retrieval.get_query_embedding(app_state, req.prompt)
                 context, sources, query_meta = await retrieval_control.retrieve_with_gap_control(
                     app_state,
                     req.prompt,

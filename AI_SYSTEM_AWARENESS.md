@@ -4,8 +4,8 @@ Cephalon answers from the local document library. Treat retrieved evidence as au
 
 ## Retrieval
 
-- Embedder: Jina Embeddings v5 Nano Retrieval Q8_0, normalized to exactly 768 dimensions through a dedicated llama.cpp embeddings server.
-- Reranker: Jina Reranker v3.5, run in listwise mode over the complete fused candidate set.
+- Embedder: EmbeddingGemma 2 Text 270M Q8_0 through a dedicated offline llama.cpp Vulkan server, with mean pooling including prompt tokens and L2-normalized 768-dimensional vectors. Queries use `task: search result | query: ` and indexed passages use `title: none | text: `. No vision/audio projector is loaded.
+- Reranker: Jina Reranker v3.5 uses Q8_0 GGUF weights through llama.cpp PR #26286 with Vulkan and an isolated NumPy/tokenizers worker. It assigns listwise cosine scores to the complete fused candidate set.
 - Retrieval combines independent dense LanceDB and FTS5 lexical results with reciprocal-rank fusion before reranking.
 - Retrieval diagnostics retain source, document, chunk, provenance, vector, lexical, fusion, reranker, and final scores.
 
@@ -18,5 +18,5 @@ Cephalon answers from the local document library. Treat retrieved evidence as au
 ## Runtime boundaries
 
 - Chat generation uses the user-operated external OpenAI-compatible llama.cpp server.
-- Embeddings use a separate managed llama.cpp server; on Windows it defaults to `Vulkan0` with full GPU layer offload.
+- Embeddings use a separate managed llama.cpp b11456 process with Q8_0 GGUF weights and Vulkan GPU offload. They require no Transformers/PyTorch embedding worker. Jina v3.5 needs only NumPy and tokenizers in its isolated worker environment; the GGUF trunk runs through Vulkan.
 - If the embedder is unavailable, retrieval is unavailable. If the reranker is unavailable, answer using dense and lexical retrieval with degraded-mode awareness.

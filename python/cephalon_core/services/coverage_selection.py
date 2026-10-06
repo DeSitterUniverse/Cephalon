@@ -1,6 +1,6 @@
 """Select reranked evidence by coverage and marginal context value.
 
-The selector operates on Jina's already-reranked candidates; it does not
+The selector operates on the already-reranked candidates; it does not
 replace dense, lexical, RRF, or listwise ranking. A bounded greedy objective
 balances normalized relevance, uncovered requirement terms, document
 diversity, parent coherence, redundancy, and estimated token cost. Dense-rank

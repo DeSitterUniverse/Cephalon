@@ -1,5 +1,10 @@
 # Scientific RAG evaluation
 
+Earlier recorded runs in this document used the former retrieval models. Their
+scores and thresholds are historical; a new run is required before making a
+quantitative quality claim about EmbeddingGemma 2 and Jina v3.5. The current production
+setup is documented in [operations.md](operations.md).
+
 The behavioral benchmark is intentionally private and outside Git. This keeps
 72 PDFs, 120 curated cases, generated answers, database copies, and large
 reports out of the product repository while production evaluator schemas and
@@ -131,7 +136,7 @@ Use the gates in increasing cost order:
 
 Use `a8-critical-v1` for evidence-control and verification work,
 `tables-v1` for every Stack B behavioral PR, and `performance-v1` when repeated
-latency—not answer quality—is the target. Reuse a validated immutable index for
+latencyâ€”not answer qualityâ€”is the target. Reuse a validated immutable index for
 request-time changes. Reingest all 72 papers after parsing, chunking, summary,
 embedding, table-schema, or index-version changes.
 

@@ -6,17 +6,17 @@ It is designed for private research, technical documentation, notes, PDFs, and s
 
 Cephalon is particularly useful with models fine-tuned for specialised knowledge domains, tasks, writing styles, programming conventions, academic subjects, specialised knowledge bases, or creative work.
 
-- **Local-first operation:** Files in the Library are local. You choose the chat model, which runs through an external llama.cpp server. Cephalon manages Jina Reranker v3.5 and Jina Embeddings v5 Nano for document retrieval.
+- **Local-first operation:** Files in the Library are local. You choose the chat model, which runs through an external llama.cpp server. Cephalon runs EmbeddingGemma 2 Text 270M and Jina Reranker v3.5 locally for document retrieval.
 
 I built this originally for running LLM inference on a large corpus of scientific and technical papers. I improved the architecture by incorporating the following RAG techniques:
 
 - **Hybrid retrieval:** Semantic search finds passages with similar meaning, while SQLite FTS5 finds exact terms. Cephalon keeps the result sets independent, combines their ranks, and preserves strong candidates from either path.
-- **Full-set listwise reranking:** Jina Reranker v3.5 compares the complete fused candidate set in one pass. Cephalon then selects the final context without discarding a useful passage too early.
+- **Full-set reranking:** Jina v3.5 scores the complete fused candidate set. Cephalon then selects the final context without discarding a useful passage too early.
 - **Hierarchical context assembly:** Cephalon retrieves precise child chunks first, then adds bounded sibling or parent context when it improves completeness. The original child remains the citation anchor. Source: [HiChunk](https://arxiv.org/abs/2509.11552).
 - **Layout-aware PDF evidence:** Text can be expanded to related headings, captions, tables, figures, and cross-page continuations. This avoids treating every block as unrelated. Based on: [LAD-RAG: Layout-Aware Dynamic RAG framework](https://arxiv.org/abs/2510.07233).
 - **Coverage-aware evidence control:** Cephalon breaks a question into concrete evidence needs and selects sources that cover them. When Thorough mode is selected, it can run one targeted follow-up search for missing evidence. Source: [S2G-RAG](https://arxiv.org/abs/2604.23783).
 - **Verified answers:** Cited claims are checked for missing support, contradictions, negation errors, and incorrect numbers or units. Thorough mode can audit the draft and repair it once. Source: [OpenScholar](https://arxiv.org/abs/2411.14199) and [RAGChecker](https://arxiv.org/abs/2408.08067).
-- **Structured table reasoning:** PDF, CSV, and XLSX tables retain row, column, cell, and location data. Cephalon can run bounded lookups, filters, comparisons, and arithmetic, then cite and recheck the exact cells used. Source: [T-RAG](https://arxiv.org/abs/2203.16714) and [T²-RAGBench](https://arxiv.org/abs/2506.12071).
+- **Structured table reasoning:** PDF, CSV, and XLSX tables retain row, column, cell, and location data. Cephalon can run bounded lookups, filters, comparisons, and arithmetic, then cite and recheck the exact cells used. Source: [T-RAG](https://arxiv.org/abs/2203.16714) and [TÂ²-RAGBench](https://arxiv.org/abs/2506.12071).
 - **Exact provenance and retrieval traces:** Citations point to stable source chunks with page, layout, bounding-box, table-cell, and asset details when available. The Sources and Trace views show what was retrieved, reranked, selected, and verified.
 
 ![Cephalon's chat workspace with a connected local model](docs/screenshots/rag-cited-answer.png)
@@ -38,20 +38,20 @@ Cephalon uses one local retrieval stack:
 
 | Role | Model | Runtime |
 | --- | --- | --- |
-| Embedder | Jina Embeddings v5 Nano Retrieval `Q8_0` | dedicated llama.cpp embeddings server, normalized 768-dimensional vectors |
-| Reranker | Jina Reranker v3.5 `Q8_0` GGUF | verified llama.cpp/Vulkan listwise worker; CPU fallback is disabled |
+| Embedder | EmbeddingGemma 2 Text 270M Q8_0 | managed llama.cpp Vulkan server, mean pooling, L2-normalized 768-dimensional vectors |
+| Reranker | Jina Reranker v3.5 | Q8_0 GGUF through pinned llama.cpp PR #26286, Vulkan, listwise cosine scores |
 
 Dense LanceDB and SQLite FTS5 results remain independent and are fused with reciprocal-rank fusion. When the reranker is available, the full fused candidate set is reranked listwise. If the reranker is unavailable, Cephalon continues in clearly marked degraded mode. If the embedder is unavailable, retrieval is safely disabled.
 
-## Jina AI models
+## Retrieval model provenance
 
-Cephalon uses Jina AI's [Jina Embeddings v5 Nano Retrieval](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval-GGUF) and [Jina Reranker v3.5 GGUF](https://huggingface.co/jinaai/jina-reranker-v3.5-GGUF). Thank you to Jina AI for making these retrieval models available.
+EmbeddingGemma 2 uses the pinned text-only Q8_0 [Unsloth GGUF conversion](https://huggingface.co/unsloth/embeddinggemma-2-GGUF) of [Google's model](https://huggingface.co/google/embeddinggemma-2); Jina v3.5 uses a pinned [official Safetensors snapshot](https://huggingface.co/Jina v3.5-Embedding/Jina v3.5-Reranker-V1-Nano-R2). Install manifests record immutable revisions and hashes. Queries use `task: search result | query: ` and indexed passages use `title: none | text: `. No vision/audio projector is installed.
 
-Both models are licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/); use of the model files is subject to that license.
+Review each model repository's license before distributing its files.
 
 ## Quick start
 
-Cephalon supports Windows and Linux. The commands below use Windows PowerShell. See [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for Linux and detailed setup notes.
+The desktop app supports Windows and Linux. Q8 embedding inference has been smoke-checked on Windows with an RX 6700 XT; performance and retrieval quality have not been benchmarked for this runtime. The commands use PowerShell. See [retrieval operations](docs/rag/operations.md) for the current model setup.
 
 1. Install Rust, Python 3.14, and a recent llama.cpp build with `llama-server`.
 
@@ -76,11 +76,7 @@ Cephalon supports Windows and Linux. The commands below use Windows PowerShell. 
    cargo run
    ```
 
-5. Build `llama-embedding` from llama.cpp revision
-   `80c940e5a80555167c4ec37652deca6528810f91` with Vulkan enabled.
-   Set `CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN` to that executable. In
-   **Settings → Fixed retrieval stack**, download the embedder and reranker.
-   Restart Cephalon, then run **Reindex all documents**.
+5. Follow [retrieval setup](docs/rag/operations.md) to install the pinned EmbeddingGemma 2 Q8_0 GGUF, its separate llama.cpp b11456 Vulkan runtime, and Jina v3.5's Q8 artifacts, isolated NumPy/tokenizers environment, and PR #26286 Vulkan runtime. Restart Cephalon, then run **Reindex all documents**.
 
 6. Press **Connect** for the chat server, import a few documents, and ask a question. Open **Sources** or **Trace** whenever you want to inspect the supporting evidence.
 
@@ -98,16 +94,16 @@ Saved conversations remain on your computer and are used only as searchable chat
 
 ## Runtime separation
 
-Cephalon manages the fixed embedding and reranking models used for document retrieval. Chat generation remains user-controlled and runs through an external llama.cpp server, so you can choose any compatible GGUF without changing the retrieval index or coupling the chat server to the retrieval stack.
+Cephalon manages the fixed embedding and reranking processes after explicit setup. Chat generation remains user-controlled and runs through an external llama.cpp server, so you can choose any compatible GGUF without changing the retrieval index or coupling the chat server to the retrieval stack.
 
-Chat generation and document embedding use separate llama.cpp server processes because they load different models and operate with different runtime settings. The processes serve different roles and cannot share a single server instance.
+Chat generation uses the external llama.cpp server. Embeddings run in a separate managed llama.cpp process; reranking uses Jina v3.5's isolated NumPy/tokenizers worker and GGUF helper. The embedder needs no Transformers or PyTorch environment. Cephalon starts the embedding server after explicit model and runtime setup.
 
-Cephalon manages the embedding process automatically after the retrieval model is installed.
+The embedding server defaults to Vulkan GPU offload. To select CPU inference:
 
-On Windows, the managed embedding process defaults to Vulkan0 with full GPU layer offload. If your llama.cpp installation uses a different device name or offload configuration, override these values:
-
-$env:CEPHALON_EMBEDDER_DEVICE="Vulkan0"
-$env:CEPHALON_EMBEDDER_GPU_LAYERS="999"
+```powershell
+$env:CEPHALON_EMBEDDER_GPU_LAYERS="0"
+$env:CEPHALON_EMBEDDER_DEVICE="none"
+```
 
 ## Local files and configuration
 
@@ -121,16 +117,19 @@ The retrieval models are stored under:
 
 ```text
 ~/cephalon-data/models/
-  jina-v5-nano-retrieval-q8_0/
-    v5-nano-retrieval-Q8_0.gguf
+  embeddinggemma-2-text-270m-q8_0/
+    embeddinggemma-2-Q8_0.gguf
+    cephalon-model-manifest.json
   jina-reranker-v3.5-gguf-q8_0/
     jina-reranker-v3.5-Q8_0.gguf
     projector.safetensors
     tokenizer.json
+    cephalon-jina-worker.py
+    cephalon-model-manifest.json
     ...
 ```
 
-The Settings page can download, verify, open, and remove these model installations. The embedder GGUF is checked against its expected SHA-256, while the reranker is checked against its pinned Hugging Face revision manifest.
+The Settings page can verify, open, and remove these model installations. Model acquisition is an explicit setup step; the application never downloads weights at runtime. Both model snapshots are checked against their pinned manifests.
 
 Common configuration overrides:
 
@@ -138,17 +137,21 @@ Common configuration overrides:
 | -------------------------------------- | ----------------------------------------------- | ------------------------- |
 | `CEPHALON_DATA_DIR`                    | Database, indexes, assets, and application data | `~/cephalon-data`         |
 | `CEPHALON_MODEL_DIR`                   | Retrieval-model directory                       | `<data directory>/models` |
-| `CEPHALON_LLAMA_SERVER_BIN`            | Path to the `llama-server` executable           | Platform-specific         |
 | `CEPHALON_LLAMA_SERVER_URL`            | Chat-generation server                          | `http://127.0.0.1:8080`   |
 | `CEPHALON_LLAMA_SERVER_CONTEXT_TOKENS` | Chat model context limit override               | Detected when available   |
-| `CEPHALON_EMBEDDER_DEVICE`             | llama.cpp device used by the managed embedder   | `Vulkan0` on Windows      |
-| `CEPHALON_EMBEDDER_GPU_LAYERS`         | Number of embedder layers offloaded to the GPU  | `999`                     |
+| `CEPHALON_EMBEDDER_DEVICE`             | llama.cpp device selection, e.g. `Vulkan0`     | Auto-selected GPU         |
+| `CEPHALON_EMBEDDER_GPU_LAYERS`         | Embedding layers offloaded to GPU; 0 for CPU  | `99`                      |
+| `CEPHALON_EMBEDDER_LLAMA_SERVER_BIN`   | Dedicated pinned embedding server executable  | data/runtimes/llama-b11456-vulkan/llama-server |
+| `CEPHALON_RERANKER_PYTHON_BIN`         | Isolated Jina NumPy/tokenizers executable       | `runtimes/jina35-python`         |
+| `CEPHALON_RERANKER_LLAMA_EMBEDDING_BIN` | Pinned PR #26286 Vulkan helper | Versioned Jina runtime |
+| `CEPHALON_RERANKER_DEVICE` | Vulkan device for Jina | `Vulkan0` |
+| `CEPHALON_RERANKER_GPU_LAYERS` | Jina GPU offload layers | `99` |
+| `CEPHALON_RERANKER_MAX_CONTEXT_TOKENS` | Maximum listwise prompt tokens | `32768` |
 
 Set environment variables before launching Cephalon. For example:
 
 ```powershell
 $env:CEPHALON_EMBEDDER_DEVICE="Vulkan0"
-$env:CEPHALON_EMBEDDER_GPU_LAYERS="999"
 cargo run
 ```
 
@@ -159,8 +162,9 @@ cargo run
 | Cephalon local API         | 8765 |
 | Chat llama.cpp server      | 8080 |
 | Managed embedding server   | 8090 |
+| Managed Jina v3.5 worker        | 8091 |
 
-See [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) for the complete environment-variable reference, Linux commands, manual server operation, release builds, and troubleshooting.
+See [retrieval operations](docs/rag/operations.md) for current embedding settings and troubleshooting. [LOCAL_STARTUP_NOTES.md](LOCAL_STARTUP_NOTES.md) contains historical startup notes.
 
 ## Development and packaging
 
@@ -176,7 +180,7 @@ See [native-frontend.md](docs/native-frontend.md) for the dependency and packagi
 | Build the native release                | `cargo build --release`                             |
 | Build the packaged desktop directory    | `py -3.14 scripts\build_release.py`                |
 
-The packaged application includes Cephalon’s Python backend. It does not include llama.cpp, a chat GGUF, or the retrieval-model weights. Retrieval models can be installed from the Settings page after Cephalon is launched.
+The packaged application includes Cephalonâ€™s Python backend. It does not include llama.cpp, a chat GGUF, the retrieval-model weights, or Jina v3.5's isolated Python environment. Install those with the explicit setup procedure before using retrieval.
 
 ## Diagnostics and local API
 
@@ -211,4 +215,4 @@ cargo test
 
 ## License
 
-Cephalon’s source code is available under the [MIT License](LICENSE). Retrieval-model files remain subject to their respective licenses described above.
+Cephalonâ€™s source code is available under the [MIT License](LICENSE). Retrieval-model files remain subject to their respective licenses described above.

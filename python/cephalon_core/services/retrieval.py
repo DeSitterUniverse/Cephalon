@@ -12,11 +12,11 @@ from typing import Any
 import numpy as np
 
 from .. import storage
-from ..config import EMBEDDING_DIMENSION
+from ..config import EMBEDDING_DIMENSION, EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REVISION, RERANKER_LLAMA_CPP_REVISION, RERANKER_MODEL_ID, RERANKER_PRECISION, RERANKER_REVISION, RERANKER_SCORE_TYPE, RERANKER_WORKER_SHA256, embedding_config_hash
 from ..schemas import RagSettings, SourceChunk
 from . import metrics
 from . import observability
-from . import jina_runtime
+from . import embedding_runtime, reranker_runtime
 from .context_assembly import assemble_hierarchical_context
 from .layout_expansion import expand_layout_evidence
 from .evidence_ledger import (
@@ -40,12 +40,11 @@ CORE_MEMORY_DOC_ID = "core_memory"
 EMBEDDING_CACHE_LIMIT = 128
 EMBEDDING_INFERENCE_BATCH_SIZE = 16
 # A scientific benchmark or focused research session readily exceeds 96
-# distinct questions.  Because each entry retains only Jina's compact
-# ``index``/``relevance_score`` output (never document text or embeddings), 256
+# distinct questions. Each entry retains only indexes and scores. 256
 # entries remain a low-single-digit-megabyte hard bound even at the maximum
 # fused-candidate window.  The larger working set also prevents sequential
 # workloads just over the old limit from cyclically evicting every cache hit
-# and repeatedly paying GGUF model startup.
+# and repeatedly paying reranker model startup.
 RERANK_CACHE_LIMIT = 256
 RERANK_TEXT_LIMIT = 700
 CONTEXT_REQUIREMENT_COVERAGE = 0.34
@@ -138,19 +137,19 @@ def _vector_table_has_current_schema(table) -> bool:
     return {"parent_id", "source_kind", "embedding_model_id", "embedding_dim", "chunk_length"} <= names
 
 
-async def get_embedding(app_state, text: str) -> list[float]:
-    return await asyncio.to_thread(_get_embedding_sync, app_state, text)
+async def get_query_embedding(app_state, text: str) -> list[float]:
+    return (await asyncio.to_thread(_get_embeddings_sync, app_state, "query", [text]))[0]
 
 
-async def get_embeddings(app_state, texts: list[str]) -> list[list[float]]:
-    return await asyncio.to_thread(_get_embeddings_sync, app_state, texts)
+async def get_document_embedding(app_state, text: str) -> list[float]:
+    return (await asyncio.to_thread(_get_embeddings_sync, app_state, "document", [text]))[0]
 
 
-def _get_embedding_sync(app_state, text: str) -> list[float]:
-    return _get_embeddings_sync(app_state, [text])[0]
+async def get_document_embeddings(app_state, texts: list[str]) -> list[list[float]]:
+    return await asyncio.to_thread(_get_embeddings_sync, app_state, "document", texts)
 
 
-def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
+def _get_embeddings_sync(app_state, role: str, texts: list[str]) -> list[list[float]]:
     if getattr(app_state, "retrieval_error", None):
         raise RuntimeError(app_state.retrieval_error)
     if not texts:
@@ -162,7 +161,9 @@ def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
         app_state.embedding_cache = cache
 
     normalized_texts = [" ".join(text.strip().split()) for text in texts]
-    cache_keys = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in normalized_texts]
+    model_id = getattr(app_state, "embedding_model_id", EMBEDDING_MODEL_ID)
+    dimension = getattr(app_state, "embedding_dim", EMBEDDING_DIMENSION)
+    cache_keys = [hashlib.sha256(f"{model_id}\0{EMBEDDING_MODEL_REVISION}\0{embedding_config_hash()}\0{dimension}\0{role}\0{text}".encode("utf-8")).hexdigest() for text in normalized_texts]
     vectors: list[list[float] | None] = [None] * len(texts)
     missing_indices: list[int] = []
     missing_texts: list[str] = []
@@ -184,11 +185,11 @@ def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
         for start in range(0, len(missing_texts), batch_size):
             batch = missing_texts[start:start + batch_size]
             try:
-                embedded.extend(_run_embedding_batch(app_state, batch))
+                embedded.extend(_run_embedding_batch(app_state, role, batch))
             except Exception:
                 if len(batch) == 1:
                     raise
-                embedded.extend(_run_embedding_batch(app_state, [text])[0] for text in batch)
+                embedded.extend(_run_embedding_batch(app_state, role, [text])[0] for text in batch)
         for index, vector in zip(missing_indices, embedded, strict=True):
             cache_key = cache_keys[index]
             cache[cache_key] = vector
@@ -200,20 +201,18 @@ def _get_embeddings_sync(app_state, texts: list[str]) -> list[list[float]]:
     return [list(vector) for vector in vectors if vector is not None]
 
 
-def _run_embedding_batch(app_state, texts: list[str]) -> list[list[float]]:
-    # The dedicated llama.cpp service performs Nano's required last-token
-    # pooling.  Request batches are OpenAI-compatible and server-normalized;
-    # normalize once more here to keep persisted vectors unit length.
-    vectors = jina_runtime.embed(app_state, texts)
+def _run_embedding_batch(app_state, role: str, texts: list[str]) -> list[list[float]]:
+    # Normalize defensively after the worker's official pooling pipeline.
+    vectors = embedding_runtime.embed(app_state, role, texts)
     normalized = []
     for vector in vectors:
         array = np.asarray(vector, dtype=np.float32)
         norm = np.linalg.norm(array)
-        if not norm:
-            raise RuntimeError("Jina Nano returned a zero embedding.")
+        if not np.isfinite(norm) or not norm:
+            raise RuntimeError("Embedder returned a non-finite or zero embedding.")
         array = array / norm
         if array.size != EMBEDDING_DIMENSION:
-            raise RuntimeError(f"Jina Nano returned {array.size} dimensions; expected fixed {EMBEDDING_DIMENSION}.")
+            raise RuntimeError(f"Embedder returned {array.size} dimensions; expected fixed {EMBEDDING_DIMENSION}.")
         normalized.append(array.tolist())
     return normalized
 
@@ -230,7 +229,7 @@ async def save_permanent_memory(app_state, conversation_id: str, message_id: str
         f"[Past Conversation Context]\nUser: {user_prompt.strip()[:1600]}\n"
         f"Assistant: {(clean_answer or answer_text.strip())[:3200]}"
     )
-    vector = await get_embedding(app_state, memory_text)
+    vector = await get_document_embedding(app_state, memory_text)
     lance_data = [{
         "vector": vector,
         "id": memory_id,
@@ -245,8 +244,8 @@ async def save_permanent_memory(app_state, conversation_id: str, message_id: str
     await asyncio.to_thread(_replace_memory_vector, app_state, memory_id, lance_data)
     storage.execute(
         app_state.sqlite,
-        "INSERT OR IGNORE INTO conversation_memory (id, conversation_id, message_id, created_at) VALUES (?, ?, ?, ?)",
-        (memory_id, conversation_id, message_id, int(time.time())),
+        "INSERT OR IGNORE INTO conversation_memory (id, conversation_id, message_id, created_at, text, embedding_config_hash) VALUES (?, ?, ?, ?, ?, ?)",
+        (memory_id, conversation_id, message_id, int(time.time()), memory_text, embedding_config_hash()),
     )
 
 
@@ -277,7 +276,7 @@ def _quote_lance_string(value: str) -> str:
 def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
     if not results:
         return []
-    cache_key = _rerank_cache_key(prompt, results)
+    cache_key = _rerank_cache_key(prompt, results, getattr(app_state, "settings", None))
     cache: OrderedDict[str, list[dict]] = getattr(app_state, "rerank_cache", None)
     if cache is None:
         cache = OrderedDict()
@@ -289,7 +288,7 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
     else:
         documents = [_rerank_text(res.get("text", "")) for res in results]
         try:
-            listwise_results = jina_runtime.rerank(app_state, prompt, documents)
+            listwise_results = reranker_runtime.rerank(app_state, prompt, documents)
         except RuntimeError as exc:
             # Retrieval remains useful through its separately preserved dense
             # and FTS5/RRF stages when the isolated worker is unavailable.
@@ -310,19 +309,22 @@ def rerank(app_state, prompt: str, results: list[dict]) -> list[dict]:
         cache.move_to_end(cache_key)
         while len(cache) > RERANK_CACHE_LIMIT:
             cache.popitem(last=False)
+    runtime_status = getattr(app_state, "reranker_runtime_status", None)
+    if isinstance(runtime_status, dict):
+        runtime_status["status"] = "running"
+        runtime_status["last_failure"] = None
     by_index = {int(item["index"]): item for item in listwise_results}
     for listwise_rank, item in enumerate(listwise_results, start=1):
         input_index = int(item["index"])
         if input_index not in by_index or not 0 <= input_index < len(results):
-            raise RuntimeError("Jina v3.5 returned an invalid listwise candidate index.")
+            raise RuntimeError("Reranker returned an invalid candidate index.")
         res = results[input_index]
-        raw_score = float(item["relevance_score"])
+        raw_score = float(item["score"])
         res["reranker_raw_score"] = raw_score
         res["listwise_rank"] = listwise_rank
         res["rerank_score"] = raw_score
         res["retrieval_prior_score"] = _retrieval_prior_score(prompt, res)
-        # v3.5 scores are cosine relevance values, not v3 logits.  Keep the
-        # raw value separately and use a deterministic bounded fusion.
+        # Preserve Jina's raw cosine separately from the fused retrieval score.
         res["score"] = round(0.75 * raw_score + 0.25 * res["retrieval_prior_score"], 6)
         res["final_score"] = res["score"]
     return sorted(results, key=lambda x: (x["score"], -int(x.get("listwise_rank") or 10**9)), reverse=True)
@@ -335,9 +337,10 @@ def _rerank_text(text: str) -> str:
     return cleaned[:RERANK_TEXT_LIMIT]
 
 
-def _rerank_cache_key(prompt: str, results: list[dict]) -> str:
+def _rerank_cache_key(prompt: str, results: list[dict], settings=None) -> str:
     candidate_key = "|".join(f"{res.get('id')}:{hashlib.sha256(str(res.get('text', '')).encode('utf-8')).hexdigest()[:16]}" for res in results)
-    return hashlib.sha256(f"{prompt.strip().lower()}::{candidate_key}".encode("utf-8")).hexdigest()
+    runtime_key = (getattr(settings, "reranker_max_context_tokens", 32768), getattr(settings, "reranker_device", "Vulkan0"), getattr(settings, "reranker_gpu_layers", 99))
+    return hashlib.sha256(f"{RERANKER_MODEL_ID}\0{RERANKER_REVISION}\0{RERANKER_SCORE_TYPE}\0{RERANKER_PRECISION}\0{RERANKER_LLAMA_CPP_REVISION}\0{RERANKER_WORKER_SHA256}\0{runtime_key}\0{prompt}::{candidate_key}".encode("utf-8")).hexdigest()
 
 
 def _select_relevant_results(ranked: list[dict], limit: int) -> list[dict]:
@@ -744,7 +747,8 @@ def _lexical_search(app_state, prompt: str, limit: int) -> list[dict]:
             bm25(chunks_fts) AS bm25_score
         FROM chunks_fts
         JOIN chunks ON chunks.id = chunks_fts.chunk_id
-        WHERE chunks_fts MATCH ?
+        JOIN documents ON documents.id = chunks.doc_id
+        WHERE chunks_fts MATCH ? AND documents.stale_embedding = 0
         ORDER BY bm25_score
         LIMIT ?
         """,
@@ -1095,6 +1099,14 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     search_modes: list[str] = []
     trace: dict[str, Any] = {
         "query_id": query_id,
+        "embedding_model_id": EMBEDDING_MODEL_ID,
+        "embedding_model_revision": EMBEDDING_MODEL_REVISION,
+        "embedding_dimension": EMBEDDING_DIMENSION,
+        "reranker_model_id": RERANKER_MODEL_ID,
+        "reranker_revision": RERANKER_REVISION,
+        "reranker_score_type": RERANKER_SCORE_TYPE,
+        "reranker_precision": RERANKER_PRECISION,
+        "reranker_llama_cpp_revision": RERANKER_LLAMA_CPP_REVISION,
         "raw_query": prompt,
         "normalized_query": " ".join(prompt.strip().split()),
         "rewritten_query": None,
@@ -1165,7 +1177,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
 
         if not memory_only:
             for subquery in subqueries:
-                vector = query_vector if subquery["text"] == prompt else await get_embedding(app_state, subquery["text"])
+                vector = query_vector if subquery["text"] == prompt else await get_query_embedding(app_state, subquery["text"])
                 search_output = await _search_once(app_state, subquery["text"], vector, settings)
                 if len(search_output) == 2:
                     results, mode = search_output
@@ -1199,8 +1211,7 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
         }
         anchors = [row for row in candidates if row["id"] in anchor_ids]
         non_anchors = [row for row in candidates if row["id"] not in anchor_ids]
-        # Jina v3.5 is listwise: its relevance scores depend on the complete
-        # candidate set, so never pre-cut the fused set before one rerank call.
+        # Preserve the complete fused candidate set for reranking.
         rerank_candidates = anchors + non_anchors
         rerank_started = time.perf_counter()
         all_ranked = await asyncio.to_thread(rerank, app_state, prompt, rerank_candidates)
@@ -1449,6 +1460,9 @@ async def retrieve_context(app_state, prompt: str, query_vector: list[float], se
     confidence = confidence_from_sources(all_sources, settings)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     trace["retrieval_mode"] = "+".join(search_modes) if search_modes else "empty"
+    trace["reranker_degraded"] = bool(trace["fused_candidates"] and not any(
+        candidate.get("rerank_score") is not None for candidate in trace["reranked_candidates"]
+    ))
     trace["final_context"] = [source.model_dump() for source in all_sources]
     trace["evidence_ledger"] = ledger
     trace["no_answer"] = confidence

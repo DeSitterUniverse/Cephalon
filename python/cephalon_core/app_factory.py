@@ -11,7 +11,7 @@ from .events import EventBus
 from .runtime import ModelRuntime
 from .routes import router
 from .services.jobs import JobManager
-from .services import ingestion, jina_runtime, retrieval
+from .services import embedding_runtime, ingestion, reranker_runtime, retrieval
 from .services.memory_jobs import MemoryJobManager
 
 
@@ -35,13 +35,10 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         os.makedirs(active_settings.data_dir, exist_ok=True)
         os.makedirs(active_settings.model_dir, exist_ok=True)
-        os.environ["HF_HOME"] = os.path.expanduser("~/.cephalon/models")
         app.state.settings = active_settings
         app.state.architecture_context = load_architecture_context()
         app.state.llm = None
         app.state.model_runtime = ModelRuntime()
-        app.state.embedding_runtime = ModelRuntime()
-        app.state.reranker_runtime = ModelRuntime()
         app.state.active_model_name = None
         app.state.active_context_tokens = None
         app.state.active_model_context_tokens = None
@@ -52,8 +49,8 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         app.state.llama_server_settings = storage.get_llama_server_settings(app.state.sqlite, active_settings)
         app.state.lance = storage.connect_lance(active_settings)
         app.state.startup_error = None
-        jina_runtime.start(app.state)
-        app.state.generated_index_backup = storage.clean_generated_vector_state(active_settings, app.state.lance)
+        embedding_runtime.start(app.state)
+        reranker_runtime.start(app.state)
         app.state.retrieval_index = retrieval.ensure_retrieval_index(app.state)
         try:
             app.state.index_staleness = ingestion.refresh_document_staleness(app.state)
@@ -71,7 +68,8 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         finally:
             await app.state.memory_jobs.stop()
             await app.state.job_manager.stop()
-            jina_runtime.stop(app.state)
+            reranker_runtime.stop(app.state)
+            embedding_runtime.stop(app.state)
             app.state.sqlite.close()
 
     app = FastAPI(lifespan=lifespan, title="Cephalon API")

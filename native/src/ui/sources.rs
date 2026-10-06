@@ -125,7 +125,7 @@ impl NativeApp {
                             .map(|score| format!("{score:.4}"))
                             .unwrap_or_else(|| "–".into())
                     );
-                    card = card.child(detail_line("Listwise reranker", &reranker, muted()));
+                    card = card.child(detail_line("Jina reranker", &reranker, muted()));
                 }
                 if !source.table_result.is_empty() || !source.cells.is_empty() {
                     let table = json!({

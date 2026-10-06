@@ -12,7 +12,8 @@ from ..schemas import RagSettings
 from . import documents
 from . import document_assets
 from . import observability
-from .retrieval import ensure_vector_table, get_embedding, get_embeddings, vector_table_name
+from .retrieval import ensure_vector_table, get_document_embedding, get_document_embeddings, vector_table_name
+from ..config import embedding_config_hash as current_embedding_config_hash, embedding_vector_space
 from .pdf_parser import DocumentBlock
 from . import table_ingestion
 
@@ -262,7 +263,7 @@ async def process_single_file(
             raise ValueError("No text chunks produced.")
 
         await _report_progress(progress, "embedding", 65)
-        vectors = await _embed_many(app_state, vector_texts)
+        vectors = await _embed_many(app_state, vector_texts, progress=progress)
         for row, vector in zip(lance_data, vectors, strict=True):
             row["vector"] = vector
 
@@ -292,7 +293,7 @@ async def process_single_file(
                 fts_rows,
                 text_hash=text_hash,
                 chunking_hash=chunking_hash,
-                embedding_config_hash=f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}",
+                embedding_config_hash=current_embedding_config_hash(),
                 parser_version=parser_version,
                 parse_warnings=parse_warnings,
                 asset_rows=asset_transaction.rows if asset_transaction else [],
@@ -450,7 +451,8 @@ def _replace_document_rows(
                 """
                 UPDATE documents
                 SET text_hash = ?, parser_version = ?, chunking_profile = ?,
-                    chunking_config_hash = ?, embedding_config_hash = ?, parse_warnings = ?
+                    chunking_config_hash = ?, embedding_config_hash = ?,
+                    embedding_vector_space_json = ?, parse_warnings = ?
                 WHERE id = ?
                 """,
                 (
@@ -459,6 +461,7 @@ def _replace_document_rows(
                     CHUNKING_PROFILE,
                     chunking_hash,
                     embedding_config_hash,
+                    json.dumps(embedding_vector_space(), sort_keys=True),
                     json.dumps(parse_warnings, ensure_ascii=False) if parse_warnings else None,
                     doc_id,
                 ),
@@ -471,10 +474,18 @@ def _replace_document_rows(
             raise
 
 
-async def _embed_many(app_state, texts: list[str]) -> list[list[float]]:
+async def _embed_many(app_state, texts: list[str], *, progress: ProgressCallback | None = None) -> list[list[float]]:
     if getattr(app_state, "embedder", None) is None:
-        return [await get_embedding(app_state, text) for text in texts]
-    return await get_embeddings(app_state, texts)
+        return [await get_document_embedding(app_state, text) for text in texts]
+    vectors: list[list[float]] = []
+    last_progress = 65
+    for start in range(0, len(texts), 16):
+        vectors.extend(await get_document_embeddings(app_state, texts[start:start + 16]))
+        current_progress = 65 + int(24 * len(vectors) / len(texts))
+        if current_progress > last_progress:
+            await _report_progress(progress, "embedding", current_progress)
+            last_progress = current_progress
+    return vectors
 
 
 async def _report_progress(progress: ProgressCallback | None, stage: str, percent: int) -> None:
@@ -587,7 +598,7 @@ def refresh_document_staleness(app_state, rag_settings: RagSettings | None = Non
     )
     metadata = storage.active_embedding_metadata(app_state)
     chunking_hash = observability.chunking_config_hash(CHUNKING_PROFILE, _chunking_config(rag_settings))
-    embedding_config_hash = f"{metadata['embedding_model_id']}:{metadata['embedding_dim']}"
+    embedding_config_hash = current_embedding_config_hash()
     rows = storage.fetchall(
         app_state.sqlite,
         "SELECT * FROM documents WHERE type = 'file' AND status = 'ready'",
@@ -892,17 +903,6 @@ async def build_semantic_child_chunks(app_state, parent_text: str, settings: Rag
     return chunks
 
 
-def cosine_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
-    dot = sum(a * b for a, b in zip(left, right))
-    left_norm = sum(a * a for a in left) ** 0.5
-    right_norm = sum(b * b for b in right) ** 0.5
-    if not left_norm or not right_norm:
-        return 0.0
-    return dot / (left_norm * right_norm)
-
-
 def summarize_parent(text: str, blocks: list[DocumentBlock] | None = None) -> str:
     """Build a bounded, extractive scientific summary for dense retrieval.
 
@@ -1152,13 +1152,6 @@ def contextualize_chunk(
     return "\n".join(parts) + "\n\n" + chunk_text.strip()
 
 
-async def process_directory(app_state, dir_path: str, rag_settings: RagSettings, *, force_text: bool = False) -> list[dict]:
-    results = []
-    for file_path in documents.collect_supported_files(dir_path, force_text=force_text):
-        results.append(await process_single_file(app_state, file_path, rag_settings, force_text=force_text))
-    return results
-
-
 def delete_document_vectors(app_state, doc_id: str) -> None:
     table_name = vector_table_name(app_state)
     if table_name in app_state.lance.table_names():
@@ -1180,11 +1173,3 @@ def delete_document_rows(app_state, doc_id: str) -> None:
         cursor.execute("DELETE FROM document_tags WHERE doc_id = ?", (doc_id,))
         cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         app_state.sqlite.commit()
-
-
-def mark_reindexing(app_state, doc_id: str) -> str:
-    row = storage.fetchone(app_state.sqlite, "SELECT path FROM documents WHERE id = ? AND type = 'file'", (doc_id,))
-    if not row:
-        raise ValueError("Document not found.")
-    storage.execute(app_state.sqlite, "UPDATE documents SET status = 'queued', last_error = NULL WHERE id = ?", (doc_id,))
-    return row["path"]

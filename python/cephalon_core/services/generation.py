@@ -685,7 +685,3 @@ def stream_response(
     ):
         if event_type == "token":
             yield value
-
-
-def stream_llama(app_state, prompt: str, context: str, history: list[Message], settings: RagSettings, query_meta: dict | None = None):
-    yield from stream_response(app_state, prompt, context, history, settings, query_meta)

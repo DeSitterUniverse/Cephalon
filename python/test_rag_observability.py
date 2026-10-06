@@ -62,6 +62,13 @@ def test_retrieval_trace_persistence_roundtrip():
         "raw_query": "stress supplements",
         "normalized_query": "stress supplements",
         "retrieval_mode": "dense+sqlite_fts5",
+        "embedding_model_id": "google/embeddinggemma-2",
+        "embedding_dimension": 768,
+        "reranker_model_id": "jinaai/jina-reranker-v3.5",
+        "reranker_score_type": "cosine",
+        "reranker_precision": "Q8_0",
+        "reranker_llama_cpp_revision": "491219a2bfa0a5a51acfc6a233bea911515b2134",
+        "reranker_degraded": False,
         "subqueries": [{"id": "q1", "text": "stress supplements"}],
         "vector_candidates": [{"rank": 1, "chunk_id": "c1", "doc_id": "d1", "score": 0.8, "vector_score": 0.8}],
         "bm25_candidates": [{"rank": 1, "chunk_id": "c2", "doc_id": "d2", "score": -4.2, "lexical_score": -4.2}],
@@ -89,6 +96,11 @@ def test_retrieval_trace_persistence_roundtrip():
     assert loaded["candidates"]["reranked"][0]["rerank_score"] == 1.7
     assert loaded["final_context"][0]["source_id"] == "S1"
     assert loaded["table_execution"]["result_cell_refs"] == ["Sheet1!B2"]
+    assert loaded["model_stack"]["embedding_dimension"] == 768
+    assert loaded["model_stack"]["reranker_score_type"] == "cosine"
+    assert loaded["model_stack"]["reranker_precision"] == "Q8_0"
+    assert loaded["model_stack"]["reranker_llama_cpp_revision"] == "491219a2bfa0a5a51acfc6a233bea911515b2134"
+    assert loaded["model_stack"]["reranker_degraded"] is False
 
 
 def test_stale_embedding_detection_uses_hashes_versions_and_models():
@@ -113,8 +125,9 @@ def test_stale_document_refresh_tracks_parser_chunk_model_and_file_changes(tmp_p
     rag_settings = RagSettings()
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     size_bytes, modified_at = path.stat().st_size, int(path.stat().st_mtime)
-    embedding_model_id = "test/embedder"
-    embedding_dim = 1024
+    from cephalon_core.config import EMBEDDING_MODEL_ID, EMBEDDING_DIMENSION, embedding_config_hash
+    embedding_model_id = EMBEDDING_MODEL_ID
+    embedding_dim = EMBEDDING_DIMENSION
     chunking_hash = observability.chunking_config_hash(
         ingestion.CHUNKING_PROFILE,
         ingestion._chunking_config(rag_settings),
@@ -144,7 +157,7 @@ def test_stale_document_refresh_tracks_parser_chunk_model_and_file_changes(tmp_p
             "old-pdf-parser",
             ingestion.CHUNKING_PROFILE,
             chunking_hash,
-            f"{embedding_model_id}:{embedding_dim}",
+            embedding_config_hash(),
         ),
     )
     app_state = SimpleNamespace(

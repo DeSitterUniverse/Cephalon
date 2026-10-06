@@ -1,6 +1,6 @@
 Retrieval notes
 
-Cephalon uses Jina Nano Retrieval Q8_0 to create normalized 768-dimensional vectors through a dedicated llama.cpp embeddings server. SQLite FTS5 lexical search remains independent from LanceDB dense search. Results are merged by reciprocal rank fusion, then the complete fused set is listwise reranked by Jina Reranker v3.5 when its worker is available.
+Cephalon uses EmbeddingGemma 2 Text 270M Q8_0 GGUF to create normalized 768-dimensional vectors through a dedicated offline llama.cpp Vulkan server. Queries use task: search result | query: and indexed passages use title: none | text: prompts. The server loads only the 270M text model, with no vision/audio projector. SQLite FTS5 lexical search remains independent from LanceDB dense search. Results are merged by reciprocal rank fusion, then the complete fused set is reranked by Jina Reranker v3.5 when its local Q8 GGUF worker and PR #26286 Vulkan helper are available.
 
 Low scope uses fewer retrieved candidates for quick checks.
 Medium scope uses the normal retrieval defaults.

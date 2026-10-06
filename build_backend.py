@@ -17,16 +17,13 @@ def build():
     
     hidden_imports = [
         "lancedb",
-        "tokenizers",
         "numpy",
-        "huggingface_hub",
         "uvicorn",
         "docx",
         "openpyxl",
         "pypdf",
         "pdfplumber",
         "pdfminer",
-        "cephalon_core.services.jina_reranker_worker",
     ]
     excluded_modules = [
         "transformers",
@@ -36,6 +33,12 @@ def build():
         "flax",
         "optimum",
         "accelerate",
+        "sentence_transformers",
+        "tokenizers",
+        "huggingface_hub",
+        "langchain",
+        "langchain_core",
+        "langchain_text_splitters",
     ]
     
     cmd = [
@@ -45,8 +48,6 @@ def build():
         "--onedir",
         "--name", "engine",
         "--add-data", add_data_arg("AI_SYSTEM_AWARENESS.md", "."),
-        "--add-data", add_data_arg("CEPHALON_ARCHITECTURE_DEEP_DIVE.html", "."),
-        "--runtime-hook", "python/cephalon_core/frozen_worker_hook.py",
         "python/main.py",
     ]
     

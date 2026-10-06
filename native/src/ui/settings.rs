@@ -17,16 +17,24 @@ impl NativeApp {
             }
         });
         let state = match info.as_ref() {
-            Some(model) if model.installed && model.verified => "installed · verified",
+            Some(model)
+                if model
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.status == "running")
+                    && model.verified =>
+            {
+                "running · verified"
+            }
+            Some(model) if model.installed && model.verified => "installed · verified · offline",
             Some(model) if model.installed => "installed · needs verification",
             _ => "not installed",
         };
-        let state_color = if state.contains("verified") {
+        let state_color = if state == "running · verified" {
             green()
         } else {
             yellow()
         };
-        let kind_download = kind.to_string();
         let kind_verify = kind.to_string();
         let kind_open = kind.to_string();
         let kind_delete = kind.to_string();
@@ -66,6 +74,43 @@ impl NativeApp {
                         "backend: {}",
                         model.selected_backend.as_deref().unwrap_or("not selected")
                     ))
+                    .child(if kind == "embedder" {
+                        format!(
+                            "{} dimensions · {} · {} · {}",
+                            model.dimension.unwrap_or_default(),
+                            model.precision.as_deref().unwrap_or("unknown precision"),
+                            model.pooling.as_deref().unwrap_or("unknown pooling"),
+                            model
+                                .runtime
+                                .as_ref()
+                                .and_then(|runtime| runtime.device.as_deref())
+                                .unwrap_or("device unavailable")
+                        )
+                    } else {
+                        format!(
+                            "{} · {} · listwise · {}",
+                            model.score_type.as_deref().unwrap_or("unknown score"),
+                            model.precision.as_deref().unwrap_or("unknown precision"),
+                            model
+                                .runtime
+                                .as_ref()
+                                .and_then(|runtime| runtime.device.as_deref())
+                                .unwrap_or("device unavailable")
+                        )
+                    })
+                    .child(
+                        model
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| {
+                                runtime
+                                    .last_error
+                                    .as_ref()
+                                    .or(runtime.last_failure.as_ref())
+                            })
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
             } else {
                 div()
                     .text_size(px(11.))
@@ -77,12 +122,10 @@ impl NativeApp {
                     .flex()
                     .gap_1()
                     .child(
-                        Button::new(format!("download-{kind}"))
-                            .label("Download")
-                            .secondary()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.download_fixed_model(kind_download.clone(), cx)
-                            })),
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted())
+                            .child("Install with scripts/setup_retrieval_models.py"),
                     )
                     .child(
                         Button::new(format!("verify-{kind}"))

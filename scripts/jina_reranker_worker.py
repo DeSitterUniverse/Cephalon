@@ -29,7 +29,12 @@ import json
 import os
 import struct
 import subprocess
-import sys
+import argparse
+import hashlib
+import importlib.metadata
+import logging
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -42,7 +47,7 @@ QUERY_EMBED_TOKEN_ID = 151671
 DOC_EMBED_TOKEN = "<|embed_token|>"
 QUERY_EMBED_TOKEN = "<|rerank_token|>"
 SCORE_TOKEN = "<|score_token|>"
-SPECIAL_TOKEN_STRINGS = (DOC_EMBED_TOKEN, QUERY_EMBED_TOKEN, SCORE_TOKEN)
+SPECIAL_TOKEN_STRINGS = (DOC_EMBED_TOKEN, QUERY_EMBED_TOKEN, SCORE_TOKEN, "<|im_start|>", "<|im_end|>", "<#CEPHALON_JINA_SEPARATOR#>")
 
 HIDDEN_SIZE = 1024
 PROJECTED_SIZE = 512
@@ -50,7 +55,7 @@ MAX_BLOCK_DOCUMENTS = 125
 MAX_QUERY_TOKENS = 2048
 MAX_DOCUMENT_TOKENS = 8192
 CONTEXT_ROUNDING_TOKENS = 256
-LLAMA_UBATCH_TOKENS = 512
+LLAMA_SEPARATOR = "<#CEPHALON_JINA_SEPARATOR#>"
 LLAMA_TIMEOUT_SECONDS = 180
 
 SYSTEM_PROMPT = (
@@ -101,7 +106,7 @@ def format_prompt(query: str, documents: list[str]) -> str:
 
 
 class MlpProjector:
-    """Float32 inference for Jina's bias-free 1024→512→512 projection."""
+    """Float32 inference for Jina's bias-free 1024â†’512â†’512 projection."""
 
     def __init__(self, first: np.ndarray, second: np.ndarray) -> None:
         if first.shape != (PROJECTED_SIZE, HIDDEN_SIZE):
@@ -192,23 +197,21 @@ class GgufReranker:
     ) -> None:
         from tokenizers import Tokenizer
 
-        from ..config import RERANKER_GGUF_FILE, RERANKER_PROJECTOR_FILE, RERANKER_TOKENIZER_FILE
-
-        self.model_path = model_dir / RERANKER_GGUF_FILE
+        self.model_path = model_dir / "jina-reranker-v3.5-Q8_0.gguf"
         self.llama_embedding_bin = llama_embedding_bin
         if not self.model_path.is_file():
             raise FileNotFoundError(f"Jina GGUF is missing: {self.model_path}.")
         if not self.llama_embedding_bin.is_file():
             raise FileNotFoundError(f"llama-embedding is missing: {self.llama_embedding_bin}.")
-        if not 4096 <= max_context_tokens <= 131072:
-            raise ValueError("max_context_tokens must be between 4,096 and 131,072.")
+        if not 16384 <= max_context_tokens <= 131072:
+            raise ValueError("max_context_tokens must be between 16,384 and 131,072.")
         self.device = device
         self.gpu_layers = gpu_layers
         self.max_context_tokens = max_context_tokens
-        self.tokenizer = Tokenizer.from_file(str(model_dir / RERANKER_TOKENIZER_FILE))
+        self.tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.tokenizer.no_padding()
         self.tokenizer.no_truncation()
-        self.projector = load_projector(model_dir / RERANKER_PROJECTOR_FILE)
+        self.projector = load_projector(model_dir / "projector.safetensors")
 
     def _truncate(self, text: str, maximum: int) -> tuple[str, int]:
         """Return tokenizer-exact text no longer than ``maximum`` tokens."""
@@ -230,10 +233,10 @@ class GgufReranker:
         clean_documents: list[str] = []
         lengths: list[int] = []
         for document in documents:
-            clean, length = self._truncate(document, MAX_DOCUMENT_TOKENS - 1)
+            clean, length = self._truncate(_sanitize(document), MAX_DOCUMENT_TOKENS - 1)
             clean_documents.append(clean)
             lengths.append(length)
-        clean_query, query_length = self._truncate(query, MAX_QUERY_TOKENS - 64)
+        clean_query, query_length = self._truncate(_sanitize(query), MAX_QUERY_TOKENS - 64)
 
         capacity = self.max_context_tokens - query_length
         current_tokens = query_length
@@ -254,6 +257,19 @@ class GgufReranker:
                 current_tokens = query_length
         if current:
             blocks.append(current)
+        # Two query copies and passage markup also consume context. Split any
+        # overflowing formatted block before launching the bounded helper.
+        pending = blocks
+        blocks = []
+        while pending:
+            block = pending.pop(0)
+            if len(self.tokenizer.encode(format_prompt(clean_query, block)).ids) <= self.max_context_tokens:
+                blocks.append(block)
+            elif len(block) > 1:
+                middle = len(block) // 2
+                pending[0:0] = [block[:middle], block[middle:]]
+            else:
+                raise ValueError("Single document exceeds the reranker context limit.")
         return clean_query, blocks
 
     def _score_block(self, query: str, documents: list[str]) -> tuple[np.ndarray, np.ndarray, float]:
@@ -292,15 +308,20 @@ class GgufReranker:
                 "--pooling",
                 "none",
                 "--embd-separator",
-                "<#CEPHALON_JINA_SEPARATOR#>",
+                LLAMA_SEPARATOR,
                 "--embd-normalize",
                 "-1",
                 "--embd-output-format",
                 "json",
                 "--output-token-ids",
                 f"{DOC_EMBED_TOKEN_ID},{QUERY_EMBED_TOKEN_ID}",
+                "--attention",
+                "causal",
+                "--verbose",
+                "--batch-size",
+                str(context_tokens),
                 "--ubatch-size",
-                str(LLAMA_UBATCH_TOKENS),
+                str(context_tokens),
                 "--ctx-size",
                 str(context_tokens),
                 "--flash-attn",
@@ -316,10 +337,15 @@ class GgufReranker:
                 command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=LLAMA_TIMEOUT_SECONDS,
                 check=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            for line in completed.stderr.splitlines():
+                if any(marker in line for marker in ("ggml_vulkan:", "offloaded", "n_ctx =", "n_ubatch =")):
+                    logging.info("%s", line)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"Vulkan reranking exceeded {LLAMA_TIMEOUT_SECONDS} seconds.") from exc
         except subprocess.CalledProcessError as exc:
@@ -346,6 +372,8 @@ class GgufReranker:
             raise RuntimeError(
                 f"Expected selected-token shape {(expected_rows, HIDDEN_SIZE)}, got {compact.shape}."
             )
+        if not np.isfinite(compact).all():
+            raise RuntimeError("llama-embedding returned non-finite hidden states.")
         # Encounter order is early query, every document, then late query.
         document_vectors = self.projector(compact[1:-1])
         query_vector = self.projector(compact[-1:])
@@ -378,7 +406,7 @@ class GgufReranker:
         scores = _cosine_scores(all_documents, fused_query)
         order = np.argsort(scores)[::-1]
         return [
-            {"index": int(index), "relevance_score": float(scores[index])}
+            {"index": int(index), "score": float(scores[index])}
             for index in order
         ]
 
@@ -387,44 +415,106 @@ def _cosine_scores(documents: np.ndarray, query: np.ndarray) -> np.ndarray:
     """Compute Jina's cosine equation with its exact numerical epsilon."""
 
     denominator = np.linalg.norm(documents, axis=1) * np.linalg.norm(query)
-    return (documents @ query) / (denominator + 1e-8)
+    scores = (documents @ query) / (denominator + 1e-8)
+    if not np.isfinite(scores).all():
+        raise RuntimeError("Jina projector returned non-finite cosine scores.")
+    # Roundoff can put an exact cosine just outside its mathematical range.
+    return np.clip(scores, -1.0, 1.0)
 
 
-def main(
-    model_dir: str,
-    llama_embedding_bin: str,
-    device: str,
-    gpu_layers: str,
-    max_context_tokens: str,
-) -> int:
-    """Serve newline-delimited rerank requests over stdio."""
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
 
-    reranker = GgufReranker(
-        Path(model_dir),
-        Path(llama_embedding_bin),
-        device,
-        int(gpu_layers),
-        int(max_context_tokens),
-    )
-    for line in sys.stdin:
-        request: dict[str, Any] = {}
-        try:
-            request = json.loads(line)
-            if not isinstance(request, dict):
-                raise TypeError("Reranker request must be a JSON object.")
-            results = reranker.rerank(
-                str(request["query"]),
-                [str(document) for document in request["documents"]],
-            )
-            response = {"id": request["id"], "results": results}
-        except Exception as exc:
-            response = {
-                "id": request.get("id"),
-                "error": str(exc),
-            }
-        print(json.dumps(response), flush=True)
-    return 0
+
+def verified_manifest(directory: Path, filename: str) -> dict:
+    manifest = json.loads((directory / filename).read_text(encoding="utf-8"))
+    for name, expected in manifest["files"].items():
+        path = (directory / name).resolve()
+        if not path.is_relative_to(directory.resolve()) or digest(path) != expected:
+            raise RuntimeError(f"Installed file checksum mismatch: {name}")
+    return manifest
+
+
+def handler_for(reranker: GgufReranker, identity: dict):
+    inference_lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code: int, value: dict):
+            body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/health":
+                self._send(200, {"status": "ready", **identity})
+            elif self.path == "/model":
+                self._send(200, identity)
+            else:
+                self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/rerank":
+                self._send(404, {"error": "not found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= length <= 2_000_000:
+                    raise ValueError("request must be between 1 and 2000000 bytes")
+                value = json.loads(self.rfile.read(length))
+                query, documents = value["query"], value["documents"]
+                if not isinstance(query, str) or not isinstance(documents, list) or len(documents) > 1024 or any(not isinstance(doc, str) for doc in documents):
+                    raise ValueError("query must be text and documents must be at most 1024 strings")
+            except (ValueError, TypeError, KeyError) as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            try:
+                with inference_lock:
+                    results = reranker.rerank(query, documents)
+                self._send(200, {"results": results})
+            except Exception as exc:
+                self._send(503, {"error": str(exc)})
+
+        def log_message(self, _format, *_args):
+            return
+
+    return Handler
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    parser = argparse.ArgumentParser(description="Offline Jina v3.5 listwise GGUF worker")
+    parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--llama-bin", type=Path, required=True)
+    parser.add_argument("--port", type=int, default=8091)
+    parser.add_argument("--device", default="Vulkan0")
+    parser.add_argument("--gpu-layers", type=int, default=99)
+    parser.add_argument("--max-context-tokens", type=int, default=32768)
+    args = parser.parse_args()
+    manifest = verified_manifest(args.model_dir, "cephalon-model-manifest.json")
+    runtime = verified_manifest(args.llama_bin.parent, "cephalon-runtime-manifest.json")
+    packages = {name: importlib.metadata.version(name) for name in manifest["packages"]}
+    if packages != manifest["packages"]:
+        raise RuntimeError(f"Jina worker requires pinned packages: {manifest['packages']}")
+    reranker = GgufReranker(args.model_dir, args.llama_bin, args.device, args.gpu_layers, args.max_context_tokens)
+    identity = {
+        "model_id": manifest["model_id"], "revision": manifest["revision"],
+        "precision": manifest["precision"], "score_type": "cosine",
+        "llama_cpp_revision": runtime["source_commit"],
+        "llama_bin_sha256": digest(args.llama_bin),
+        "manifest_sha256": digest(args.model_dir / "cephalon-model-manifest.json"),
+        "model_path": str(args.model_dir.resolve()), "packages": packages,
+        "device": args.device, "gpu_layers": args.gpu_layers,
+        "max_context_tokens": args.max_context_tokens,
+    }
+    ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(reranker, identity)).serve_forever()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(*sys.argv[1:6]))
+    main()

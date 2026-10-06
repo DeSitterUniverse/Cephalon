@@ -5,8 +5,8 @@ Cephalon is a local-first document workbench. It stores document metadata and ev
 ## Goals
 
 - Keep document search inspectable and local.
-- Use the fixed Jina Nano Retrieval Q8_0 embedder (normalized 768 dimensions) through a dedicated llama.cpp server.
-- Use Jina Reranker v3.5 listwise ranking in an isolated llama.cpp/Vulkan worker.
+- Use EmbeddingGemma 2 Text 270M Q8_0 GGUF (normalized 768 dimensions, asymmetric retrieval query/document prompts) through a dedicated offline llama.cpp Vulkan server.
+- Use Jina Reranker v3.5 Q8_0 listwise cosine ranking through the pinned PR #26286 Vulkan runtime.
 - Preserve page/layout/table provenance and show source, retrieval, and evidence diagnostics.
 - Keep chat generation on a separate, user-operated llama.cpp server.
 
