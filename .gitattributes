@@ -1,1 +1,3 @@
 *.pdf binary
+# The offline installer verifies this script against a pinned byte checksum.
+scripts/jina_reranker_worker.py text eol=lf
