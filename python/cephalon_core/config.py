@@ -36,7 +36,7 @@ RERANKER_FILE_SHA256 = {
     "projector.safetensors": "b14c3d97315ca33490e630218c821640f183180fd971c5c3242f5b81aadcedf9",
     "tokenizer.json": "4e95945ab0cef486709f760b81efcc7a6e75747f9165d13ead29159737455803",
 }
-RERANKER_WORKER_SHA256 = "daacbd5f52db8c33d23e95454b9e29d1dbc4cc31aeccd13b8fb38cd4617de533"
+RERANKER_WORKER_SHA256 = "ea5e122fdcb2891fc0675568dbb0bf0f641046d7bd2a1438b2eacc0d354fc46e"
 RERANKER_PACKAGES = {"numpy": "2.5.1", "tokenizers": "0.22.2"}
 
 
